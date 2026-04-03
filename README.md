@@ -1,6 +1,6 @@
 <div align="center">
 
-# Claude Proxy
+# Claude Cloak
 
 **Share one Claude Code account across multiple Windows devices — undetected.**
 
