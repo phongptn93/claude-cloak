@@ -12,6 +12,7 @@ Security:
 
 import base64
 import hashlib
+import json
 import logging
 import os
 import re
@@ -218,6 +219,59 @@ for h in CAPTURE_HEADERS:
 AUTH_TOKEN = decrypt_value(os.getenv("AUTH_TOKEN", ""), ENCRYPT_KEY)
 identity_captured = bool(captured_identity)
 
+# ============================================================
+# CLAUDE CREDENTIALS SYNC - Skip login trên máy khác
+# ============================================================
+CLAUDE_DIR = os.path.join(os.path.expanduser("~"), ".claude")
+CLAUDE_CREDS_PATH = os.path.join(CLAUDE_DIR, ".credentials.json")
+
+
+def sync_claude_credentials():
+    """
+    Đồng bộ ~/.claude/.credentials.json <-> .env
+
+    - Máy đã login: đọc .credentials.json → mã hóa lưu vào .env
+    - Máy mới (copy .env): giải mã từ .env → ghi ra .credentials.json → skip login
+    """
+    raw_creds_env = os.getenv("CLAUDE_CREDENTIALS", "")
+    has_creds_env = bool(raw_creds_env)
+    has_creds_file = os.path.exists(CLAUDE_CREDS_PATH)
+
+    if has_creds_file and not has_creds_env:
+        # Máy đã login → capture credentials vào .env
+        try:
+            with open(CLAUDE_CREDS_PATH, "r", encoding="utf-8") as f:
+                creds_json = f.read().strip()
+            if creds_json:
+                save_to_env("CLAUDE_CREDENTIALS", creds_json)
+                print(f"  {GREEN}Credentials captured tu {CLAUDE_CREDS_PATH}{RESET}")
+                print(f"  {YELLOW}Da luu vao .env (ma hoa) - Copy sang cac may khac!{RESET}")
+                print()
+        except OSError:
+            pass
+
+    elif has_creds_env and not has_creds_file:
+        # Máy mới, có credentials trong .env → ghi ra file để skip login
+        try:
+            creds_json = decrypt_value(raw_creds_env, ENCRYPT_KEY)
+            # Validate JSON
+            json.loads(creds_json)
+            os.makedirs(CLAUDE_DIR, exist_ok=True)
+            with open(CLAUDE_CREDS_PATH, "w", encoding="utf-8") as f:
+                f.write(creds_json)
+            # Set file permission 600 trên Linux
+            if sys.platform != "win32":
+                os.chmod(CLAUDE_CREDS_PATH, 0o600)
+            print(f"  {GREEN}Credentials restored → {CLAUDE_CREDS_PATH}{RESET}")
+            print(f"  {GREEN}Claude Code se skip login!{RESET}")
+            print()
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"  {RED}Loi restore credentials: {e}{RESET}")
+            print()
+
+
+sync_claude_credentials()
+
 http_client: httpx.AsyncClient | None = None
 request_count = 0
 
@@ -236,7 +290,8 @@ def save_password_hash():
 
 def save_to_env(key: str, value: str):
     """Lưu hoặc cập nhật 1 key trong .env file (mã hóa nếu có ENCRYPT_KEY)."""
-    store_value = encrypt_value(value, ENCRYPT_KEY) if key == "AUTH_TOKEN" else value
+    encrypted_keys = {"AUTH_TOKEN", "CLAUDE_CREDENTIALS"}
+    store_value = encrypt_value(value, ENCRYPT_KEY) if key in encrypted_keys else value
 
     if not os.path.exists(ENV_PATH):
         with open(ENV_PATH, "w") as f:
