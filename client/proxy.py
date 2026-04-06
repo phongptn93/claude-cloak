@@ -308,26 +308,10 @@ def capture_auth_from_request(request: Request):
     log("")
 
 
-def refresh_auth_from_request(request: Request):
-    """Cập nhật token MỚI khi token cũ bị 401 (hết hạn)."""
+def reset_auth_token():
+    """Xóa token cũ khi nhận 401, để request tiếp theo từ Claude (sau khi tự refresh OAuth) sẽ được bắt lại."""
     global AUTH_TOKEN
-
-    req_headers = {k.lower(): v for k, v in request.headers.items()}
-    incoming_auth = req_headers.get("authorization", "")
-
-    if not incoming_auth or incoming_auth == AUTH_TOKEN:
-        return
-
-    AUTH_TOKEN = incoming_auth
-    save_to_env("AUTH_TOKEN", incoming_auth)
-    save_password_hash()
-
-    encrypted_note = f" {GREEN}(encrypted){RESET}" if ENCRYPT_KEY else f" {YELLOW}(plaintext){RESET}"
-    log("")
-    log(f"  {BG_GREEN}{BOLD} TOKEN REFRESHED {RESET}{encrypted_note}")
-    log(f"  {GREEN}Token moi da luu vao .env{RESET}")
-    log(f"  {YELLOW}Copy file .env sang cac may khac!{RESET}")
-    log("")
+    AUTH_TOKEN = ""
 
 
 def print_banner():
@@ -493,8 +477,8 @@ async def proxy(path: str, request: Request):
         elif status == 401:
             status_str = f"{BG_RED}{BOLD} {status} UNAUTHORIZED {RESET}"
             log(f"           {RED}{BOLD}TOKEN HET HAN! Login lai tren 1 may bat ky{RESET}")
-            # Token hết hạn → cho phép bắt token mới từ request tiếp theo
-            refresh_auth_from_request(request)
+            # Xóa token cũ để request tiếp theo (sau khi Claude tự refresh OAuth) được bắt lại
+            reset_auth_token()
         elif status == 429:
             status_str = f"{BG_YELLOW}{BOLD} {status} RATE LIMITED {RESET}"
             log(f"           {YELLOW}Qua nhieu request - doi mot chut...{RESET}")
