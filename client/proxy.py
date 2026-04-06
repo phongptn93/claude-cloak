@@ -2,16 +2,14 @@
 Claude Proxy - Tất cả máy giả lập 1 thiết bị duy nhất.
 
 Flow:
-  - Máy đầu tiên: login Claude Code → proxy tự bắt TOÀN BỘ identity → lưu .env (mã hóa)
+  - Máy đầu tiên: login Claude Code → proxy tự bắt TOÀN BỘ identity headers → lưu .env
   - Các máy khác: copy .env → proxy inject identity đã bắt
+  - Authorization header: pass-through thẳng từ mỗi request, không lock/lưu
 
 Security:
-  - Token được mã hóa trong .env (AES)
-  - Lock toàn bộ fingerprint headers
+  - Lock toàn bộ fingerprint headers (user-agent, session-id, v.v.)
 """
 
-import base64
-import hashlib
 import json
 import logging
 import os
@@ -33,64 +31,6 @@ if sys.platform == "win32":
 
 ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 load_dotenv(ENV_PATH)
-
-# ============================================================
-# PASSWORD PROMPT - Nhập khi khởi động, không lưu vào file
-# ============================================================
-def prompt_password() -> str:
-    """Hỏi password khi khởi động. Bỏ trống = không mã hóa."""
-    if sys.platform == "win32":
-        os.system("")
-    print()
-    print(f"  \033[36m\033[1mClaude Proxy\033[0m")
-    print(f"  \033[2m{'─' * 40}\033[0m")
-    print(f"  \033[2mNhap password de ma hoa token (Enter = bo qua):\033[0m")
-    try:
-        import getpass
-        password = getpass.getpass(f"  \033[33mPassword: \033[0m")
-    except (EOFError, KeyboardInterrupt):
-        password = ""
-    return password.strip()
-
-
-# Check .env có token đã mã hóa chưa
-_raw_token = os.getenv("AUTH_TOKEN", "")
-_has_encrypted_data = _raw_token.startswith("ENC:")
-_password_hash = os.getenv("PASSWORD_HASH", "")
-
-if _has_encrypted_data:
-    # Có dữ liệu mã hóa → bắt buộc nhập password + verify
-    MAX_ATTEMPTS = 3
-    ENCRYPT_KEY = ""
-    for attempt in range(MAX_ATTEMPTS):
-        ENCRYPT_KEY = prompt_password()
-        if not ENCRYPT_KEY:
-            print(f"  \033[31mToken da ma hoa, bat buoc nhap password!\033[0m")
-            continue
-        # Verify password bằng hash đã lưu
-        if _password_hash:
-            import hashlib as _hl
-            check = _hl.sha256(ENCRYPT_KEY.encode()).hexdigest()[:16]
-            if check == _password_hash:
-                print(f"  \033[32mPassword chinh xac!\033[0m")
-                print()
-                break
-            else:
-                remaining = MAX_ATTEMPTS - attempt - 1
-                print(f"  \033[31mSai password! Con {remaining} lan thu.\033[0m")
-                ENCRYPT_KEY = ""
-                if remaining == 0:
-                    print(f"  \033[31mHet so lan thu. Proxy thoat.\033[0m")
-                    sys.exit(1)
-        else:
-            # Không có hash (file .env cũ) → chấp nhận
-            break
-elif _raw_token:
-    # Có token plaintext → hỏi muốn mã hóa không
-    ENCRYPT_KEY = prompt_password()
-else:
-    # Chưa có gì → hỏi muốn mã hóa không
-    ENCRYPT_KEY = prompt_password()
 
 # ============================================================
 # ANSI Colors
