@@ -228,9 +228,14 @@ CLAUDE_SETTINGS_PATH = os.path.join(CLAUDE_DIR, "settings.json")
 
 
 def save_auth_to_claude_settings(token: str):
-    """Lưu ANTHROPIC_AUTH_TOKEN vào ~/.claude/settings.json"""
+    """Lưu ANTHROPIC_API_KEY vào ~/.claude/settings.json để skip login."""
     if not token:
         return
+
+    # Lấy key thuần (bỏ prefix "Bearer ")
+    api_key = token
+    if api_key.lower().startswith("bearer "):
+        api_key = api_key[7:]
 
     os.makedirs(CLAUDE_DIR, exist_ok=True)
 
@@ -245,11 +250,11 @@ def save_auth_to_claude_settings(token: str):
     if "env" not in settings:
         settings["env"] = {}
 
-    # Nếu token đã giống → skip
-    if settings["env"].get("ANTHROPIC_AUTH_TOKEN") == token:
+    # Nếu key đã giống → skip
+    if settings["env"].get("ANTHROPIC_API_KEY") == api_key:
         return
 
-    settings["env"]["ANTHROPIC_AUTH_TOKEN"] = token
+    settings["env"]["ANTHROPIC_API_KEY"] = api_key
 
     with open(CLAUDE_SETTINGS_PATH, "w", encoding="utf-8") as f:
         json.dump(settings, f, indent=2, ensure_ascii=False)
