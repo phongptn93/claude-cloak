@@ -10,7 +10,6 @@ Security:
   - Lock toàn bộ fingerprint headers (user-agent, session-id, v.v.)
 """
 
-import json
 import logging
 import os
 import re
@@ -75,57 +74,6 @@ LOCAL_PORT = int(os.getenv("LOCAL_PORT", "9999"))
 ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 
 # ============================================================
-# ENCRYPTION - AES-256-GCM + PBKDF2-HMAC-SHA256
-# ============================================================
-SALT_SIZE = 16
-NONCE_SIZE = 12
-PBKDF2_ITERATIONS = 600_000
-
-
-def derive_key(password: str, salt: bytes) -> bytes:
-    """PBKDF2-HMAC-SHA256 → 32 bytes (AES-256 key)."""
-    return hashlib.pbkdf2_hmac("sha256", password.encode(), salt, PBKDF2_ITERATIONS)
-
-
-def encrypt_value(value: str, password: str) -> str:
-    """AES-256-GCM encrypt. Output: ENC:<base64(salt + nonce + tag + ciphertext)>"""
-    if not password:
-        return value
-    try:
-        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
-        salt = os.urandom(SALT_SIZE)
-        key = derive_key(password, salt)
-        nonce = os.urandom(NONCE_SIZE)
-        aesgcm = AESGCM(key)
-        ciphertext = aesgcm.encrypt(nonce, value.encode("utf-8"), None)
-        # ciphertext includes 16-byte GCM tag appended
-        payload = salt + nonce + ciphertext
-        return "ENC:" + base64.b64encode(payload).decode("ascii")
-    except Exception:
-        return value
-
-
-def decrypt_value(value: str, password: str) -> str:
-    """AES-256-GCM decrypt."""
-    if not password or not value.startswith("ENC:"):
-        return value
-    try:
-        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
-        payload = base64.b64decode(value[4:])
-        salt = payload[:SALT_SIZE]
-        nonce = payload[SALT_SIZE:SALT_SIZE + NONCE_SIZE]
-        ciphertext = payload[SALT_SIZE + NONCE_SIZE:]
-        key = derive_key(password, salt)
-        aesgcm = AESGCM(key)
-        plaintext = aesgcm.decrypt(nonce, ciphertext, None)
-        return plaintext.decode("utf-8")
-    except Exception:
-        return value
-
-
-# ============================================================
 # CAPTURED IDENTITY - Bắt từ request thật
 # ============================================================
 CAPTURE_HEADERS = [
@@ -145,6 +93,17 @@ CAPTURE_HEADERS = [
     "sec-fetch-mode",
 ]
 
+# Headers đã biết, không cần cảnh báo khi gặp
+KNOWN_HEADERS = set(CAPTURE_HEADERS) | {
+    # Excluded từ forward
+    "host", "content-length", "transfer-encoding",
+    # Sensitive / pass-through
+    "authorization", "x-api-key", "cookie",
+    # Common HTTP
+    "content-type", "accept", "connection", "cache-control",
+    "x-request-id", "x-forwarded-for", "x-real-ip",
+}
+
 
 def env_key(header: str) -> str:
     return "CAPTURED_" + header.upper().replace("-", "_")
@@ -154,10 +113,10 @@ captured_identity: dict[str, str] = {}
 for h in CAPTURE_HEADERS:
     val = os.getenv(env_key(h), "")
     if val:
-        captured_identity[h] = decrypt_value(val, ENCRYPT_KEY)
+        captured_identity[h] = val
 
-AUTH_TOKEN = decrypt_value(os.getenv("AUTH_TOKEN", ""), ENCRYPT_KEY)
 identity_captured = bool(captured_identity)
+warned_unknown_headers: set[str] = set()
 
 http_client: httpx.AsyncClient | None = None
 request_count = 0
@@ -167,31 +126,20 @@ def log(msg: str):
     logger.info(msg)
 
 
-def save_password_hash():
-    """Lưu hash của password vào .env để verify lần sau."""
-    if not ENCRYPT_KEY:
-        return
-    pw_hash = hashlib.sha256(ENCRYPT_KEY.encode()).hexdigest()[:16]
-    save_to_env("PASSWORD_HASH", pw_hash)
-
-
 def save_to_env(key: str, value: str):
-    """Lưu hoặc cập nhật 1 key trong .env file (mã hóa nếu có ENCRYPT_KEY)."""
-    encrypted_keys = {"AUTH_TOKEN"}
-    store_value = encrypt_value(value, ENCRYPT_KEY) if key in encrypted_keys else value
-
+    """Lưu hoặc cập nhật 1 key trong .env file."""
     if not os.path.exists(ENV_PATH):
         with open(ENV_PATH, "w") as f:
-            f.write(f"{key}={store_value}\n")
+            f.write(f"{key}={value}\n")
         return
 
     with open(ENV_PATH, "r") as f:
         content = f.read()
 
     if f"{key}=" in content:
-        content = re.sub(rf"{re.escape(key)}=.*", f"{key}={store_value}", content)
+        content = re.sub(rf"{re.escape(key)}=.*", f"{key}={value}", content)
     else:
-        content = content.rstrip("\n") + f"\n{key}={store_value}\n"
+        content = content.rstrip("\n") + f"\n{key}={value}\n"
 
     with open(ENV_PATH, "w") as f:
         f.write(content)
@@ -223,35 +171,18 @@ def capture_identity_from_request(request: Request):
         log("")
 
 
-def capture_auth_from_request(request: Request):
-    """Chỉ bắt token khi CHƯA CÓ. Không ghi đè token đã có."""
-    global AUTH_TOKEN
+def warn_unknown_headers(request: Request):
+    """Cảnh báo khi gặp header lạ chưa có trong danh sách đã biết."""
+    global warned_unknown_headers
 
-    if AUTH_TOKEN:
-        return  # Đã có token → không bắt lại
+    req_headers = {k.lower() for k in request.headers.keys()}
+    new_unknown = req_headers - KNOWN_HEADERS - warned_unknown_headers
 
-    req_headers = {k.lower(): v for k, v in request.headers.items()}
-    incoming_auth = req_headers.get("authorization", "")
-
-    if not incoming_auth:
-        return
-
-    AUTH_TOKEN = incoming_auth
-    save_to_env("AUTH_TOKEN", incoming_auth)
-    save_password_hash()
-
-    encrypted_note = f" {GREEN}(encrypted){RESET}" if ENCRYPT_KEY else f" {YELLOW}(plaintext){RESET}"
-    log("")
-    log(f"  {BG_GREEN}{BOLD} TOKEN CAPTURED {RESET}{encrypted_note}")
-    log(f"  {GREEN}Auth token da luu vao .env{RESET}")
-    log(f"  {YELLOW}Copy file .env sang cac may khac!{RESET}")
-    log("")
-
-
-def reset_auth_token():
-    """Xóa token cũ khi nhận 401, để request tiếp theo từ Claude (sau khi tự refresh OAuth) sẽ được bắt lại."""
-    global AUTH_TOKEN
-    AUTH_TOKEN = ""
+    for h in sorted(new_unknown):
+        warned_unknown_headers.add(h)
+        log(f"  {BG_YELLOW}{BOLD} HEADER LA {RESET} {YELLOW}{BOLD}{h}{RESET}{YELLOW}: {request.headers.get(h, '')}{RESET}")
+        log(f"  {YELLOW}Header nay chua co trong CAPTURE_HEADERS, kiem tra xem co can lock khong!{RESET}")
+        log("")
 
 
 def print_banner():
@@ -280,17 +211,13 @@ def mask_value(val: str, show=12) -> str:
 
 
 def print_status():
-    token_status = f"{GREEN}Ready{RESET}" if AUTH_TOKEN else f"{YELLOW}Waiting for login...{RESET}"
     identity_status = f"{GREEN}{len(captured_identity)} headers locked{RESET}" if identity_captured else f"{YELLOW}Waiting for first request...{RESET}"
-    encrypt_status = f"{GREEN}ON (password protected){RESET}" if ENCRYPT_KEY else f"{DIM}OFF (Enter de bo qua){RESET}"
 
     print(f"  {DIM}{'─' * 60}{RESET}")
     print(f"  {CYAN} Server      {RESET}{WHITE}http://localhost:{LOCAL_PORT}{RESET}")
     print(f"  {CYAN} Target      {RESET}{WHITE}{ANTHROPIC_BASE_URL}{RESET}")
     print(f"  {DIM}{'─' * 60}{RESET}")
-    print(f"  {CYAN} Token       {RESET}{token_status}")
     print(f"  {CYAN} Identity    {RESET}{identity_status}")
-    print(f"  {CYAN} Encryption  {RESET}{encrypt_status}")
     if identity_captured:
         print(f"  {DIM}{'─' * 60}{RESET}")
         for h, v in captured_identity.items():
@@ -331,20 +258,12 @@ def build_request_headers(request: Request) -> dict[str, str]:
         if k.lower() not in EXCLUDED_REQUEST_HEADERS
     }
 
-    # Override identity headers
+    # Override identity headers với giá trị đã lock
     if captured_identity:
         for k in list(headers.keys()):
             kl = k.lower()
             if kl in captured_identity:
                 headers[k] = captured_identity[kl]
-
-    # Override auth token
-    if AUTH_TOKEN:
-        auth_key = next((k for k in headers if k.lower() == "authorization"), None)
-        if auth_key:
-            headers[auth_key] = AUTH_TOKEN
-        else:
-            headers["Authorization"] = AUTH_TOKEN
 
     return headers
 
@@ -360,10 +279,9 @@ def filter_response_headers(response: httpx.Response) -> dict[str, str]:
 async def health():
     return {
         "status": "ok",
-        "has_token": bool(AUTH_TOKEN),
         "identity_captured": identity_captured,
         "headers_locked": len(captured_identity),
-        "encryption": bool(ENCRYPT_KEY),
+        "unknown_headers_seen": sorted(warned_unknown_headers),
     }
 
 
@@ -373,9 +291,9 @@ async def proxy(path: str, request: Request):
     request_count += 1
     req_id = request_count
 
-    # Auto-capture identity + token
+    # Auto-capture identity headers, cảnh báo header lạ
     capture_identity_from_request(request)
-    capture_auth_from_request(request)
+    warn_unknown_headers(request)
 
     target_url = f"{ANTHROPIC_BASE_URL}/{path}"
     headers = build_request_headers(request)
@@ -417,8 +335,6 @@ async def proxy(path: str, request: Request):
         elif status == 401:
             status_str = f"{BG_RED}{BOLD} {status} UNAUTHORIZED {RESET}"
             log(f"           {RED}{BOLD}TOKEN HET HAN! Login lai tren 1 may bat ky{RESET}")
-            # Xóa token cũ để request tiếp theo (sau khi Claude tự refresh OAuth) được bắt lại
-            reset_auth_token()
         elif status == 429:
             status_str = f"{BG_YELLOW}{BOLD} {status} RATE LIMITED {RESET}"
             log(f"           {YELLOW}Qua nhieu request - doi mot chut...{RESET}")
