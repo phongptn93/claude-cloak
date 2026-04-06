@@ -12,6 +12,9 @@ for /f "tokens=5" %%a in ('netstat -ano ^| findstr :9999 ^| findstr LISTENING') 
     taskkill /PID %%a /F >nul 2>&1
 )
 
+:: Auto-install dependencies if missing
+python -c "import httpx" >nul 2>&1 || pip install -r requirements.txt
+
 :: Auto-config Claude Code proxy URL
 python setup_claude.py
 
