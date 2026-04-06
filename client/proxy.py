@@ -219,45 +219,58 @@ for h in CAPTURE_HEADERS:
 AUTH_TOKEN = decrypt_value(os.getenv("AUTH_TOKEN", ""), ENCRYPT_KEY)
 identity_captured = bool(captured_identity)
 
-
 # ============================================================
-# SAVE AUTH TOKEN TO CLAUDE SETTINGS
+# CLAUDE CREDENTIALS SYNC - Skip login trên máy khác
 # ============================================================
 CLAUDE_DIR = os.path.join(os.path.expanduser("~"), ".claude")
-CLAUDE_SETTINGS_PATH = os.path.join(CLAUDE_DIR, "settings.json")
+CLAUDE_CREDS_PATH = os.path.join(CLAUDE_DIR, ".credentials.json")
 
 
-def save_auth_to_claude_settings(token: str):
-    """Lưu ANTHROPIC_AUTH_TOKEN vào ~/.claude/settings.json"""
-    if not token:
-        return
+def sync_claude_credentials():
+    """
+    Đồng bộ ~/.claude/.credentials.json <-> .env
 
-    os.makedirs(CLAUDE_DIR, exist_ok=True)
+    - Máy đã login: đọc .credentials.json → mã hóa lưu vào .env
+    - Máy mới (copy .env): giải mã từ .env → ghi ra .credentials.json → skip login
+    """
+    raw_creds_env = os.getenv("CLAUDE_CREDENTIALS", "")
+    has_creds_env = bool(raw_creds_env)
+    has_creds_file = os.path.exists(CLAUDE_CREDS_PATH)
 
-    settings = {}
-    if os.path.exists(CLAUDE_SETTINGS_PATH):
+    if has_creds_file and not has_creds_env:
+        # Máy đã login → capture credentials vào .env
         try:
-            with open(CLAUDE_SETTINGS_PATH, "r", encoding="utf-8") as f:
-                settings = json.load(f)
-        except (json.JSONDecodeError, OSError):
-            settings = {}
+            with open(CLAUDE_CREDS_PATH, "r", encoding="utf-8") as f:
+                creds_json = f.read().strip()
+            if creds_json:
+                save_to_env("CLAUDE_CREDENTIALS", creds_json)
+                print(f"  {GREEN}Credentials captured tu {CLAUDE_CREDS_PATH}{RESET}")
+                print(f"  {YELLOW}Da luu vao .env (ma hoa) - Copy sang cac may khac!{RESET}")
+                print()
+        except OSError:
+            pass
 
-    if "env" not in settings:
-        settings["env"] = {}
+    elif has_creds_env and not has_creds_file:
+        # Máy mới, có credentials trong .env → ghi ra file để skip login
+        try:
+            creds_json = decrypt_value(raw_creds_env, ENCRYPT_KEY)
+            # Validate JSON
+            json.loads(creds_json)
+            os.makedirs(CLAUDE_DIR, exist_ok=True)
+            with open(CLAUDE_CREDS_PATH, "w", encoding="utf-8") as f:
+                f.write(creds_json)
+            # Set file permission 600 trên Linux
+            if sys.platform != "win32":
+                os.chmod(CLAUDE_CREDS_PATH, 0o600)
+            print(f"  {GREEN}Credentials restored → {CLAUDE_CREDS_PATH}{RESET}")
+            print(f"  {GREEN}Claude Code se skip login!{RESET}")
+            print()
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"  {RED}Loi restore credentials: {e}{RESET}")
+            print()
 
-    # Nếu token đã giống → skip
-    if settings["env"].get("ANTHROPIC_AUTH_TOKEN") == token:
-        return
 
-    settings["env"]["ANTHROPIC_AUTH_TOKEN"] = token
-
-    with open(CLAUDE_SETTINGS_PATH, "w", encoding="utf-8") as f:
-        json.dump(settings, f, indent=2, ensure_ascii=False)
-
-
-# Lưu token khi khởi động (nếu đã giải mã được)
-if AUTH_TOKEN:
-    save_auth_to_claude_settings(AUTH_TOKEN)
+sync_claude_credentials()
 
 http_client: httpx.AsyncClient | None = None
 request_count = 0
@@ -277,7 +290,8 @@ def save_password_hash():
 
 def save_to_env(key: str, value: str):
     """Lưu hoặc cập nhật 1 key trong .env file (mã hóa nếu có ENCRYPT_KEY)."""
-    store_value = encrypt_value(value, ENCRYPT_KEY) if key == "AUTH_TOKEN" else value
+    encrypted_keys = {"AUTH_TOKEN", "CLAUDE_CREDENTIALS"}
+    store_value = encrypt_value(value, ENCRYPT_KEY) if key in encrypted_keys else value
 
     if not os.path.exists(ENV_PATH):
         with open(ENV_PATH, "w") as f:
@@ -338,12 +352,11 @@ def capture_auth_from_request(request: Request):
     AUTH_TOKEN = incoming_auth
     save_to_env("AUTH_TOKEN", incoming_auth)
     save_password_hash()
-    save_auth_to_claude_settings(incoming_auth)
 
     encrypted_note = f" {GREEN}(encrypted){RESET}" if ENCRYPT_KEY else f" {YELLOW}(plaintext){RESET}"
     log("")
     log(f"  {BG_GREEN}{BOLD} TOKEN CAPTURED {RESET}{encrypted_note}")
-    log(f"  {GREEN}Auth token da luu vao .env + Claude settings{RESET}")
+    log(f"  {GREEN}Auth token da luu vao .env{RESET}")
     log(f"  {YELLOW}Copy file .env sang cac may khac!{RESET}")
     log("")
 
@@ -361,12 +374,11 @@ def refresh_auth_from_request(request: Request):
     AUTH_TOKEN = incoming_auth
     save_to_env("AUTH_TOKEN", incoming_auth)
     save_password_hash()
-    save_auth_to_claude_settings(incoming_auth)
 
     encrypted_note = f" {GREEN}(encrypted){RESET}" if ENCRYPT_KEY else f" {YELLOW}(plaintext){RESET}"
     log("")
     log(f"  {BG_GREEN}{BOLD} TOKEN REFRESHED {RESET}{encrypted_note}")
-    log(f"  {GREEN}Token moi da luu vao .env + Claude settings{RESET}")
+    log(f"  {GREEN}Token moi da luu vao .env{RESET}")
     log(f"  {YELLOW}Copy file .env sang cac may khac!{RESET}")
     log("")
 
