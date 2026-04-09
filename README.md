@@ -2,79 +2,72 @@
 
 # Claude Cloak
 
-**Share one Claude Code account across multiple Windows devices — undetected.**
+**Dùng chung một tài khoản Claude Code trên nhiều máy Windows — không bị phát hiện.**
 
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
-[![AES-256](https://img.shields.io/badge/Encryption-AES--256--GCM-success)](https://en.wikipedia.org/wiki/Galois/Counter_Mode)
 [![License](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
 
 <img src="https://img.shields.io/badge/Windows-0078D6?logo=windows&logoColor=white" alt="Windows"> <img src="https://img.shields.io/badge/Claude_Code-VS_Code-7C3AED?logo=visual-studio-code" alt="VS Code">
 
 ---
 
-*Local transparent proxy that makes all your devices appear as a single machine to Anthropic.*
+*Proxy nội bộ trong suốt — giả lập tất cả các máy thành một thiết bị duy nhất với Anthropic.*
 
 <img src="assets/screenshot.png" alt="Claude Proxy" width="700">
 
 </div>
 
-## Features
+## Cách hoạt động
 
-| Feature | Description |
-|---------|-------------|
-| **Auto-Capture** | Automatically captures auth token + device identity from first login |
-| **14 Headers Locked** | user-agent, session-id, stainless-*, anthropic-beta, and more |
-| **AES-256-GCM Encryption** | Token encrypted with password-derived key (PBKDF2, 600K iterations) |
-| **Password on Startup** | Encryption key never stored on disk — entered at launch |
-| **Password Verification** | SHA-256 hash check prevents wrong-password silent failures |
-| **Token Refresh** | Auto-detects 401 and captures new token on re-login |
-| **Auto-Config** | Automatically sets `ANTHROPIC_BASE_URL` in Claude Code settings |
-| **Zero Config** | Just run `start.bat` — everything else is automatic |
+- **Máy đầu tiên** đăng nhập Claude Code → proxy tự động bắt 14 identity headers → lưu vào `.env`
+- **Các máy khác** copy file `.env` → proxy inject headers đã lock vào mọi request
+- **Authorization header** (auth token) luôn pass-through thẳng từ mỗi request — không lưu, không chia sẻ
+
+Kết quả: tất cả máy gửi cùng một fingerprint thiết bị tới Anthropic.
+
+## Tính năng
+
+| Tính năng | Mô tả |
+|-----------|-------|
+| **Auto-Capture** | Tự động bắt 14 identity headers từ request đầu tiên của Claude Code |
+| **14 Headers Locked** | user-agent, session-id, stainless-*, anthropic-beta, v.v. |
+| **Header Warning** | Cảnh báo khi phát hiện header lạ chưa có trong danh sách lock |
+| **Auto-Config** | Tự động set `ANTHROPIC_BASE_URL` trong settings của Claude Code |
+| **Zero Config** | Chỉ cần chạy `start.bat` — mọi thứ còn lại tự động |
 
 ## Quick Start
 
-### First Device (one-time setup)
+### Máy đầu tiên (thiết lập một lần)
 
 ```bash
 cd client
-install.bat       # Install dependencies
-start.bat         # Start proxy + auto-config Claude Code
+install.bat       # Cài dependencies
+start.bat         # Khởi động proxy + tự config Claude Code
 ```
 
-Open Claude Code in VS Code and **log in normally**. The proxy captures everything automatically.
+Mở Claude Code trong VS Code và **đăng nhập bình thường**. Proxy tự động bắt identity headers từ request đầu tiên.
 
-### Other Devices
+### Các máy khác
 
 ```bash
 cd client
-install.bat       # Install dependencies
+install.bat       # Cài dependencies
 ```
 
-Copy the **`.env` file** from the first device, then:
+Copy file **`.env`** từ máy đầu tiên sang, sau đó:
 
 ```bash
-start.bat         # Start proxy (enter same password)
+start.bat         # Khởi động proxy
 ```
 
-No login needed. The proxy injects the captured token and identity.
+Proxy sẽ inject identity headers đã lock. Mỗi máy vẫn đăng nhập bằng tài khoản của mình — chỉ fingerprint thiết bị là giống nhau.
 
 ## Security
 
-### Encryption
-
-| Layer | Detail |
-|-------|--------|
-| **Key Derivation** | PBKDF2-HMAC-SHA256 — 600,000 iterations + random salt |
-| **Cipher** | AES-256-GCM — authenticated encryption |
-| **Nonce** | 12 bytes random per encryption |
-| **Auth Tag** | GCM tag — tamper detection |
-| **Password** | Never written to disk — entered at startup, held in memory only |
-| **Verification** | SHA-256 hash check — wrong password caught immediately |
-
 ### Headers Spoofed
 
-All devices send identical fingerprints:
+Tất cả máy sẽ gửi cùng một fingerprint thiết bị:
 
 | Header | Purpose |
 |--------|---------|
@@ -92,16 +85,6 @@ All devices send identical fingerprints:
 | `x-stainless-package-version` | SDK version |
 | `accept-encoding` | Compression support |
 | `sec-fetch-mode` | Fetch metadata |
-
-## Token Lifecycle
-
-| State | Trigger | Action |
-|-------|---------|--------|
-| **No Token** | First launch | Proxy waits for login, captures token from first request |
-| **Captured** | Login detected | Token saved to `.env` (encrypted) — copy to other devices |
-| **Active** | Normal usage | Token injected into all requests |
-| **Expired** | 401 response | Proxy flags expiry, allows refresh on next login |
-| **Refreshed** | Re-login | New token saved — copy updated `.env` to other devices |
 
 ## Project Structure
 
@@ -125,15 +108,15 @@ client/
 
 ## Troubleshooting
 
-| Problem | Solution |
-|---------|----------|
-| Port 9999 already in use | `start.bat` auto-kills old process. Or change `LOCAL_PORT` in `.env` |
-| Token expired (401) | Re-login on any device, proxy auto-refreshes, copy `.env` |
-| Wrong password on startup | 3 attempts max, then proxy exits. Re-run `start.bat` |
-| Empty response from API | Check proxy console for error status codes |
+| Vấn đề | Giải pháp |
+|--------|-----------|
+| Port 9999 đang bị dùng | `start.bat` tự kill process cũ. Hoặc đổi `LOCAL_PORT` trong `.env` |
+| Token hết hạn (401) | Đăng nhập lại trên bất kỳ máy nào, copy `.env` sang các máy khác |
+| Headers lạ xuất hiện | Kiểm tra console — proxy sẽ cảnh báo header chưa có trong danh sách lock |
+| Response rỗng từ API | Kiểm tra console proxy để xem status code lỗi |
 
 ---
 
 <div align="center">
-<sub>Built for sharing Claude Code across devices on Windows.</sub>
+<sub>Xây dựng cho việc dùng Claude Code trên nhiều máy Windows.</sub>
 </div>
