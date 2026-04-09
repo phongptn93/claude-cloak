@@ -4,4 +4,3 @@ Pillow>=10.4.0
 python-dotenv==1.0.1
 fastapi==0.115.0
 uvicorn==0.30.6
-cryptography==44.0.0
