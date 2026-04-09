@@ -1,18 +1,31 @@
 """
-Claude Proxy - Tất cả máy giả lập 1 thiết bị duy nhất.
+Claude Cloak Proxy - Maximum anonymity multi-device proxy.
 
 Flow:
   - Máy đầu tiên: login Claude Code → proxy tự bắt TOÀN BỘ identity headers → lưu .env
   - Các máy khác: copy .env → proxy inject identity đã bắt
   - Authorization header: pass-through thẳng từ mỗi request, không lock/lưu
 
-Security:
-  - Lock toàn bộ fingerprint headers (user-agent, session-id, v.v.)
+Security Layers:
+  1. Header locking - Tất cả device gửi fingerprint giống hệt nhau
+  2. Telemetry blocking - Chặn mọi endpoint thu thập thông tin thiết bị
+  3. Body sanitization - Xóa machine-identifying fields từ request body
+  4. IP header stripping - Xóa headers lộ IP thật (X-Forwarded-For, etc.)
+  5. Cookie isolation - Chặn cookie tracking cross-device
+  6. Response sanitization - Xóa tracking headers từ response
+  7. Request timing jitter - Random delay để mask multi-device patterns
+  8. Consistent request IDs - Dùng HMAC-based IDs thay vì random per-device
 """
 
+import asyncio
+import hashlib
+import hmac
+import json
 import logging
 import os
+import random
 import re
+import secrets
 import sys
 import time
 from contextlib import asynccontextmanager
@@ -22,7 +35,7 @@ import httpx
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 # Enable ANSI colors on Windows
 if sys.platform == "win32":
@@ -74,27 +87,151 @@ LOCAL_PORT = int(os.getenv("LOCAL_PORT", "9999"))
 ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 
 # ============================================================
+# CONSISTENT SESSION SECRET
+# Per-proxy-instance secret for deterministic ID generation.
+# All devices using same .env will produce same derived IDs.
+# Saved to .env automatically when identity is first captured
+# via capture_identity_from_request().
+# ============================================================
+SESSION_SECRET = os.getenv("SESSION_SECRET", "")
+if not SESSION_SECRET:
+    SESSION_SECRET = secrets.token_hex(32)
+
+# ============================================================
+# TELEMETRY BLOCKING
+# Block endpoints that send device telemetry/analytics data.
+# Returns fake success responses instead of forwarding.
+# ============================================================
+BLOCKED_PATH_PATTERNS = [
+    r"^v1/telemetry",
+    r"^v1/analytics",
+    r"^v1/log",
+    r"^v1/events",
+    r"^v1/diagnostics",
+    r"^v1/metrics",
+    r"^v1/track",
+    r"^v1/report",
+    r"^telemetry",
+    r"^analytics",
+    r"^log_event",
+    r"^sentry",
+    r"^bugsnag",
+]
+
+BLOCKED_PATH_REGEX = [re.compile(p, re.IGNORECASE) for p in BLOCKED_PATH_PATTERNS]
+
+# ============================================================
+# BODY SANITIZATION
+# Fields in JSON request bodies that could identify individual
+# devices. These are replaced with consistent fake values.
+# ============================================================
+SANITIZE_BODY_FIELDS = {
+    "machine_id", "machineId", "machine-id",
+    "device_id", "deviceId", "device-id",
+    "hostname", "host_name",
+    "computer_name", "computerName",
+    "username", "user_name", "userName",
+    "home_dir", "homeDir", "home_directory",
+    "os_version", "osVersion",
+    "os_release", "osRelease",
+    "platform_version", "platformVersion",
+    "mac_address", "macAddress",
+    "hardware_id", "hardwareId",
+    "installation_id", "installationId",
+    "instance_id", "instanceId",
+    "client_id", "clientId",
+    "workspace_id", "workspaceId",
+    "vscode_machine_id", "vscodeMachineId",
+    "vscode_session_id", "vscodeSessionId",
+}
+
+# Nested objects/paths that could contain device info
+SANITIZE_BODY_OBJECTS = {
+    "system_info", "systemInfo",
+    "device_info", "deviceInfo",
+    "machine_info", "machineInfo",
+    "environment_info", "environmentInfo",
+    "telemetry", "diagnostics",
+}
+
+# Pre-computed normalized sets for fast lookup during body sanitization
+_SANITIZE_FIELDS_NORMALIZED = {s.lower().replace("-", "_") for s in SANITIZE_BODY_FIELDS}
+_SANITIZE_OBJECTS_NORMALIZED = {s.lower().replace("-", "_") for s in SANITIZE_BODY_OBJECTS}
+
+# ============================================================
 # CAPTURED IDENTITY - Bắt từ request thật
+# Expanded header list for maximum fingerprint coverage
 # ============================================================
 CAPTURE_HEADERS = [
+    # Core identity
     "user-agent",
     "x-claude-code-session-id",
     "x-app",
+    # Anthropic-specific
     "anthropic-beta",
     "anthropic-version",
     "anthropic-dangerous-direct-browser-access",
+    # Stainless SDK fingerprint
     "x-stainless-os",
     "x-stainless-arch",
     "x-stainless-runtime",
     "x-stainless-runtime-version",
     "x-stainless-lang",
     "x-stainless-package-version",
+    "x-stainless-retry-count",
+    "x-stainless-read-timeout",
+    # HTTP metadata
     "accept-encoding",
+    "accept-language",
     "sec-fetch-mode",
+    "sec-fetch-site",
+    "sec-fetch-dest",
+    # Additional tracking vectors
+    "origin",
+    "referer",
+    "x-client-version",
+    "x-client-name",
 ]
 
+# Headers that MUST be stripped from outgoing requests (IP/tracking leaks)
+STRIP_REQUEST_HEADERS = {
+    "x-forwarded-for",
+    "x-real-ip",
+    "x-forwarded-host",
+    "x-forwarded-proto",
+    "x-forwarded-port",
+    "forwarded",
+    "via",
+    "x-client-ip",
+    "cf-connecting-ip",
+    "true-client-ip",
+    "x-cluster-client-ip",
+    "x-originating-ip",
+    "x-remote-ip",
+    "x-remote-addr",
+    "proxy-connection",
+}
+
+# Headers to strip from upstream responses (tracking prevention)
+STRIP_RESPONSE_HEADERS = {
+    "content-length", "transfer-encoding", "content-encoding",
+    "connection", "keep-alive",
+    # Tracking/fingerprint headers from server
+    "server-timing",
+    "x-trace-id",
+    "x-span-id",
+    "x-request-id",
+    "x-correlation-id",
+    "x-amzn-trace-id",
+    "x-amzn-requestid",
+    "x-ray-trace-id",
+    "nel",
+    "report-to",
+    "reporting-endpoints",
+}
+
 # Headers đã biết, không cần cảnh báo khi gặp
-KNOWN_HEADERS = set(CAPTURE_HEADERS) | {
+KNOWN_HEADERS = set(h.lower() for h in CAPTURE_HEADERS) | STRIP_REQUEST_HEADERS | {
     # Excluded từ forward
     "host", "content-length", "transfer-encoding",
     # Sensitive / pass-through
@@ -102,7 +239,21 @@ KNOWN_HEADERS = set(CAPTURE_HEADERS) | {
     # Common HTTP
     "content-type", "accept", "connection", "cache-control",
     "x-request-id", "x-forwarded-for", "x-real-ip",
+    "traceparent", "tracestate",
+    "pragma", "upgrade-insecure-requests",
+    "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform",
+    "dnt", "tk",
 }
+
+# ============================================================
+# REQUEST TIMING JITTER
+# Add random delay to mask multi-device timing patterns.
+# Prevents Anthropic from detecting simultaneous requests
+# from "the same device" that arrive at different times.
+# ============================================================
+TIMING_JITTER_ENABLED = os.getenv("TIMING_JITTER", "true").lower() == "true"
+TIMING_JITTER_MIN_MS = int(os.getenv("TIMING_JITTER_MIN_MS", "10"))
+TIMING_JITTER_MAX_MS = int(os.getenv("TIMING_JITTER_MAX_MS", "150"))
 
 
 def env_key(header: str) -> str:
@@ -117,6 +268,8 @@ for h in CAPTURE_HEADERS:
 
 identity_captured = bool(captured_identity)
 warned_unknown_headers: set[str] = set()
+blocked_requests_count = 0
+sanitized_bodies_count = 0
 
 http_client: httpx.AsyncClient | None = None
 request_count = 0
@@ -145,6 +298,83 @@ def save_to_env(key: str, value: str):
         f.write(content)
 
 
+def generate_consistent_id(seed: str) -> str:
+    """Generate a consistent ID using HMAC so all devices produce the same value."""
+    return hmac.new(
+        SESSION_SECRET.encode(),
+        seed.encode(),
+        hashlib.sha256,
+    ).hexdigest()[:32]
+
+
+def is_blocked_path(path: str) -> bool:
+    """Check if path matches any blocked telemetry pattern."""
+    for pattern in BLOCKED_PATH_REGEX:
+        if pattern.search(path):
+            return True
+    return False
+
+
+def sanitize_body(body: bytes, content_type: str | None) -> bytes:
+    """Strip device-identifying fields from JSON request bodies."""
+    global sanitized_bodies_count
+
+    if not body:
+        return body
+
+    if not content_type or "json" not in content_type.lower():
+        return body
+
+    try:
+        data = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return body
+
+    if not isinstance(data, dict):
+        return body
+
+    changed = _sanitize_dict(data)
+
+    if changed:
+        sanitized_bodies_count += 1
+        return json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode()
+
+    return body
+
+
+def _sanitize_dict(data: dict) -> bool:
+    """Recursively sanitize a dict. Returns True if any field was modified."""
+    changed = False
+
+    for key in list(data.keys()):
+        key_lower = key.lower().replace("-", "_")
+
+        # Remove entire objects that contain device info
+        if key in SANITIZE_BODY_OBJECTS or key_lower in _SANITIZE_OBJECTS_NORMALIZED:
+            data[key] = {}
+            changed = True
+            continue
+
+        # Replace identifying string fields with consistent fakes
+        if key in SANITIZE_BODY_FIELDS or key_lower in _SANITIZE_FIELDS_NORMALIZED:
+            if isinstance(data[key], str) and data[key]:
+                data[key] = generate_consistent_id(key)
+                changed = True
+            continue
+
+        # Recurse into nested dicts
+        if isinstance(data[key], dict):
+            if _sanitize_dict(data[key]):
+                changed = True
+        elif isinstance(data[key], list):
+            for item in data[key]:
+                if isinstance(item, dict):
+                    if _sanitize_dict(item):
+                        changed = True
+
+    return changed
+
+
 def capture_identity_from_request(request: Request):
     global identity_captured, captured_identity
 
@@ -161,6 +391,10 @@ def capture_identity_from_request(request: Request):
 
     if captured_identity:
         identity_captured = True
+
+        # Save session secret for consistent ID generation across devices
+        save_to_env("SESSION_SECRET", SESSION_SECRET)
+
         log("")
         log(f"  {BG_GREEN}{BOLD} IDENTITY CAPTURED {RESET}")
         log(f"  {GREEN}Da bat {len(captured_identity)} headers tu Claude Code:{RESET}")
@@ -194,12 +428,12 @@ def print_banner():
     ██║     ██║     ██╔══██║██║   ██║██║  ██║██╔══╝
     ╚██████╗███████╗██║  ██║╚██████╔╝██████╔╝███████╗
      ╚═════╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚══════╝
-{RESET}{CYAN}{BOLD}               ██████╗ ██████╗  ██████╗ ██╗  ██╗██╗   ██╗
-               ██╔══██╗██╔══██╗██╔═══██╗╚██╗██╔╝╚██╗ ██╔╝
-               ██████╔╝██████╔╝██║   ██║ ╚███╔╝  ╚████╔╝
-               ██╔═══╝ ██╔══██╗██║   ██║ ██╔██╗   ╚██╔╝
-               ██║     ██║  ██║╚██████╔╝██╔╝ ██╗   ██║
-               ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝{RESET}
+{RESET}{CYAN}{BOLD}               ██████╗██╗      ██████╗  █████╗ ██╗  ██╗
+              ██╔════╝██║     ██╔═══██╗██╔══██╗██║ ██╔╝
+              ██║     ██║     ██║   ██║███████║█████╔╝
+              ██║     ██║     ██║   ██║██╔══██║██╔═██╗
+              ╚██████╗███████╗╚██████╔╝██║  ██║██║  ██╗
+               ╚═════╝╚══════╝ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝{RESET}
 """
     print(banner)
 
@@ -213,11 +447,18 @@ def mask_value(val: str, show=12) -> str:
 def print_status():
     identity_status = f"{GREEN}{len(captured_identity)} headers locked{RESET}" if identity_captured else f"{YELLOW}Waiting for first request...{RESET}"
 
+    jitter_status = f"{GREEN}ON ({TIMING_JITTER_MIN_MS}-{TIMING_JITTER_MAX_MS}ms){RESET}" if TIMING_JITTER_ENABLED else f"{YELLOW}OFF{RESET}"
+    telemetry_status = f"{GREEN}{len(BLOCKED_PATH_PATTERNS)} patterns blocked{RESET}"
+
     print(f"  {DIM}{'─' * 60}{RESET}")
     print(f"  {CYAN} Server      {RESET}{WHITE}http://localhost:{LOCAL_PORT}{RESET}")
     print(f"  {CYAN} Target      {RESET}{WHITE}{ANTHROPIC_BASE_URL}{RESET}")
     print(f"  {DIM}{'─' * 60}{RESET}")
     print(f"  {CYAN} Identity    {RESET}{identity_status}")
+    print(f"  {CYAN} Telemetry   {RESET}{telemetry_status}")
+    print(f"  {CYAN} Timing      {RESET}{jitter_status}")
+    print(f"  {CYAN} Body Scrub  {RESET}{GREEN}{len(SANITIZE_BODY_FIELDS)} fields monitored{RESET}")
+    print(f"  {CYAN} IP Strip    {RESET}{GREEN}{len(STRIP_REQUEST_HEADERS)} headers stripped{RESET}")
     if identity_captured:
         print(f"  {DIM}{'─' * 60}{RESET}")
         for h, v in captured_identity.items():
@@ -230,21 +471,22 @@ def print_status():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global http_client
-    http_client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0))
+    http_client = httpx.AsyncClient(
+        timeout=httpx.Timeout(300.0, connect=10.0),
+        limits=httpx.Limits(
+            max_connections=10,
+            max_keepalive_connections=5,
+            keepalive_expiry=30.0,
+        ),
+    )
     print_banner()
     print_status()
     yield
     await http_client.aclose()
 
 
-app = FastAPI(title="Claude Proxy", lifespan=lifespan)
+app = FastAPI(title="Claude Cloak", lifespan=lifespan)
 
-
-# Headers không forward từ upstream response
-EXCLUDED_RESPONSE_HEADERS = {
-    "content-length", "transfer-encoding", "content-encoding",
-    "connection", "keep-alive",
-}
 
 # Headers không forward từ client request
 EXCLUDED_REQUEST_HEADERS = {
@@ -253,10 +495,24 @@ EXCLUDED_REQUEST_HEADERS = {
 
 
 def build_request_headers(request: Request) -> dict[str, str]:
-    headers = {
-        k: v for k, v in request.headers.items()
-        if k.lower() not in EXCLUDED_REQUEST_HEADERS
-    }
+    headers = {}
+
+    for k, v in request.headers.items():
+        kl = k.lower()
+
+        # Skip excluded headers
+        if kl in EXCLUDED_REQUEST_HEADERS:
+            continue
+
+        # Strip IP-leaking headers
+        if kl in STRIP_REQUEST_HEADERS:
+            continue
+
+        # Strip cookies to prevent cross-device tracking
+        if kl == "cookie":
+            continue
+
+        headers[k] = v
 
     # Override identity headers với giá trị đã lock
     if captured_identity:
@@ -265,13 +521,27 @@ def build_request_headers(request: Request) -> dict[str, str]:
             if kl in captured_identity:
                 headers[k] = captured_identity[kl]
 
+        # Add any captured headers that aren't in the request
+        # (ensures consistent fingerprint even if client omits some)
+        existing_lower = {k.lower() for k in headers}
+        for h, v in captured_identity.items():
+            if h not in existing_lower:
+                headers[h] = v
+
+    # Replace x-request-id with a fresh random UUID to avoid
+    # leaking per-device identifiers while keeping each request unique
+    for k in list(headers.keys()):
+        if k.lower() == "x-request-id":
+            headers[k] = secrets.token_hex(16)
+            break
+
     return headers
 
 
 def filter_response_headers(response: httpx.Response) -> dict[str, str]:
     return {
         k: v for k, v in response.headers.items()
-        if k.lower() not in EXCLUDED_RESPONSE_HEADERS
+        if k.lower() not in STRIP_RESPONSE_HEADERS
     }
 
 
@@ -281,41 +551,64 @@ async def health():
         "status": "ok",
         "identity_captured": identity_captured,
         "headers_locked": len(captured_identity),
+        "telemetry_blocked": blocked_requests_count,
+        "bodies_sanitized": sanitized_bodies_count,
+        "ip_headers_stripped": len(STRIP_REQUEST_HEADERS),
         "unknown_headers_seen": sorted(warned_unknown_headers),
     }
 
 
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"])
 async def proxy(path: str, request: Request):
-    global request_count
+    global request_count, blocked_requests_count
     request_count += 1
     req_id = request_count
+
+    now = datetime.now().strftime("%H:%M:%S")
+
+    # ── Telemetry blocking ──
+    if is_blocked_path(path):
+        blocked_requests_count += 1
+        log(f"  {DIM}{now}{RESET}  {CYAN}{BOLD}#{req_id}{RESET}  {BG_RED}{BOLD} BLOCKED {RESET} {RED}Telemetry: /{path}{RESET}")
+        log("")
+        return JSONResponse(
+            status_code=200,
+            content={"status": "ok"},
+        )
 
     # Auto-capture identity headers, cảnh báo header lạ
     capture_identity_from_request(request)
     warn_unknown_headers(request)
 
+    # ── Request timing jitter ──
+    if TIMING_JITTER_ENABLED:
+        jitter_ms = random.randint(TIMING_JITTER_MIN_MS, TIMING_JITTER_MAX_MS)
+        await _async_sleep(jitter_ms / 1000.0)
+
     target_url = f"{ANTHROPIC_BASE_URL}/{path}"
     headers = build_request_headers(request)
     body = await request.body()
 
-    now = datetime.now().strftime("%H:%M:%S")
+    # ── Body sanitization ──
+    content_type = request.headers.get("content-type", "")
+    body = sanitize_body(body, content_type)
+
     start_time = time.monotonic()
 
     # Request log
     log(f"  {DIM}{now}{RESET}  {CYAN}{BOLD}#{req_id}{RESET}  {BLUE}{BOLD}{request.method}{RESET} /{path}")
 
-    # Headers log
+    # Headers log (minimal - don't leak info in logs)
     sensitive = {"authorization", "x-api-key", "cookie"}
     spoofed = set(captured_identity.keys())
     for k, v in headers.items():
         kl = k.lower()
         if kl in sensitive:
-            log(f"           {DIM}{k}: {RESET}{YELLOW}{mask_value(v)}{RESET}")
+            log(f"           {DIM}{k}: {RESET}{YELLOW}[REDACTED]{RESET}")
         elif kl in spoofed:
-            log(f"           {DIM}{k}: {RESET}{MAGENTA}{mask_value(v, 40)}{RESET} {DIM}(locked){RESET}")
+            log(f"           {DIM}{k}: {RESET}{MAGENTA}{mask_value(v, 20)}{RESET} {DIM}(locked){RESET}")
         else:
-            log(f"           {DIM}{k}: {v}{RESET}")
+            log(f"           {DIM}{k}: {mask_value(v, 30)}{RESET}")
 
     try:
         req = http_client.build_request(
@@ -348,6 +641,12 @@ async def proxy(path: str, request: Request):
 
         response_headers = filter_response_headers(response)
 
+        # Strip Set-Cookie from responses to prevent cookie-based tracking
+        response_headers = {
+            k: v for k, v in response_headers.items()
+            if k.lower() != "set-cookie"
+        }
+
         async def stream_response():
             try:
                 async for chunk in response.aiter_bytes():
@@ -365,15 +664,21 @@ async def proxy(path: str, request: Request):
     except httpx.TimeoutException:
         log(f"  {DIM}{now}{RESET}  {CYAN}{BOLD}#{req_id}{RESET}  {BG_RED}{BOLD} TIMEOUT {RESET}")
         log("")
-        raise HTTPException(status_code=504, detail="Upstream API timeout")
+        raise HTTPException(status_code=504, detail="Gateway timeout")
     except httpx.ConnectError:
         log(f"  {DIM}{now}{RESET}  {CYAN}{BOLD}#{req_id}{RESET}  {BG_RED}{BOLD} CONNECT ERROR {RESET}")
         log("")
-        raise HTTPException(status_code=502, detail="Cannot connect to upstream API")
-    except Exception as e:
-        log(f"  {DIM}{now}{RESET}  {CYAN}{BOLD}#{req_id}{RESET}  {BG_RED}{BOLD} ERROR {RESET} {RED}{e}{RESET}")
+        raise HTTPException(status_code=502, detail="Bad gateway")
+    except Exception:
+        # Don't leak internal error details
+        log(f"  {DIM}{now}{RESET}  {CYAN}{BOLD}#{req_id}{RESET}  {BG_RED}{BOLD} ERROR {RESET}")
         log("")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal proxy error")
+
+
+async def _async_sleep(seconds: float):
+    """Async sleep for timing jitter."""
+    await asyncio.sleep(seconds)
 
 
 if __name__ == "__main__":
@@ -382,4 +687,7 @@ if __name__ == "__main__":
         host="127.0.0.1",
         port=LOCAL_PORT,
         log_level="warning",
+        # Don't expose server header
+        server_header=False,
+        date_header=False,
     )
