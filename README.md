@@ -24,7 +24,7 @@
 | Feature | Description |
 |---------|-------------|
 | **Auto-Capture** | Automatically captures auth token + device identity from first login |
-| **24+ Headers Locked** | user-agent, session-id, stainless-*, anthropic-*, sec-fetch-*, and more |
+| **23 Headers Locked** | user-agent, session-id, stainless-*, anthropic-*, sec-fetch-*, and more |
 | **AES-256-GCM Encryption** | Token encrypted with password-derived key (PBKDF2, 600K iterations) |
 | **Telemetry Blocking** | Blocks telemetry/analytics endpoints — no device info leaks |
 | **Body Sanitization** | Strips machine_id, hostname, device_id from request bodies |
@@ -111,7 +111,7 @@ Returns fake `200 OK` responses — Claude Code thinks the telemetry was sent.
 
 ### Layer 3: Body Sanitization
 
-Strips 25+ device-identifying fields from JSON request bodies:
+Strips 30+ device-identifying fields from JSON request bodies:
 
 ```
 machine_id, device_id, hostname, computer_name, username,

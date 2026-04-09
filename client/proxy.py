@@ -17,6 +17,7 @@ Security Layers:
   8. Consistent request IDs - Dùng HMAC-based IDs thay vì random per-device
 """
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -89,11 +90,12 @@ ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 # CONSISTENT SESSION SECRET
 # Per-proxy-instance secret for deterministic ID generation.
 # All devices using same .env will produce same derived IDs.
+# Saved to .env automatically when identity is first captured
+# via capture_identity_from_request().
 # ============================================================
 SESSION_SECRET = os.getenv("SESSION_SECRET", "")
 if not SESSION_SECRET:
     SESSION_SECRET = secrets.token_hex(32)
-    # Will be saved on first capture
 
 # ============================================================
 # TELEMETRY BLOCKING
@@ -151,6 +153,10 @@ SANITIZE_BODY_OBJECTS = {
     "environment_info", "environmentInfo",
     "telemetry", "diagnostics",
 }
+
+# Pre-computed normalized sets for fast lookup during body sanitization
+_SANITIZE_FIELDS_NORMALIZED = {s.lower().replace("-", "_") for s in SANITIZE_BODY_FIELDS}
+_SANITIZE_OBJECTS_NORMALIZED = {s.lower().replace("-", "_") for s in SANITIZE_BODY_OBJECTS}
 
 # ============================================================
 # CAPTURED IDENTITY - Bắt từ request thật
@@ -344,17 +350,13 @@ def _sanitize_dict(data: dict) -> bool:
         key_lower = key.lower().replace("-", "_")
 
         # Remove entire objects that contain device info
-        if key in SANITIZE_BODY_OBJECTS or key_lower in {
-            s.lower().replace("-", "_") for s in SANITIZE_BODY_OBJECTS
-        }:
+        if key in SANITIZE_BODY_OBJECTS or key_lower in _SANITIZE_OBJECTS_NORMALIZED:
             data[key] = {}
             changed = True
             continue
 
         # Replace identifying string fields with consistent fakes
-        if key in SANITIZE_BODY_FIELDS or key_lower in {
-            s.lower().replace("-", "_") for s in SANITIZE_BODY_FIELDS
-        }:
+        if key in SANITIZE_BODY_FIELDS or key_lower in _SANITIZE_FIELDS_NORMALIZED:
             if isinstance(data[key], str) and data[key]:
                 data[key] = generate_consistent_id(key)
                 changed = True
@@ -526,10 +528,11 @@ def build_request_headers(request: Request) -> dict[str, str]:
             if h not in existing_lower:
                 headers[h] = v
 
-    # Replace x-request-id with consistent derived ID if present
+    # Replace x-request-id with a fresh random UUID to avoid
+    # leaking per-device identifiers while keeping each request unique
     for k in list(headers.keys()):
         if k.lower() == "x-request-id":
-            headers[k] = generate_consistent_id(f"req-{request_count}-{time.time()}")
+            headers[k] = secrets.token_hex(16)
             break
 
     return headers
@@ -675,7 +678,6 @@ async def proxy(path: str, request: Request):
 
 async def _async_sleep(seconds: float):
     """Async sleep for timing jitter."""
-    import asyncio
     await asyncio.sleep(seconds)
 
 
