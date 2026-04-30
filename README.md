@@ -186,21 +186,38 @@ All error responses return generic messages only — no internal proxy details, 
 
 ## Token Saver Mode (optional)
 
-Set `TOKEN_SAVER=true` in `.env` to enable input-token reduction on `/v1/messages` requests. The proxy applies semantic-preserving transforms before forwarding to Anthropic.
+Set `TOKEN_SAVER=true` in `.env` to reduce input-token consumption on `/v1/messages`. Disabled by default — when OFF, request bodies pass through untouched.
 
 ### What it does
 
-| Layer | Description |
-|-------|-------------|
-| **1h prompt cache** | Injects `cache_control: {type: "ephemeral", ttl: "1h"}` on the `system` block + last `tools[]` entry, and appends `extended-cache-ttl-2025-04-11` to `anthropic-beta`. Extends Claude's default 5min cache → 1h, so long Claude Code sessions hit cache far more often (up to 90% input-token reduction on cached portions). |
-| **Tool result truncation** | Walks `messages[]`, finds `tool_result` blocks larger than `TOOL_RESULT_MAX_BYTES` in **older** turns (keeps the last `TOOL_RESULT_KEEP_RECENT` turns intact), and head+tail truncates them with a clear marker. Massive bash/read outputs from earlier in the session get compressed without disturbing active context. |
+| Layer | Default | Description |
+|-------|---------|-------------|
+| **1h prompt cache** | ON | Bumps the existing prompt-cache TTL from 5m → 1h on the stable prefix (system block + last tool definition) and appends `extended-cache-ttl-2025-04-11` to `anthropic-beta`. Long Claude Code sessions hit cache far more often → input charged at the 0.1× cache-read rate instead of 1× fresh. |
+| **Tool result truncation** | OFF | Walks `messages[]`, head+tail truncates `tool_result` blocks larger than `TOOL_RESULT_MAX_BYTES` in **older** turns (keeps the last `TOOL_RESULT_KEEP_RECENT` turns intact). |
+
+### Safety guards
+
+- **Breakpoint budget**: Anthropic allows at most 4 `cache_control` breakpoints per request. The proxy counts existing breakpoints and only modifies in-place — it never pushes the total above 4 (skips upgrading `system: string` when full).
+- **Beta auto-fallback**: if Anthropic returns a 400 that mentions the cache-ttl beta, the proxy latches the beta off for the rest of the process and reverts to default 5m cache. No further failed requests.
+- **Recent-turn protection**: tool_result truncation never touches the last `TOOL_RESULT_KEEP_RECENT` turns, preserving active agent context.
+
+### Realistic impact
+
+Input tokens drop ~15–35% on a typical Claude Code session; output is untouched. Since output is ~60–70% of total quota, **total quota reduction is around 8–18%** — useful for multi-device sharing and avoiding rate-limit throttle on Max plans, but not a silver bullet.
+
+### Why tool truncation defaults OFF
+
+Truncating an old `tool_result` is technically lossy: if Claude later needs to re-read that exact bash/read output, it'll have to re-run the command (which costs tokens). On x20 plans where you rarely hit limits, the saving is not worth the risk. Enable it when:
+- Running multi-device share on the same quota
+- Sessions routinely exceed 30 turns with large bash/read outputs
+- You're regularly hitting "usage limit reached"
 
 ### Config
 
 ```env
 TOKEN_SAVER=true
 CACHE_EXTEND_TTL=true        # Bump cache TTL 5m → 1h on stable prefix
-TOOL_RESULT_TRUNCATE=true    # Truncate large tool_result in older turns
+TOOL_RESULT_TRUNCATE=false   # Off by default; flip on for multi-device / long sessions
 TOOL_RESULT_MAX_BYTES=8000   # Threshold to trigger truncation
 TOOL_RESULT_HEAD_BYTES=4000  # Bytes kept from start
 TOOL_RESULT_TAIL_BYTES=2000  # Bytes kept from end
@@ -215,18 +232,22 @@ TOOL_RESULT_KEEP_RECENT=2    # Recent turns left untouched
 {
   "token_saver": {
     "enabled": true,
-    "cache_extend_ttl": true,
-    "tool_result_truncate": true,
+    "cache_extend_ttl_configured": true,
+    "cache_extend_ttl_active": true,
+    "tool_result_truncate": false,
     "tool_result_max_bytes": 8000,
     "requests_optimized": 42,
     "cache_breakpoints_added": 84,
-    "tool_results_truncated": 17,
-    "bytes_saved": 312045
+    "cache_breakpoints_skipped_full": 0,
+    "tool_results_truncated": 0,
+    "bytes_saved": 312045,
+    "tokens_saved_est": 78011,
+    "beta_runtime_disabled": false
   }
 }
 ```
 
-Disabled by default — flip `TOKEN_SAVER=true` only when you want it. When OFF, request bodies pass through untouched.
+`tokens_saved_est` is an approximation (`bytes_saved / 4`); use it as a directional metric, not an exact charge.
 
 ## What It Does NOT Do
 
