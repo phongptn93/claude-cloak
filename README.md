@@ -184,6 +184,50 @@ All error responses return generic messages only — no internal proxy details, 
 - `502 Bad gateway` — connection failure
 - `500 Internal proxy error` — all other errors
 
+## Token Saver Mode (optional)
+
+Set `TOKEN_SAVER=true` in `.env` to enable input-token reduction on `/v1/messages` requests. The proxy applies semantic-preserving transforms before forwarding to Anthropic.
+
+### What it does
+
+| Layer | Description |
+|-------|-------------|
+| **1h prompt cache** | Injects `cache_control: {type: "ephemeral", ttl: "1h"}` on the `system` block + last `tools[]` entry, and appends `extended-cache-ttl-2025-04-11` to `anthropic-beta`. Extends Claude's default 5min cache → 1h, so long Claude Code sessions hit cache far more often (up to 90% input-token reduction on cached portions). |
+| **Tool result truncation** | Walks `messages[]`, finds `tool_result` blocks larger than `TOOL_RESULT_MAX_BYTES` in **older** turns (keeps the last `TOOL_RESULT_KEEP_RECENT` turns intact), and head+tail truncates them with a clear marker. Massive bash/read outputs from earlier in the session get compressed without disturbing active context. |
+
+### Config
+
+```env
+TOKEN_SAVER=true
+CACHE_EXTEND_TTL=true        # Bump cache TTL 5m → 1h on stable prefix
+TOOL_RESULT_TRUNCATE=true    # Truncate large tool_result in older turns
+TOOL_RESULT_MAX_BYTES=8000   # Threshold to trigger truncation
+TOOL_RESULT_HEAD_BYTES=4000  # Bytes kept from start
+TOOL_RESULT_TAIL_BYTES=2000  # Bytes kept from end
+TOOL_RESULT_KEEP_RECENT=2    # Recent turns left untouched
+```
+
+### Stats
+
+`GET /health` returns live counters under `token_saver`:
+
+```json
+{
+  "token_saver": {
+    "enabled": true,
+    "cache_extend_ttl": true,
+    "tool_result_truncate": true,
+    "tool_result_max_bytes": 8000,
+    "requests_optimized": 42,
+    "cache_breakpoints_added": 84,
+    "tool_results_truncated": 17,
+    "bytes_saved": 312045
+  }
+}
+```
+
+Disabled by default — flip `TOKEN_SAVER=true` only when you want it. When OFF, request bodies pass through untouched.
+
 ## What It Does NOT Do
 
 | | Description |
