@@ -484,51 +484,77 @@ def _count_cache_breakpoints(data: dict) -> int:
 
 
 def _apply_cache_breakpoints(data: dict) -> tuple[int, int]:
-    """Bump TTL on the stable prefix (system + last tool) without exceeding
-    Anthropic's 4-breakpoint cap. Returns (added_or_modified, skipped_due_to_full).
+    """Bump TTL on the stable prefix to 1h, respecting Anthropic's rules:
+
+    - Processing order: tools → system → messages
+    - Once a ttl='1h' block appears, no later ttl='5m' is allowed
+    - Max 4 cache_control breakpoints per request
+
+    Strategy: upgrade ALL existing cache_control in tools+system to 1h
+    (preserves ordering rule), then optionally add 1 new breakpoint at
+    the last tool / last system block if budget permits.
+    Messages are left untouched — they sit AFTER system in processing
+    order, so messages-5m after system-1h is allowed.
+
+    Returns (modified_count, skipped_full_count).
     """
-    cc = {"type": "ephemeral", "ttl": "1h"}
     existing = _count_cache_breakpoints(data)
     budget = MAX_CACHE_BREAKPOINTS - existing
     modified = 0
     skipped = 0
 
+    # Step 1: upgrade EVERY existing cache_control in tools + system to 1h.
+    # This is the critical step that prevents "1h after 5m" violations.
+    tools = data.get("tools")
+    if isinstance(tools, list):
+        for tool in tools:
+            if isinstance(tool, dict) and isinstance(tool.get("cache_control"), dict):
+                if tool["cache_control"].get("ttl") != "1h":
+                    tool["cache_control"]["ttl"] = "1h"
+                    if tool["cache_control"].get("type") != "ephemeral":
+                        tool["cache_control"]["type"] = "ephemeral"
+                    modified += 1
+
     sys_field = data.get("system")
+    if isinstance(sys_field, list):
+        for block in sys_field:
+            if isinstance(block, dict) and isinstance(block.get("cache_control"), dict):
+                if block["cache_control"].get("ttl") != "1h":
+                    block["cache_control"]["ttl"] = "1h"
+                    if block["cache_control"].get("type") != "ephemeral":
+                        block["cache_control"]["type"] = "ephemeral"
+                    modified += 1
+
+    # Step 2: add a new breakpoint at the stable suffix if there isn't one
+    # already AND we have budget. Skip silently when full.
+    cc_new = {"type": "ephemeral", "ttl": "1h"}
+
     if isinstance(sys_field, str) and sys_field:
-        # Wrapping a string system creates a NEW breakpoint — only do this
-        # if we have budget; otherwise leave it alone.
         if budget > 0:
-            data["system"] = [{"type": "text", "text": sys_field, "cache_control": cc}]
+            data["system"] = [{"type": "text", "text": sys_field, "cache_control": dict(cc_new)}]
             modified += 1
             budget -= 1
         else:
             skipped += 1
     elif isinstance(sys_field, list) and sys_field:
         last = sys_field[-1]
-        if isinstance(last, dict):
-            had_cc = "cache_control" in last
-            if last.get("cache_control") != cc:
-                if had_cc or budget > 0:
-                    last["cache_control"] = cc
-                    modified += 1
-                    if not had_cc:
-                        budget -= 1
-                else:
-                    skipped += 1
+        if isinstance(last, dict) and "cache_control" not in last:
+            if budget > 0:
+                last["cache_control"] = dict(cc_new)
+                modified += 1
+                budget -= 1
+            else:
+                skipped += 1
 
-    tools = data.get("tools")
     if isinstance(tools, list) and tools:
         last = tools[-1]
-        if isinstance(last, dict):
-            had_cc = "cache_control" in last
-            if last.get("cache_control") != cc:
-                if had_cc or budget > 0:
-                    last["cache_control"] = cc
-                    modified += 1
-                    if not had_cc:
-                        budget -= 1
-                else:
-                    skipped += 1
+        if isinstance(last, dict) and "cache_control" not in last:
+            if budget > 0:
+                last["cache_control"] = dict(cc_new)
+                modified += 1
+                budget -= 1
+            else:
+                skipped += 1
 
     return modified, skipped
 
@@ -593,16 +619,22 @@ def inject_cache_ttl_beta(headers: dict[str, str]) -> None:
 
 
 def _looks_like_cache_ttl_beta_error(payload: bytes) -> bool:
-    """Detect Anthropic 400 errors caused by the extended-cache-ttl beta."""
+    """Detect Anthropic 400 errors caused by the extended-cache-ttl beta
+    or any cache_control validation failure (e.g. ordering, ttl shape).
+    """
     if not payload:
         return False
     try:
         text = payload.decode("utf-8", errors="replace").lower()
     except Exception:
         return False
-    return "extended-cache-ttl" in text or (
-        "anthropic-beta" in text and "invalid" in text
-    )
+    if "extended-cache-ttl" in text:
+        return True
+    if "anthropic-beta" in text and "invalid" in text:
+        return True
+    if "cache_control" in text and ("ttl" in text or "1h" in text or "5m" in text):
+        return True
+    return False
 
 
 def disable_cache_ttl_runtime(reason: str):
