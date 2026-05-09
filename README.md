@@ -271,24 +271,23 @@ Example `/quota`:
 {
   "cost_usd_total": 1.2345,
   "messages_requests": 42,
-  "tokens": {
-    "input_tokens": 12000,
-    "output_tokens": 8400,
-    "cache_creation_input_tokens": 3200,
-    "cache_read_input_tokens": 87000
-  },
+  "tokens": { "input_tokens": 12000, "output_tokens": 8400, "cache_creation_input_tokens": 3200, "cache_read_input_tokens": 87000 },
   "by_model": [
     {"model": "sonnet-4", "requests": 38, "input_tokens": 11000, "output_tokens": 7800, "cost_usd": 1.1024},
     {"model": "haiku-4",  "requests":  4, "input_tokens":  1000, "output_tokens":  600, "cost_usd": 0.1321}
   ],
+  "by_session": [
+    {"session_id": "abc123…f9e2", "requests": 24, "input_tokens": 7400, "output_tokens": 5100, "cost_usd": 0.6712,
+     "models": {"sonnet-4": 22, "haiku-4": 2}, "first_seen": "2026-05-09T09:12:03", "last_seen": "2026-05-09T12:30:14"}
+  ],
+  "by_day": [
+    {"date": "2026-05-09", "requests": 18, "input_tokens": 5200, "output_tokens": 3800, "cost_usd": 0.4912},
+    {"date": "2026-05-08", "requests": 24, "input_tokens": 6800, "output_tokens": 4600, "cost_usd": 0.7433}
+  ],
   "rate_limits": {
-    "requests_remaining": "1450",
-    "requests_limit": "2000",
-    "requests_reset": "2026-05-09T12:34:56Z",
-    "input_tokens_remaining": "780000",
-    "output_tokens_remaining": "120000",
-    "retry_after": null,
-    "updated_at": "2026-05-09T12:30:14"
+    "requests_remaining": "1450", "requests_limit": "2000", "requests_reset": "2026-05-09T12:34:56Z",
+    "input_tokens_remaining": "780000", "output_tokens_remaining": "120000",
+    "retry_after": null, "updated_at": "2026-05-09T12:30:14"
   }
 }
 ```
@@ -318,18 +317,34 @@ Model keys: `OPUS_4`, `SONNET_4`, `HAIKU_4`, `OPUS_3`, `SONNET_3_7`, `SONNET_3_5
 
 Open `http://localhost:9999/dashboard` for a live web UI:
 
-- **Total cost** + per-model breakdown (bar chart)
-- **Token mix** doughnut (input / output / cache read / cache write)
-- **Rate-limit progress bars** (color-coded: green > 30%, amber 10–30%, red < 10%) with reset times
-- **Per-model table** with full token + cost breakdown
-- Auto-refreshes every 5 s, polls `/quota`. Chart.js loaded from CDN; the rest is self-contained vanilla JS
+- **Totals** card grid — total cost, requests, distinct sessions, paid input / output / cache read / cache write
+- **Live rate-limit progress bars** color-coded green / amber / red with reset times
+- **Daily trend chart** — last 15 days, cost line + input/output token bars on dual y-axes
+- **Cost-by-model doughnut** — lifetime breakdown
+- **Daily breakdown table** — date · requests · tokens · cost
+- **Per-model breakdown table**
+- **Per-session breakdown table** — each device's `x-claude-code-session-id` shown separately (the proxy locks identity outbound, but tracks each session inbound)
+- Auto-refreshes every 5 s, polls `/quota`. Sticky header with live status pill. Chart.js loaded from CDN; the rest is self-contained vanilla JS that degrades gracefully if blocked
+
+### Per-Session & Daily Tracking
+
+The proxy reads `x-claude-code-session-id` from each **incoming** request (before the proxy rewrites it to the locked identity) and groups stats per session. So even though every device sends the same locked session-id outbound, the dashboard shows each device's own session distinctly.
+
+Daily buckets use **local time** (`datetime.now()`). The dashboard shows the most recent 15 days; the proxy keeps up to `QUOTA_MAX_DAYS` (default 30) on disk.
+
+| Cap | Default | Behavior when exceeded |
+|---|---|---|
+| `QUOTA_MAX_SESSIONS` | 100 | Oldest session (by `last_seen`) evicted |
+| `QUOTA_MAX_DAYS`     | 30  | Oldest date evicted |
 
 ### Persistence
 
-Counters are persisted to `.quota.json` next to `.env` so totals survive proxy restarts. Writes are debounced — at most every `QUOTA_PERSIST_INTERVAL` seconds (default 30) plus a forced flush on shutdown. The file is git-ignored.
+Counters are persisted to `.quota.json` next to `.env` so totals survive proxy restarts. Writes are debounced — at most every `QUOTA_PERSIST_INTERVAL` seconds (default 30) plus a forced flush on shutdown. The file is git-ignored. Schema v1 files are migrated forward automatically (by_session / by_day start empty).
 
 ```env
 QUOTA_PERSIST_INTERVAL=30      # Write at most every N seconds
+QUOTA_MAX_SESSIONS=100         # Cap on per-session buckets
+QUOTA_MAX_DAYS=30              # Cap on per-day buckets
 # QUOTA_PERSIST_PATH=          # Override location (default: .quota.json next to .env)
 ```
 

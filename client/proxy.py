@@ -350,9 +350,16 @@ quota_stats = {
     },
     "cost_usd_total": 0.0,
     "by_model": {},  # model_key -> {usage..., cost_usd, requests}
+    "by_session": {},  # session_id -> {requests, tokens, cost_usd, first_seen, last_seen}
+    "by_day": {},  # YYYY-MM-DD -> {requests, tokens, cost_usd}
     "messages_requests": 0,
     "last_request_at": None,
 }
+
+# Caps to prevent unbounded growth of per-session / per-day buckets.
+# When a cap is exceeded, oldest entries (by last_seen / date) are evicted.
+QUOTA_MAX_SESSIONS = int(os.getenv("QUOTA_MAX_SESSIONS", "100"))
+QUOTA_MAX_DAYS = int(os.getenv("QUOTA_MAX_DAYS", "30"))
 
 # ============================================================
 # QUOTA PERSISTENCE
@@ -368,7 +375,8 @@ QUOTA_PERSIST_PATH = os.getenv(
     os.path.join(os.path.dirname(ENV_PATH), ".quota.json"),
 )
 QUOTA_PERSIST_INTERVAL_SECONDS = int(os.getenv("QUOTA_PERSIST_INTERVAL", "30"))
-QUOTA_SCHEMA_VERSION = 1
+QUOTA_SCHEMA_VERSION = 2  # v1 = totals + by_model. v2 adds by_session + by_day.
+QUOTA_SCHEMA_MIN_LOAD = 1  # accept v1 files for migration
 _last_quota_save_at = 0.0
 
 
@@ -750,7 +758,8 @@ def _load_quota_stats() -> bool:
         return False
     if not isinstance(data, dict):
         return False
-    if data.get("version") != QUOTA_SCHEMA_VERSION:
+    version = data.get("version")
+    if not isinstance(version, int) or version < QUOTA_SCHEMA_MIN_LOAD or version > QUOTA_SCHEMA_VERSION:
         return False
 
     ut = data.get("usage_total")
@@ -772,6 +781,20 @@ def _load_quota_stats() -> bool:
         for model_key, bucket in bm.items():
             if isinstance(bucket, dict) and "model" in bucket:
                 quota_stats["by_model"][model_key] = bucket
+
+    # v2 fields — absent in v1 files, default to empty dicts.
+    bs = data.get("by_session")
+    if isinstance(bs, dict):
+        for sid, bucket in bs.items():
+            if isinstance(bucket, dict) and "session_id" in bucket:
+                quota_stats["by_session"][sid] = bucket
+
+    bd = data.get("by_day")
+    if isinstance(bd, dict):
+        for day, bucket in bd.items():
+            if isinstance(bucket, dict) and "date" in bucket:
+                quota_stats["by_day"][day] = bucket
+
     return True
 
 
@@ -796,6 +819,8 @@ def _save_quota_stats(force: bool = False) -> None:
         "usage_total": quota_stats["usage_total"],
         "cost_usd_total": quota_stats["cost_usd_total"],
         "by_model": quota_stats["by_model"],
+        "by_session": quota_stats["by_session"],
+        "by_day": quota_stats["by_day"],
     }
     tmp_path = QUOTA_PERSIST_PATH + ".tmp"
     try:
@@ -886,8 +911,13 @@ def _compute_cost(model_key: str, usage: dict) -> float:
     return cost
 
 
-def _record_usage(model: str | None, usage: dict) -> None:
-    """Accumulate a single response's usage into quota_stats and log it."""
+def _record_usage(model: str | None, usage: dict, session_id: str | None = None) -> None:
+    """Accumulate a single response's usage into quota_stats and log it.
+
+    `session_id` is the original `x-claude-code-session-id` from the incoming
+    request (BEFORE the proxy rewrites it to the locked identity), so each
+    device's session shows up separately.
+    """
     if not QUOTA_TRACKING_ENABLED or not usage:
         return
 
@@ -898,17 +928,23 @@ def _record_usage(model: str | None, usage: dict) -> None:
     cw5 = cc.get("ephemeral_5m_input_tokens", 0) or 0
     cw1 = cc.get("ephemeral_1h_input_tokens", 0) or 0
 
+    in_t = usage.get("input_tokens", 0) or 0
+    out_t = usage.get("output_tokens", 0) or 0
+    cr_t = usage.get("cache_read_input_tokens", 0) or 0
+    cw_t = usage.get("cache_creation_input_tokens", 0) or 0
+
     totals = quota_stats["usage_total"]
-    totals["input_tokens"] += usage.get("input_tokens", 0) or 0
-    totals["output_tokens"] += usage.get("output_tokens", 0) or 0
-    totals["cache_creation_input_tokens"] += usage.get("cache_creation_input_tokens", 0) or 0
+    totals["input_tokens"] += in_t
+    totals["output_tokens"] += out_t
+    totals["cache_creation_input_tokens"] += cw_t
     totals["cache_creation_5m_input_tokens"] += cw5
     totals["cache_creation_1h_input_tokens"] += cw1
-    totals["cache_read_input_tokens"] += usage.get("cache_read_input_tokens", 0) or 0
+    totals["cache_read_input_tokens"] += cr_t
 
     quota_stats["cost_usd_total"] += cost
     quota_stats["messages_requests"] += 1
-    quota_stats["last_request_at"] = datetime.now().isoformat(timespec="seconds")
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    quota_stats["last_request_at"] = now_iso
 
     bucket = quota_stats["by_model"].setdefault(model_key, {
         "model": model_key,
@@ -920,16 +956,53 @@ def _record_usage(model: str | None, usage: dict) -> None:
         "cost_usd": 0.0,
     })
     bucket["requests"] += 1
-    bucket["input_tokens"] += usage.get("input_tokens", 0) or 0
-    bucket["output_tokens"] += usage.get("output_tokens", 0) or 0
-    bucket["cache_creation_input_tokens"] += usage.get("cache_creation_input_tokens", 0) or 0
-    bucket["cache_read_input_tokens"] += usage.get("cache_read_input_tokens", 0) or 0
+    bucket["input_tokens"] += in_t
+    bucket["output_tokens"] += out_t
+    bucket["cache_creation_input_tokens"] += cw_t
+    bucket["cache_read_input_tokens"] += cr_t
     bucket["cost_usd"] += cost
 
-    in_t = usage.get("input_tokens", 0) or 0
-    out_t = usage.get("output_tokens", 0) or 0
-    cr_t = usage.get("cache_read_input_tokens", 0) or 0
-    cw_t = usage.get("cache_creation_input_tokens", 0) or 0
+    if session_id:
+        sb = quota_stats["by_session"].setdefault(session_id, {
+            "session_id": session_id,
+            "requests": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cost_usd": 0.0,
+            "models": {},
+            "first_seen": now_iso,
+            "last_seen": now_iso,
+        })
+        sb["requests"] += 1
+        sb["input_tokens"] += in_t
+        sb["output_tokens"] += out_t
+        sb["cache_creation_input_tokens"] += cw_t
+        sb["cache_read_input_tokens"] += cr_t
+        sb["cost_usd"] += cost
+        sb["last_seen"] = now_iso
+        sb["models"][model_key] = sb["models"].get(model_key, 0) + 1
+        _evict_oldest("by_session", "last_seen", QUOTA_MAX_SESSIONS)
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    db = quota_stats["by_day"].setdefault(today, {
+        "date": today,
+        "requests": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "cost_usd": 0.0,
+    })
+    db["requests"] += 1
+    db["input_tokens"] += in_t
+    db["output_tokens"] += out_t
+    db["cache_creation_input_tokens"] += cw_t
+    db["cache_read_input_tokens"] += cr_t
+    db["cost_usd"] += cost
+    _evict_oldest("by_day", "date", QUOTA_MAX_DAYS)
+
     log(
         f"           {DIM}usage: {RESET}{CYAN}{model_key}{RESET} "
         f"{DIM}in={in_t} out={out_t} cache_r={cr_t} cache_w={cw_t} "
@@ -937,6 +1010,21 @@ def _record_usage(model: str | None, usage: dict) -> None:
     )
 
     _save_quota_stats()
+
+
+def _evict_oldest(field: str, sort_key: str, max_entries: int) -> None:
+    """Drop oldest entries from quota_stats[field] when over max_entries.
+
+    `sort_key` is the bucket field used to determine age (date string or
+    ISO timestamp — both sort lexicographically).
+    """
+    bucket = quota_stats[field]
+    if len(bucket) <= max_entries:
+        return
+    items = sorted(bucket.items(), key=lambda kv: kv[1].get(sort_key, ""))
+    drop = len(bucket) - max_entries
+    for key, _ in items[:drop]:
+        del bucket[key]
 
 
 class UsageTap:
@@ -952,8 +1040,9 @@ class UsageTap:
     untouched chunk to the client. A 5 MB safety cap prevents runaway buffers.
     """
 
-    def __init__(self, content_type: str | None, path: str):
+    def __init__(self, content_type: str | None, path: str, session_id: str | None = None):
         self.path = path
+        self.session_id = session_id
         self.is_messages = "v1/messages" in path
         ct = (content_type or "").lower()
         self.is_sse = "event-stream" in ct
@@ -1272,6 +1361,8 @@ async def health():
                 {**v, "cost_usd": round(v["cost_usd"], 6)}
                 for v in quota_stats["by_model"].values()
             ],
+            "by_session_count": len(quota_stats["by_session"]),
+            "by_day_count": len(quota_stats["by_day"]),
         },
     }
 
@@ -1281,273 +1372,796 @@ DASHBOARD_HTML = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Claude Cloak — Quota Dashboard</title>
+<title>Claude Cloak — Quota & Cost Dashboard</title>
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
 <style>
+  /*  Design tokens  ------------------------------------------------------- */
   :root {
-    --bg: #0d0d10;
-    --panel: #16161c;
-    --panel-2: #1d1d26;
-    --border: #2a2a36;
-    --text: #e8e8ee;
-    --muted: #8a8a99;
-    --accent: #c084fc;
-    --accent-2: #67e8f9;
-    --ok: #4ade80;
-    --warn: #fbbf24;
-    --danger: #f87171;
+    --bg-0:        #0a0a0d;
+    --bg-1:        #111118;
+    --bg-2:        #1a1a24;
+    --bg-3:        #232330;
+    --border:      #2a2a3a;
+    --border-soft: #1f1f2c;
+    --text:        #ebebf0;
+    --text-soft:   #b8b8c4;
+    --muted:       #7c7c8c;
+    --muted-2:     #555566;
+    --accent:      #c084fc;
+    --accent-2:    #67e8f9;
+    --ok:          #4ade80;
+    --warn:        #fbbf24;
+    --danger:      #f87171;
+    --shadow:      0 1px 3px rgba(0,0,0,.4), 0 1px 0 rgba(255,255,255,.02) inset;
+    --radius:      10px;
+    --radius-sm:   6px;
+    --font-sans:   -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, system-ui, sans-serif;
+    --font-mono:   ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
   }
-  * { box-sizing: border-box; }
+
+  /*  Reset & base  ------------------------------------------------------- */
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
   body {
-    margin: 0;
-    background: var(--bg);
+    background: var(--bg-0);
     color: var(--text);
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-size: 14px;
-    line-height: 1.5;
+    font: 14px/1.5 var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    min-height: 100vh;
   }
-  header {
-    padding: 20px 28px;
+  .num, code { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+  a { color: var(--accent-2); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  /*  Top bar  ------------------------------------------------------------ */
+  .topbar {
+    position: sticky; top: 0; z-index: 10;
+    display: flex; align-items: center; gap: 16px;
+    padding: 14px 28px;
+    background: rgba(10,10,13,.85);
+    backdrop-filter: blur(8px);
     border-bottom: 1px solid var(--border);
-    display: flex;
-    align-items: baseline;
-    gap: 16px;
   }
-  header h1 {
+  .brand {
+    display: flex; align-items: center; gap: 10px;
+    font-weight: 600; letter-spacing: 0.01em;
+  }
+  .brand-mark {
+    width: 22px; height: 22px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    border-radius: 5px;
+    box-shadow: 0 0 12px rgba(192,132,252,.35);
+  }
+  .brand-name { color: var(--text); }
+  .brand-tag  { color: var(--muted); font-weight: 500; font-size: 12px; margin-left: 4px; }
+  .topbar-spacer { flex: 1; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 5px 11px;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    font-size: 12px;
+    color: var(--text-soft);
+  }
+  .pill.live   { color: var(--ok); }
+  .pill.error  { color: var(--danger); }
+  .pill .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: currentColor;
+    box-shadow: 0 0 0 0 currentColor;
+    animation: pulse 2s infinite;
+  }
+  .pill.error .dot { animation: none; }
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 0 0   rgba(74,222,128,.45); }
+    70%  { box-shadow: 0 0 0 6px rgba(74,222,128,0); }
+    100% { box-shadow: 0 0 0 0   rgba(74,222,128,0); }
+  }
+
+  /*  Layout  ------------------------------------------------------------- */
+  main {
+    max-width: 1320px; margin: 0 auto;
+    padding: 28px;
+  }
+  section { margin-bottom: 32px; }
+  .section-head {
+    display: flex; align-items: baseline; gap: 12px;
+    margin: 0 4px 14px;
+  }
+  .section-head h2 {
     margin: 0;
-    font-size: 18px;
-    color: var(--accent);
-    letter-spacing: 0.04em;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--muted);
   }
-  header .sub { color: var(--muted); font-size: 12px; }
-  header .live { margin-left: auto; color: var(--ok); font-size: 12px; }
-  header .live::before { content: "●  "; }
-  main { padding: 24px 28px; max-width: 1280px; margin: 0 auto; }
-  section { margin-bottom: 28px; }
-  section h2 {
+  .section-head .hint {
+    font-size: 12px;
+    color: var(--muted-2);
+  }
+
+  /*  Cards  --------------------------------------------------------------- */
+  .grid-cards {
+    display: grid;
+    grid-template-columns: repeat(12, 1fr);
+    gap: 14px;
+  }
+  .card {
+    background: var(--bg-1);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius);
+    padding: 18px 20px;
+    box-shadow: var(--shadow);
+    grid-column: span 3;
+    transition: border-color .2s;
+  }
+  .card:hover { border-color: var(--border); }
+  .card .card-label {
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 10px;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .card .card-value {
+    font-family: var(--font-mono);
+    font-size: 22px;
+    font-weight: 600;
+    color: var(--text);
+    letter-spacing: -0.01em;
+  }
+  .card .card-meta {
+    margin-top: 8px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .card.hero {
+    grid-column: span 6;
+    background:
+      radial-gradient(circle at 0% 0%, rgba(192,132,252,.10), transparent 50%),
+      radial-gradient(circle at 100% 100%, rgba(103,232,249,.06), transparent 50%),
+      var(--bg-1);
+    border-color: var(--border);
+  }
+  .card.hero .card-value {
+    font-size: 38px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .card.hero .card-meta { color: var(--text-soft); }
+
+  /*  Panel  --------------------------------------------------------------- */
+  .panel {
+    background: var(--bg-1);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+  }
+  .panel-body { padding: 20px 22px; }
+  .panel-title {
+    display: flex; align-items: baseline; gap: 10px;
+    padding: 14px 22px 12px;
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .panel-title h3 {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    letter-spacing: 0.01em;
+  }
+  .panel-title .sub { color: var(--muted); font-size: 12px; }
+
+  /*  Bars  ---------------------------------------------------------------- */
+  .bar-row {
+    display: grid;
+    grid-template-columns: 160px 1fr auto;
+    align-items: center;
+    gap: 16px;
+    padding: 9px 0;
+  }
+  .bar-row + .bar-row { border-top: 1px dashed var(--border-soft); }
+  .bar-label { color: var(--text-soft); font-size: 13px; }
+  .bar-track {
+    position: relative;
+    height: 8px; background: var(--bg-3);
+    border-radius: 4px; overflow: hidden;
+  }
+  .bar-fill {
+    height: 100%;
+    border-radius: 4px;
+    transition: width .5s cubic-bezier(.4,.0,.2,1), background-color .2s;
+  }
+  .bar-row.ok     .bar-fill { background: var(--ok); }
+  .bar-row.warn   .bar-fill { background: var(--warn); }
+  .bar-row.danger .bar-fill { background: var(--danger); }
+  .bar-value {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--text);
+    text-align: right;
+    min-width: 220px;
+  }
+  .bar-value .reset { color: var(--muted); margin-left: 6px; }
+  .empty-bars {
+    color: var(--muted);
+    font-size: 13px;
+    padding: 12px 0;
+    text-align: center;
+  }
+  .retry-banner {
+    margin-top: 14px;
+    padding: 10px 14px;
+    background: rgba(248,113,113,.08);
+    border: 1px solid rgba(248,113,113,.25);
+    border-radius: var(--radius-sm);
+    color: var(--danger);
+    font-size: 13px;
+  }
+
+  /*  Charts grid  --------------------------------------------------------- */
+  .charts-grid {
+    display: grid;
+    grid-template-columns: 2fr 1fr;
+    gap: 18px;
+  }
+  .chart-canvas-wrap { position: relative; height: 280px; padding: 16px 4px 4px; }
+
+  /*  Tables  -------------------------------------------------------------- */
+  table { width: 100%; border-collapse: collapse; }
+  thead th {
+    text-align: left;
+    padding: 10px 16px;
+    background: var(--bg-2);
+    color: var(--muted);
+    font-weight: 500;
     font-size: 11px;
     text-transform: uppercase;
-    letter-spacing: 0.12em;
+    letter-spacing: 0.08em;
+    border-bottom: 1px solid var(--border-soft);
+  }
+  tbody td {
+    padding: 11px 16px;
+    border-bottom: 1px solid var(--border-soft);
+    font-size: 13px;
+  }
+  tbody tr:last-child td { border-bottom: 0; }
+  tbody tr:hover td { background: var(--bg-2); }
+  td.num, th.num { text-align: right; font-family: var(--font-mono); }
+  td.cost { color: var(--accent); font-family: var(--font-mono); font-weight: 500; }
+  td.session-id { font-family: var(--font-mono); color: var(--accent-2); }
+  td.session-id .session-tail { color: var(--muted); }
+  td .badge {
+    display: inline-block;
+    padding: 1px 7px;
+    background: var(--bg-3);
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-soft);
+    margin-right: 4px;
+  }
+  td .timestamp {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--text-soft);
+  }
+  td .timestamp small { color: var(--muted); margin-left: 4px; }
+
+  /*  Empty state  ---------------------------------------------------------- */
+  .empty-state {
+    padding: 36px;
+    text-align: center;
     color: var(--muted);
-    margin: 0 0 12px;
-    font-weight: 600;
+    font-size: 13px;
   }
-  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
-  .card {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 16px 18px;
+  .empty-state strong { color: var(--text-soft); display: block; margin-bottom: 4px; font-weight: 500; }
+
+  /*  Footer  -------------------------------------------------------------- */
+  footer {
+    max-width: 1320px;
+    margin: 0 auto;
+    padding: 24px 28px 40px;
+    color: var(--muted);
+    font-size: 12px;
+    border-top: 1px solid var(--border-soft);
+    margin-top: 16px;
+    display: flex; gap: 16px; flex-wrap: wrap;
   }
-  .card.big { grid-column: span 2; background: linear-gradient(135deg, #1f1429 0%, #16161c 100%); }
-  .card .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 8px; }
-  .card .value { font-size: 22px; font-weight: 600; color: var(--text); }
-  .card.big .value { font-size: 32px; color: var(--accent); }
-  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 18px; }
-  .bar-row { display: grid; grid-template-columns: 140px 1fr 220px; align-items: center; gap: 14px; margin-bottom: 10px; }
-  .bar-label { color: var(--muted); font-size: 12px; }
-  .bar-track { background: var(--panel-2); border-radius: 4px; height: 10px; overflow: hidden; border: 1px solid var(--border); }
-  .bar-fill { height: 100%; transition: width .4s ease, background-color .2s; }
-  .bar-row.ok .bar-fill { background: var(--ok); }
-  .bar-row.warn .bar-fill { background: var(--warn); }
-  .bar-row.danger .bar-fill { background: var(--danger); }
-  .bar-value { color: var(--text); font-size: 12px; text-align: right; }
-  .retry { color: var(--danger); font-size: 12px; margin-top: 10px; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); }
-  th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; }
-  td:last-child, th:last-child { text-align: right; color: var(--accent); }
-  .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
-  @media (max-width: 800px) { .charts { grid-template-columns: 1fr; } .card.big { grid-column: auto; } }
-  .empty { color: var(--muted); padding: 24px; text-align: center; font-size: 12px; }
-  .footer { color: var(--muted); font-size: 11px; padding: 24px 28px; border-top: 1px solid var(--border); }
+  footer .dot-sep { color: var(--muted-2); }
+
+  /*  Responsive  ----------------------------------------------------------- */
+  @media (max-width: 960px) {
+    .card        { grid-column: span 6; }
+    .card.hero   { grid-column: span 12; }
+    .charts-grid { grid-template-columns: 1fr; }
+    .bar-row     { grid-template-columns: 1fr; gap: 4px; }
+    .bar-value   { text-align: left; }
+  }
+  @media (max-width: 560px) {
+    .card        { grid-column: span 12; }
+    main         { padding: 18px; }
+    .topbar      { padding: 12px 18px; }
+  }
 </style>
 </head>
 <body>
-<header>
-  <h1>CLAUDE CLOAK</h1>
-  <span class="sub">Quota &amp; Cost Dashboard</span>
-  <span class="live" id="live-indicator">live</span>
+
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-mark"></div>
+    <span class="brand-name">Claude Cloak</span>
+    <span class="brand-tag">· Quota & Cost</span>
+  </div>
+  <div class="topbar-spacer"></div>
+  <span class="pill" id="last-refresh" title="Time of last successful /quota fetch">—</span>
+  <span class="pill live" id="status-pill"><span class="dot"></span><span id="status-text">connecting…</span></span>
 </header>
 
 <main>
+
+  <!-- Totals -->
   <section>
-    <h2>Totals</h2>
-    <div class="cards">
-      <div class="card big">
-        <div class="label">Total Cost (USD)</div>
-        <div class="value" id="cost-total">$0.0000</div>
+    <div class="section-head">
+      <h2>Totals</h2>
+      <span class="hint">Lifetime — persisted across restarts</span>
+    </div>
+    <div class="grid-cards">
+      <div class="card hero">
+        <div class="card-label">Total Cost (estimated)</div>
+        <div class="card-value num" id="cost-total">$0.0000</div>
+        <div class="card-meta" id="cost-meta">No requests recorded yet</div>
       </div>
-      <div class="card"><div class="label">Requests</div><div class="value" id="req-total">0</div></div>
-      <div class="card"><div class="label">Input Tokens</div><div class="value" id="in-total">0</div></div>
-      <div class="card"><div class="label">Output Tokens</div><div class="value" id="out-total">0</div></div>
-      <div class="card"><div class="label">Cache Read</div><div class="value" id="cache-read">0</div></div>
-      <div class="card"><div class="label">Cache Write</div><div class="value" id="cache-write">0</div></div>
+      <div class="card">
+        <div class="card-label">Requests</div>
+        <div class="card-value num" id="req-total">0</div>
+        <div class="card-meta">on /v1/messages</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Distinct sessions</div>
+        <div class="card-value num" id="session-count">0</div>
+        <div class="card-meta">x-claude-code-session-id</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Input tokens (paid)</div>
+        <div class="card-value num" id="in-total">0</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Output tokens</div>
+        <div class="card-value num" id="out-total">0</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Cache read</div>
+        <div class="card-value num" id="cache-read">0</div>
+        <div class="card-meta">10% of input price</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Cache write</div>
+        <div class="card-value num" id="cache-write">0</div>
+        <div class="card-meta">125% (5m) / 200% (1h)</div>
+      </div>
     </div>
   </section>
 
+  <!-- Rate limits -->
   <section>
-    <h2>Rate Limits (live from Anthropic)</h2>
+    <div class="section-head">
+      <h2>Rate Limits</h2>
+      <span class="hint">Live from Anthropic — last response headers</span>
+    </div>
     <div class="panel">
-      <div id="rate-limits"></div>
-      <div class="bar-value" id="rate-updated" style="text-align:left;color:var(--muted);margin-top:10px;"></div>
+      <div class="panel-body">
+        <div id="rate-limits"></div>
+      </div>
     </div>
   </section>
 
-  <section class="charts">
-    <div class="panel">
-      <h2 style="margin-top:0">Cost by Model</h2>
-      <canvas id="model-chart" height="160"></canvas>
-    </div>
-    <div class="panel">
-      <h2 style="margin-top:0">Token Mix</h2>
-      <canvas id="token-chart" height="160"></canvas>
-    </div>
-  </section>
-
+  <!-- Daily trend + Cost by model -->
   <section>
-    <h2>Per-Model Breakdown</h2>
-    <div class="panel" style="padding:0;overflow:hidden;">
-      <table id="model-table">
+    <div class="section-head">
+      <h2>Daily Trend</h2>
+      <span class="hint">Last 15 days — cost &amp; tokens per day (local time)</span>
+    </div>
+    <div class="charts-grid">
+      <div class="panel">
+        <div class="panel-title">
+          <h3>Cost & tokens / day</h3>
+          <span class="sub" id="daily-range">—</span>
+        </div>
+        <div class="chart-canvas-wrap"><canvas id="daily-chart"></canvas></div>
+      </div>
+      <div class="panel">
+        <div class="panel-title">
+          <h3>Cost by model</h3>
+          <span class="sub">lifetime</span>
+        </div>
+        <div class="chart-canvas-wrap"><canvas id="model-chart"></canvas></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Daily table -->
+  <section>
+    <div class="section-head">
+      <h2>Daily Breakdown</h2>
+      <span class="hint">Most recent first</span>
+    </div>
+    <div class="panel">
+      <table id="daily-table">
         <thead><tr>
-          <th>Model</th><th>Requests</th><th>Input</th><th>Output</th><th>Cache R</th><th>Cache W</th><th>Cost</th>
+          <th>Date</th>
+          <th class="num">Requests</th>
+          <th class="num">Input</th>
+          <th class="num">Output</th>
+          <th class="num">Cache R</th>
+          <th class="num">Cache W</th>
+          <th class="num">Cost</th>
         </tr></thead>
         <tbody></tbody>
       </table>
-      <div class="empty" id="model-empty" style="display:none">No /v1/messages requests recorded yet.</div>
+      <div class="empty-state" id="daily-empty" style="display:none">
+        <strong>No daily data yet</strong>
+        Send a request to <code>/v1/messages</code> through the proxy to populate.
+      </div>
     </div>
   </section>
+
+  <!-- Per-model -->
+  <section>
+    <div class="section-head">
+      <h2>Per-Model Breakdown</h2>
+      <span class="hint">Lifetime totals</span>
+    </div>
+    <div class="panel">
+      <table id="model-table">
+        <thead><tr>
+          <th>Model</th>
+          <th class="num">Requests</th>
+          <th class="num">Input</th>
+          <th class="num">Output</th>
+          <th class="num">Cache R</th>
+          <th class="num">Cache W</th>
+          <th class="num">Cost</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="empty-state" id="model-empty" style="display:none">
+        <strong>No model data yet</strong>
+        Per-model breakdown appears after the first response.
+      </div>
+    </div>
+  </section>
+
+  <!-- Per-session -->
+  <section>
+    <div class="section-head">
+      <h2>Per-Session Breakdown</h2>
+      <span class="hint">Each device sends its own <code>x-claude-code-session-id</code> — the proxy locks identity outbound but keeps each session distinct here</span>
+    </div>
+    <div class="panel">
+      <table id="session-table">
+        <thead><tr>
+          <th>Session</th>
+          <th>Models</th>
+          <th class="num">Requests</th>
+          <th class="num">Tokens (in/out)</th>
+          <th class="num">Cost</th>
+          <th>Last seen</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="empty-state" id="session-empty" style="display:none">
+        <strong>No session data yet</strong>
+        Sessions appear once the proxy sees an <code>x-claude-code-session-id</code> header.
+      </div>
+    </div>
+  </section>
+
 </main>
 
-<div class="footer">
-  Auto-refreshes every 5s. Source: <code>GET /quota</code>. Stats persisted to <code>.quota.json</code>.
-</div>
+<footer>
+  <span>Source: <code>GET /quota</code></span>
+  <span class="dot-sep">·</span>
+  <span>Persisted to <code>.quota.json</code></span>
+  <span class="dot-sep">·</span>
+  <span>Auto-refresh every 5 s</span>
+  <span class="dot-sep">·</span>
+  <span>Costs are <em>estimates</em> — not your actual subscription bill</span>
+</footer>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <script>
-  let modelChart = null, tokenChart = null;
-
+  /*  Formatting helpers  ------------------------------------------------- */
+  const fmtCount = new Intl.NumberFormat('en-US');
   function fmtNum(n) {
     n = Number(n) || 0;
     if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
     if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
-    if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
-    return String(Math.round(n));
+    if (n >= 1e4) return (n / 1e3).toFixed(1) + 'K';
+    return fmtCount.format(Math.round(n));
   }
-  function fmtCost(c) { return '$' + (Number(c) || 0).toFixed(4); }
+  function fmtCost(c) {
+    const v = Number(c) || 0;
+    if (v === 0) return '$0.00';
+    if (v < 0.01) return '$' + v.toFixed(4);
+    if (v < 1) return '$' + v.toFixed(3);
+    return '$' + v.toFixed(2);
+  }
+  function fmtCostExact(c) { return '$' + (Number(c) || 0).toFixed(4); }
+  function fmtRelativeTime(iso) {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    if (isNaN(d)) return iso;
+    const diff = (Date.now() - d.getTime()) / 1000;
+    if (diff < 5) return 'just now';
+    if (diff < 60) return Math.round(diff) + 's ago';
+    if (diff < 3600) return Math.round(diff / 60) + 'm ago';
+    if (diff < 86400) return Math.round(diff / 3600) + 'h ago';
+    return Math.round(diff / 86400) + 'd ago';
+  }
+  function shortSession(id) {
+    if (!id) return '—';
+    if (id.length <= 14) return id;
+    return id.slice(0, 8) + '…' + id.slice(-4);
+  }
 
+  /*  Rate-limit progress bars  ------------------------------------------- */
   function addBar(container, label, remaining, limit, reset) {
-    if (remaining == null || limit == null) return;
+    if (remaining == null || limit == null) return false;
     const r = Number(remaining), l = Number(limit);
-    if (!Number.isFinite(r) || !Number.isFinite(l) || l <= 0) return;
+    if (!Number.isFinite(r) || !Number.isFinite(l) || l <= 0) return false;
     const pct = Math.max(0, Math.min(100, (r / l) * 100));
     const cls = pct < 10 ? 'danger' : pct < 30 ? 'warn' : 'ok';
     const div = document.createElement('div');
     div.className = 'bar-row ' + cls;
-    const meta = reset ? ' · resets ' + reset : '';
-    div.innerHTML = '<div class="bar-label">' + label + '</div>' +
-      '<div class="bar-track"><div class="bar-fill" style="width:' + pct.toFixed(1) + '%"></div></div>' +
-      '<div class="bar-value">' + fmtNum(r) + ' / ' + fmtNum(l) + meta + '</div>';
+    const resetText = reset ? `<span class="reset">resets ${reset}</span>` : '';
+    div.innerHTML = `
+      <div class="bar-label">${label}</div>
+      <div class="bar-track"><div class="bar-fill" style="width:${pct.toFixed(1)}%"></div></div>
+      <div class="bar-value">${fmtNum(r)} / ${fmtNum(l)} ${resetText}</div>`;
     container.appendChild(div);
+    return true;
   }
 
+  /*  Chart factories  ---------------------------------------------------- */
+  let dailyChart = null, modelChart = null;
+  const PALETTE = ['#c084fc','#67e8f9','#fbbf24','#4ade80','#f87171','#60a5fa','#f472b6','#a78bfa'];
+  const GRID_COLOR = '#22222e';
+  const TICK_COLOR = '#7c7c8c';
+
+  const COMMON_OPTS = {
+    maintainAspectRatio: false,
+    responsive: true,
+    interaction: { mode: 'index', intersect: false },
+    plugins: {
+      legend: { display: true, labels: { color: '#b8b8c4', boxWidth: 10, font: { size: 11 } } },
+      tooltip: {
+        backgroundColor: '#15151e',
+        borderColor: '#2a2a3a', borderWidth: 1,
+        titleColor: '#ebebf0', bodyColor: '#b8b8c4',
+        padding: 10, cornerRadius: 6,
+        titleFont: { size: 12, weight: 600 }, bodyFont: { size: 12 },
+      },
+    },
+  };
+
+  function buildDailyChart(days) {
+    days = days.slice().reverse(); // oldest -> newest for x-axis
+    const labels = days.map(d => d.date.slice(5)); // MM-DD
+    const cost = days.map(d => Number(d.cost_usd) || 0);
+    const inTok = days.map(d => Number(d.input_tokens) || 0);
+    const outTok = days.map(d => Number(d.output_tokens) || 0);
+    const cfg = {
+      data: {
+        labels,
+        datasets: [
+          { type: 'line', label: 'Cost (USD)', data: cost,
+            yAxisID: 'y',
+            borderColor: '#c084fc', backgroundColor: 'rgba(192,132,252,.15)',
+            tension: .3, fill: true, pointRadius: 3, pointHoverRadius: 5,
+            borderWidth: 2 },
+          { type: 'bar', label: 'Input tokens', data: inTok,
+            yAxisID: 'y1',
+            backgroundColor: 'rgba(103,232,249,.55)', borderRadius: 3, barPercentage: 0.8 },
+          { type: 'bar', label: 'Output tokens', data: outTok,
+            yAxisID: 'y1',
+            backgroundColor: 'rgba(74,222,128,.55)', borderRadius: 3, barPercentage: 0.8 },
+        ],
+      },
+      options: {
+        ...COMMON_OPTS,
+        scales: {
+          x: { ticks: { color: TICK_COLOR, font: { size: 11 } }, grid: { display: false } },
+          y: {
+            position: 'left', beginAtZero: true,
+            ticks: { color: TICK_COLOR, font: { size: 11 }, callback: v => '$' + Number(v).toFixed(2) },
+            grid: { color: GRID_COLOR },
+            title: { display: true, text: 'Cost (USD)', color: TICK_COLOR, font: { size: 11 } },
+          },
+          y1: {
+            position: 'right', beginAtZero: true,
+            ticks: { color: TICK_COLOR, font: { size: 11 }, callback: v => fmtNum(v) },
+            grid: { display: false },
+            title: { display: true, text: 'Tokens', color: TICK_COLOR, font: { size: 11 } },
+          },
+        },
+        plugins: {
+          ...COMMON_OPTS.plugins,
+          tooltip: {
+            ...COMMON_OPTS.plugins.tooltip,
+            callbacks: {
+              label: ctx => {
+                if (ctx.dataset.label === 'Cost (USD)') return ' Cost: ' + fmtCostExact(ctx.parsed.y);
+                return ' ' + ctx.dataset.label + ': ' + fmtCount.format(ctx.parsed.y);
+              },
+            },
+          },
+        },
+      },
+    };
+    if (!dailyChart) {
+      dailyChart = new Chart(document.getElementById('daily-chart'), cfg);
+    } else {
+      dailyChart.data = cfg.data; dailyChart.update();
+    }
+  }
+
+  function buildModelChart(models) {
+    const labels = models.map(m => m.model);
+    const data = models.map(m => Number(m.cost_usd) || 0);
+    const colors = labels.map((_, i) => PALETTE[i % PALETTE.length]);
+    const cfg = {
+      type: 'doughnut',
+      data: {
+        labels,
+        datasets: [{ data, backgroundColor: colors, borderColor: '#111118', borderWidth: 2, hoverOffset: 4 }],
+      },
+      options: {
+        ...COMMON_OPTS,
+        cutout: '62%',
+        plugins: {
+          legend: { position: 'bottom', labels: { color: '#b8b8c4', boxWidth: 10, font: { size: 11 }, padding: 10 } },
+          tooltip: {
+            ...COMMON_OPTS.plugins.tooltip,
+            callbacks: { label: ctx => ' ' + ctx.label + ': ' + fmtCostExact(ctx.parsed) },
+          },
+        },
+      },
+    };
+    if (!modelChart) {
+      modelChart = new Chart(document.getElementById('model-chart'), cfg);
+    } else {
+      modelChart.data = cfg.data; modelChart.update();
+    }
+  }
+
+  /*  Main refresh loop  --------------------------------------------------- */
   async function refresh() {
     let q;
     try {
       const r = await fetch('/quota', { cache: 'no-store' });
       q = await r.json();
-      document.getElementById('live-indicator').style.color = 'var(--ok)';
+      const pill = document.getElementById('status-pill');
+      pill.classList.remove('error'); pill.classList.add('live');
+      document.getElementById('status-text').textContent = 'live';
+      document.getElementById('last-refresh').textContent =
+        'updated ' + new Date().toLocaleTimeString();
     } catch (e) {
-      document.getElementById('live-indicator').style.color = 'var(--danger)';
-      document.getElementById('live-indicator').textContent = 'offline';
+      const pill = document.getElementById('status-pill');
+      pill.classList.add('error'); pill.classList.remove('live');
+      document.getElementById('status-text').textContent = 'offline';
       return;
     }
 
+    /* Totals cards */
     const t = q.tokens || {};
-    document.getElementById('cost-total').textContent = fmtCost(q.cost_usd_total);
-    document.getElementById('req-total').textContent = fmtNum(q.messages_requests);
-    document.getElementById('in-total').textContent = fmtNum(t.input_tokens);
-    document.getElementById('out-total').textContent = fmtNum(t.output_tokens);
-    document.getElementById('cache-read').textContent = fmtNum(t.cache_read_input_tokens);
-    document.getElementById('cache-write').textContent = fmtNum(t.cache_creation_input_tokens);
+    document.getElementById('cost-total').textContent  = fmtCostExact(q.cost_usd_total);
+    document.getElementById('req-total').textContent   = fmtCount.format(q.messages_requests || 0);
+    document.getElementById('session-count').textContent = fmtCount.format((q.by_session || []).length);
+    document.getElementById('in-total').textContent    = fmtCount.format(t.input_tokens || 0);
+    document.getElementById('out-total').textContent   = fmtCount.format(t.output_tokens || 0);
+    document.getElementById('cache-read').textContent  = fmtCount.format(t.cache_read_input_tokens || 0);
+    document.getElementById('cache-write').textContent = fmtCount.format(t.cache_creation_input_tokens || 0);
+    document.getElementById('cost-meta').textContent =
+      (q.messages_requests || 0) === 0
+        ? 'No requests recorded yet'
+        : `Across ${fmtCount.format(q.messages_requests)} requests on ${(q.by_model || []).length} model(s)`;
 
+    /* Rate limits */
     const rl = q.rate_limits || {};
     const rlEl = document.getElementById('rate-limits');
     rlEl.innerHTML = '';
-    addBar(rlEl, 'Requests',     rl.requests_remaining,      rl.requests_limit,      rl.requests_reset);
-    addBar(rlEl, 'Input tokens', rl.input_tokens_remaining,  rl.input_tokens_limit,  rl.input_tokens_reset);
-    addBar(rlEl, 'Output tokens',rl.output_tokens_remaining, rl.output_tokens_limit, rl.output_tokens_reset);
-    addBar(rlEl, 'Total tokens', rl.tokens_remaining,        rl.tokens_limit,        rl.tokens_reset);
+    let any = false;
+    any |= addBar(rlEl, 'Requests',      rl.requests_remaining,      rl.requests_limit,      rl.requests_reset);
+    any |= addBar(rlEl, 'Input tokens',  rl.input_tokens_remaining,  rl.input_tokens_limit,  rl.input_tokens_reset);
+    any |= addBar(rlEl, 'Output tokens', rl.output_tokens_remaining, rl.output_tokens_limit, rl.output_tokens_reset);
+    any |= addBar(rlEl, 'Total tokens',  rl.tokens_remaining,        rl.tokens_limit,        rl.tokens_reset);
     if (rl.retry_after) {
       const div = document.createElement('div');
-      div.className = 'retry';
-      div.textContent = '⚠  retry-after: ' + rl.retry_after + 's';
+      div.className = 'retry-banner';
+      div.textContent = '⚠ Anthropic asked us to retry after ' + rl.retry_after + ' s';
       rlEl.appendChild(div);
     }
-    if (!rlEl.children.length) {
+    if (!any && !rl.retry_after) {
       const div = document.createElement('div');
-      div.className = 'bar-value';
-      div.style.cssText = 'text-align:left;color:var(--muted);';
-      div.textContent = 'Waiting for first /v1/messages response…';
+      div.className = 'empty-bars';
+      div.textContent = 'Waiting for first /v1/messages response from Anthropic…';
       rlEl.appendChild(div);
     }
-    document.getElementById('rate-updated').textContent =
-      rl.updated_at ? 'updated ' + rl.updated_at : '';
 
-    const models = q.by_model || [];
-    const labels = models.map(m => m.model);
-    const costs  = models.map(m => Number(m.cost_usd) || 0);
-    const palette = ['#c084fc','#67e8f9','#fbbf24','#4ade80','#f87171','#a3a3a3','#60a5fa','#f472b6'];
-    const colors = labels.map((_, i) => palette[i % palette.length]);
-
-    if (window.Chart) {
-      if (!modelChart) {
-        modelChart = new Chart(document.getElementById('model-chart'), {
-          type: 'bar',
-          data: { labels, datasets: [{ label: 'Cost (USD)', data: costs, backgroundColor: colors, borderRadius: 4 }] },
-          options: {
-            plugins: { legend: { display: false } },
-            scales: {
-              x: { ticks: { color: '#8a8a99' }, grid: { display: false } },
-              y: { ticks: { color: '#8a8a99', callback: v => '$' + v.toFixed(2) }, grid: { color: '#2a2a36' }, beginAtZero: true }
-            }
-          }
-        });
-      } else {
-        modelChart.data.labels = labels;
-        modelChart.data.datasets[0].data = costs;
-        modelChart.data.datasets[0].backgroundColor = colors;
-        modelChart.update();
-      }
-
-      const tokenLabels = ['Input (paid)', 'Output', 'Cache read', 'Cache write'];
-      const tokenData = [t.input_tokens || 0, t.output_tokens || 0, t.cache_read_input_tokens || 0, t.cache_creation_input_tokens || 0];
-      const tokenColors = ['#f87171','#67e8f9','#4ade80','#c084fc'];
-      if (!tokenChart) {
-        tokenChart = new Chart(document.getElementById('token-chart'), {
-          type: 'doughnut',
-          data: { labels: tokenLabels, datasets: [{ data: tokenData, backgroundColor: tokenColors, borderColor: '#16161c', borderWidth: 2 }] },
-          options: { plugins: { legend: { position: 'right', labels: { color: '#e8e8ee', boxWidth: 12 } } } }
-        });
-      } else {
-        tokenChart.data.datasets[0].data = tokenData;
-        tokenChart.update();
-      }
+    /* Daily chart + range label + table */
+    const days = q.by_day || [];
+    if (window.Chart) buildDailyChart(days);
+    document.getElementById('daily-range').textContent =
+      days.length ? (days[days.length - 1].date + ' → ' + days[0].date) : '';
+    const dailyTb = document.querySelector('#daily-table tbody');
+    dailyTb.innerHTML = '';
+    document.getElementById('daily-empty').style.display = days.length ? 'none' : 'block';
+    document.getElementById('daily-table').style.display = days.length ? '' : 'none';
+    for (const d of days) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td><span class="num">${d.date}</span></td>
+        <td class="num">${fmtCount.format(d.requests)}</td>
+        <td class="num">${fmtNum(d.input_tokens)}</td>
+        <td class="num">${fmtNum(d.output_tokens)}</td>
+        <td class="num">${fmtNum(d.cache_read_input_tokens)}</td>
+        <td class="num">${fmtNum(d.cache_creation_input_tokens)}</td>
+        <td class="num cost">${fmtCostExact(d.cost_usd)}</td>`;
+      dailyTb.appendChild(tr);
     }
 
-    const tb = document.querySelector('#model-table tbody');
-    tb.innerHTML = '';
+    /* Per-model table + chart */
+    const models = q.by_model || [];
+    if (window.Chart) buildModelChart(models);
+    const modelTb = document.querySelector('#model-table tbody');
+    modelTb.innerHTML = '';
     document.getElementById('model-empty').style.display = models.length ? 'none' : 'block';
     document.getElementById('model-table').style.display = models.length ? '' : 'none';
     for (const m of models) {
       const tr = document.createElement('tr');
-      tr.innerHTML = '<td>' + m.model + '</td>' +
-        '<td>' + fmtNum(m.requests) + '</td>' +
-        '<td>' + fmtNum(m.input_tokens) + '</td>' +
-        '<td>' + fmtNum(m.output_tokens) + '</td>' +
-        '<td>' + fmtNum(m.cache_read_input_tokens) + '</td>' +
-        '<td>' + fmtNum(m.cache_creation_input_tokens) + '</td>' +
-        '<td>' + fmtCost(m.cost_usd) + '</td>';
-      tb.appendChild(tr);
+      tr.innerHTML = `
+        <td><strong>${m.model}</strong></td>
+        <td class="num">${fmtCount.format(m.requests)}</td>
+        <td class="num">${fmtNum(m.input_tokens)}</td>
+        <td class="num">${fmtNum(m.output_tokens)}</td>
+        <td class="num">${fmtNum(m.cache_read_input_tokens)}</td>
+        <td class="num">${fmtNum(m.cache_creation_input_tokens)}</td>
+        <td class="num cost">${fmtCostExact(m.cost_usd)}</td>`;
+      modelTb.appendChild(tr);
+    }
+
+    /* Per-session table */
+    const sessions = q.by_session || [];
+    const sessTb = document.querySelector('#session-table tbody');
+    sessTb.innerHTML = '';
+    document.getElementById('session-empty').style.display = sessions.length ? 'none' : 'block';
+    document.getElementById('session-table').style.display = sessions.length ? '' : 'none';
+    for (const s of sessions) {
+      const tr = document.createElement('tr');
+      const id = s.session_id || '';
+      const idHead = id.length > 14 ? id.slice(0, 8) : id;
+      const idTail = id.length > 14 ? '…' + id.slice(-4) : '';
+      const modelBadges = Object.entries(s.models || {})
+        .map(([k, n]) => `<span class="badge">${k} × ${n}</span>`).join('');
+      const lastSeen = s.last_seen
+        ? `<span class="timestamp">${fmtRelativeTime(s.last_seen)}<small>${s.last_seen.replace('T',' ')}</small></span>`
+        : '—';
+      tr.innerHTML = `
+        <td class="session-id" title="${id}">${idHead}<span class="session-tail">${idTail}</span></td>
+        <td>${modelBadges || '<span class="badge">—</span>'}</td>
+        <td class="num">${fmtCount.format(s.requests)}</td>
+        <td class="num">${fmtNum(s.input_tokens)} / ${fmtNum(s.output_tokens)}</td>
+        <td class="num cost">${fmtCostExact(s.cost_usd)}</td>
+        <td>${lastSeen}</td>`;
+      sessTb.appendChild(tr);
     }
   }
 
@@ -1568,6 +2182,19 @@ async def dashboard():
 async def quota():
     """Compact quota summary tuned for human display."""
     rl = quota_stats["rate_limits"]
+
+    sessions = sorted(
+        quota_stats["by_session"].values(),
+        key=lambda s: s.get("last_seen", ""),
+        reverse=True,
+    )
+
+    days = sorted(
+        quota_stats["by_day"].values(),
+        key=lambda d: d.get("date", ""),
+        reverse=True,
+    )[:15]
+
     summary = {
         "cost_usd_total": round(quota_stats["cost_usd_total"], 4),
         "messages_requests": quota_stats["messages_requests"],
@@ -1583,6 +2210,33 @@ async def quota():
                 "cost_usd": round(v["cost_usd"], 4),
             }
             for v in quota_stats["by_model"].values()
+        ],
+        "by_session": [
+            {
+                "session_id": s["session_id"],
+                "requests": s["requests"],
+                "input_tokens": s["input_tokens"],
+                "output_tokens": s["output_tokens"],
+                "cache_read_input_tokens": s["cache_read_input_tokens"],
+                "cache_creation_input_tokens": s["cache_creation_input_tokens"],
+                "cost_usd": round(s["cost_usd"], 4),
+                "models": s.get("models", {}),
+                "first_seen": s.get("first_seen"),
+                "last_seen": s.get("last_seen"),
+            }
+            for s in sessions
+        ],
+        "by_day": [
+            {
+                "date": d["date"],
+                "requests": d["requests"],
+                "input_tokens": d["input_tokens"],
+                "output_tokens": d["output_tokens"],
+                "cache_read_input_tokens": d["cache_read_input_tokens"],
+                "cache_creation_input_tokens": d["cache_creation_input_tokens"],
+                "cost_usd": round(d["cost_usd"], 4),
+            }
+            for d in days
         ],
         "rate_limits": {
             "requests_remaining": rl.get("requests-remaining"),
@@ -1677,8 +2331,18 @@ async def proxy(path: str, request: Request):
         # Capture anthropic-ratelimit-* headers regardless of status.
         _record_rate_limits(response.headers)
 
+        # Read the ORIGINAL session id from the incoming request (before the
+        # proxy rewrites the header to the locked identity). Each device's
+        # CC session shows up separately in by_session even though all
+        # devices share the locked outgoing fingerprint.
+        client_session_id = request.headers.get("x-claude-code-session-id")
+
         # Set up usage tap for /v1/messages (no-op for other paths).
-        usage_tap = UsageTap(response.headers.get("content-type"), path)
+        usage_tap = UsageTap(
+            response.headers.get("content-type"),
+            path,
+            session_id=client_session_id,
+        )
 
         # Buffer 400 bodies so we can detect Anthropic beta-header rejection
         # and latch the cache-ttl beta off for subsequent requests.
@@ -1730,7 +2394,7 @@ async def proxy(path: str, request: Request):
             usage_tap.feed(buffered_body)
             model, usage = usage_tap.finalize()
             if usage:
-                _record_usage(model, usage)
+                _record_usage(model, usage, usage_tap.session_id)
             return Response(
                 content=buffered_body,
                 status_code=response.status_code,
@@ -1747,7 +2411,7 @@ async def proxy(path: str, request: Request):
                 await response.aclose()
                 model, usage = usage_tap.finalize()
                 if usage:
-                    _record_usage(model, usage)
+                    _record_usage(model, usage, usage_tap.session_id)
 
         return StreamingResponse(
             stream_response(),
