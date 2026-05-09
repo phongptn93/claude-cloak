@@ -354,12 +354,16 @@ quota_stats = {
     "by_day": {},  # YYYY-MM-DD -> {requests, tokens, cost_usd}
     "messages_requests": 0,
     "last_request_at": None,
+    "period_month": "",  # YYYY-MM of current tracking period; auto-reset on rollover
 }
 
 # Caps to prevent unbounded growth of per-session / per-day buckets.
 # When a cap is exceeded, oldest entries (by last_seen / date) are evicted.
 QUOTA_MAX_SESSIONS = int(os.getenv("QUOTA_MAX_SESSIONS", "100"))
 QUOTA_MAX_DAYS = int(os.getenv("QUOTA_MAX_DAYS", "30"))
+# Auto-reset accumulated totals (cost/tokens/by_model/by_session) at the start
+# of each calendar month. by_day history is always preserved for charts.
+QUOTA_MONTHLY_RESET = os.getenv("QUOTA_MONTHLY_RESET", "true").lower() == "true"
 
 # ============================================================
 # QUOTA PERSISTENCE
@@ -795,6 +799,10 @@ def _load_quota_stats() -> bool:
             if isinstance(bucket, dict) and "date" in bucket:
                 quota_stats["by_day"][day] = bucket
 
+    if isinstance(data.get("period_month"), str):
+        quota_stats["period_month"] = data["period_month"]
+
+    _check_monthly_reset()
     return True
 
 
@@ -821,6 +829,7 @@ def _save_quota_stats(force: bool = False) -> None:
         "by_model": quota_stats["by_model"],
         "by_session": quota_stats["by_session"],
         "by_day": quota_stats["by_day"],
+        "period_month": quota_stats["period_month"],
     }
     tmp_path = QUOTA_PERSIST_PATH + ".tmp"
     try:
@@ -831,6 +840,34 @@ def _save_quota_stats(force: bool = False) -> None:
     except OSError:
         # Disk full / permission issue — skip silently, try again next time.
         pass
+
+
+def _check_monthly_reset() -> None:
+    """Auto-reset period totals when the calendar month rolls over.
+
+    by_day history is always kept so the trend chart stays intact.
+    Only cost_usd_total, usage_total, by_model, and by_session are cleared.
+    """
+    if not QUOTA_TRACKING_ENABLED or not QUOTA_MONTHLY_RESET:
+        return
+    current_month = datetime.now().strftime("%Y-%m")
+    period = quota_stats["period_month"]
+    if period and period != current_month:
+        log(
+            f"{YELLOW}Monthly reset: {period} → {current_month} "
+            f"(previous: ${quota_stats['cost_usd_total']:.4f} / "
+            f"{quota_stats['messages_requests']} reqs){RESET}"
+        )
+        for k in quota_stats["usage_total"]:
+            quota_stats["usage_total"][k] = 0
+        quota_stats["cost_usd_total"] = 0.0
+        quota_stats["messages_requests"] = 0
+        quota_stats["last_request_at"] = None
+        quota_stats["by_model"] = {}
+        quota_stats["by_session"] = {}
+        # by_day kept intentionally — dashboard trend chart spans multiple months
+        _save_quota_stats(force=True)
+    quota_stats["period_month"] = current_month
 
 
 def _normalize_model_key(model: str | None) -> str:
@@ -921,6 +958,7 @@ def _record_usage(model: str | None, usage: dict, session_id: str | None = None)
     if not QUOTA_TRACKING_ENABLED or not usage:
         return
 
+    _check_monthly_reset()
     model_key = _normalize_model_key(model)
     cost = _compute_cost(model_key, usage)
 
@@ -1701,6 +1739,7 @@ DASHBOARD_HTML = """<!doctype html>
     <span class="brand-tag">· Quota & Cost</span>
   </div>
   <div class="topbar-spacer"></div>
+  <span class="pill" id="period-pill" title="Current tracking period — resets automatically on the 1st of each month" style="display:none"></span>
   <span class="pill" id="last-refresh" title="Time of last successful /quota fetch">—</span>
   <span class="pill live" id="status-pill"><span class="dot"></span><span id="status-text">connecting…</span></span>
 </header>
@@ -2060,6 +2099,18 @@ DASHBOARD_HTML = """<!doctype html>
       return;
     }
 
+    /* Period pill */
+    const periodPill = document.getElementById('period-pill');
+    if (q.monthly_reset_enabled && q.period_month) {
+      const [y, m] = q.period_month.split('-').map(Number);
+      const nextReset = new Date(y, m, 1); // 1st of next month
+      const daysLeft = Math.ceil((nextReset - new Date()) / 86400000);
+      periodPill.textContent = `${q.period_month} · resets in ${daysLeft}d`;
+      periodPill.style.display = '';
+    } else {
+      periodPill.style.display = 'none';
+    }
+
     /* Totals cards */
     const t = q.tokens || {};
     document.getElementById('cost-total').textContent  = fmtCostExact(q.cost_usd_total);
@@ -2238,6 +2289,8 @@ async def quota():
             }
             for d in days
         ],
+        "period_month": quota_stats["period_month"],
+        "monthly_reset_enabled": QUOTA_MONTHLY_RESET,
         "rate_limits": {
             "requests_remaining": rl.get("requests-remaining"),
             "requests_limit": rl.get("requests-limit"),
