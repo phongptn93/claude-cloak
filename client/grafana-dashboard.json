@@ -1,0 +1,1073 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "datasource": "Loki",
+        "enable": true,
+        "iconColor": "yellow",
+        "name": "Identity captured",
+        "target": {
+          "datasource": "Loki",
+          "expr": "{job=\"$job\", host=~\"$host\", event=\"identity\"}",
+          "refId": "Anno"
+        },
+        "titleFormat": "Identity captured on {{host}}"
+      }
+    ]
+  },
+  "description": "Claude Cloak — multi-device proxy: cost, tokens, sessions, rate limits, errors, and telemetry blocking.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [
+    {
+      "title": "Claude Cloak repo",
+      "url": "https://github.com/phongptn93/claude-cloak",
+      "type": "link",
+      "icon": "external link",
+      "tags": []
+    }
+  ],
+  "liveNow": false,
+  "tags": ["claude", "claude-cloak", "anthropic", "ai-cost", "loki"],
+  "templating": {
+    "list": [
+      {
+        "name": "job",
+        "label": "Job",
+        "type": "constant",
+        "query": "claude-cloak",
+        "current": {"text": "claude-cloak", "value": "claude-cloak", "selected": true},
+        "hide": 2
+      },
+      {
+        "name": "host",
+        "label": "Host",
+        "type": "query",
+        "datasource": "Loki",
+        "query": "label_values({job=\"$job\"}, host)",
+        "current": {"text": "All", "value": "$__all"},
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "refresh": 2,
+        "sort": 1
+      },
+      {
+        "name": "model",
+        "label": "Model",
+        "type": "query",
+        "datasource": "Loki",
+        "query": "label_values({job=\"$job\", host=~\"$host\"}, model)",
+        "current": {"text": "All", "value": "$__all"},
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "refresh": 2,
+        "sort": 1
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Overview",
+      "id": 100,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "collapsed": false
+    },
+    {
+      "datasource": "Loki",
+      "type": "stat",
+      "title": "Total Cost",
+      "description": "Sum of cost_usd from successful /v1/messages calls in range",
+      "id": 1,
+      "gridPos": {"h": 5, "w": 4, "x": 0, "y": 1},
+      "targets": [
+        {
+          "datasource": "Loki",
+          "expr": "sum(sum_over_time({job=\"$job\", host=~\"$host\", event=\"usage\", model=~\"$model\"} | json | unwrap cost_usd [$__range]))",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 4,
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"value": null, "color": "blue"},
+              {"value": 1, "color": "green"},
+              {"value": 25, "color": "yellow"},
+              {"value": 100, "color": "orange"},
+              {"value": 500, "color": "red"}
+            ]
+          },
+          "mappings": [{"type": "special", "options": {"match": "null", "result": {"text": "$0"}}}]
+        }
+      },
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"]},
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "auto",
+        "justifyMode": "center"
+      }
+    },
+    {
+      "datasource": "Loki",
+      "type": "stat",
+      "title": "Requests",
+      "description": "Successful /v1/messages calls in range",
+      "id": 2,
+      "gridPos": {"h": 5, "w": 4, "x": 4, "y": 1},
+      "targets": [
+        {
+          "datasource": "Loki",
+          "expr": "sum(count_over_time({job=\"$job\", host=~\"$host\", event=\"usage\", model=~\"$model\"} [$__range]))",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"value": null, "color": "blue"},
+              {"value": 100, "color": "green"},
+              {"value": 1000, "color": "yellow"},
+              {"value": 5000, "color": "orange"}
+            ]
+          },
+          "mappings": [{"type": "special", "options": {"match": "null", "result": {"text": "0"}}}]
+        }
+      },
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"]},
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "auto",
+        "justifyMode": "center"
+      }
+    },
+    {
+      "datasource": "Loki",
+      "type": "stat",
+      "title": "Total Tokens",
+      "description": "input + output + cache_read + cache_creation",
+      "id": 3,
+      "gridPos": {"h": 5, "w": 4, "x": 8, "y": 1},
+      "targets": [
+        {
+          "datasource": "Loki",
+          "expr": "sum(sum_over_time({job=\"$job\", host=~\"$host\", event=\"usage\", model=~\"$model\"} | json | unwrap estimated_tokens [$__range]))",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "locale",
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"value": null, "color": "blue"},
+              {"value": 100000, "color": "green"},
+              {"value": 1000000, "color": "yellow"},
+              {"value": 10000000, "color": "orange"}
+            ]
+          },
+          "mappings": [{"type": "special", "options": {"match": "null", "result": {"text": "0"}}}]
+        }
+      },
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"]},
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "auto",
+        "justifyMode": "center"
+      }
+    },
+    {
+      "datasource": "Loki",
+      "type": "stat",
+      "title": "Avg Cost / Request",
+      "id": 4,
+      "gridPos": {"h": 5, "w": 4, "x": 12, "y": 1},
+      "targets": [
+        {
+          "datasource": "Loki",
+          "expr": "sum(sum_over_time({job=\"$job\", host=~\"$host\", event=\"usage\", model=~\"$model\"} | json | unwrap cost_usd [$__range])) / clamp_min(sum(count_over_time({job=\"$job\", host=~\"$host\", event=\"usage\", model=~\"$model\"}[$__range])), 1)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 4,
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"value": null, "color": "green"},
+              {"value": 0.05, "color": "yellow"},
+              {"value": 0.25, "color": "orange"},
+              {"value": 1, "color": "red"}
+            ]
+          },
+          "mappings": [{"type": "special", "options": {"match": "null", "result": {"text": "—"}}}]
+        }
+      },
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"]},
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "center"
+      }
+    },
+    {
+      "datasource": "Loki",
+      "type": "stat",
+      "title": "Active Sessions",
+      "description": "Distinct conversation_id values seen in range",
+      "id": 5,
+      "gridPos": {"h": 5, "w": 4, "x": 16, "y": 1},
+      "targets": [
+        {
+          "datasource": "Loki",
+          "expr": "count(count by (conversation_id) (count_over_time({job=\"$job\", host=~\"$host\", event=\"usage\", model=~\"$model\"} | json | conversation_id != \"\" [$__range])))",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"value": null, "color": "purple"},
+              {"value": 2, "color": "blue"},
+              {"value": 10, "color": "green"}
+            ]
+          },
+          "mappings": [{"type": "special", "options": {"match": "null", "result": {"text": "0"}}}]
+        }
+      },
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"]},
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "center"
+      }
+    },
+    {
+      "datasource": "Loki",
+      "type": "stat",
+      "title": "Active Hosts",
+      "description": "Distinct devices/hosts using the proxy",
+      "id": 6,
+      "gridPos": {"h": 5, "w": 4, "x": 20, "y": 1},
+      "targets": [
+        {
+          "datasource": "Loki",
+          "expr": "count(count by (host) (count_over_time({job=\"$job\", host=~\"$host\", event=\"usage\", model=~\"$model\"}[$__range])))",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"value": null, "color": "blue"},
+              {"value": 1, "color": "green"}
+            ]
+          },
+          "mappings": [{"type": "special", "options": {"match": "null", "result": {"text": "0"}}}]
+        }
+      },
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"]},
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "center"
+      }
+    },
+
+    {
+      "type": "row",
+      "title": "Cost & Volume Trends",
+      "id": 101,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 6},
+      "collapsed": false
+    },
+    {
+      "datasource": "Loki",
+      "type": "timeseries",
+      "title": "Cost Over Time (by model)",
+      "description": "Stacked USD spend per interval, broken down by model",
+      "id": 10,
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 7},
+      "targets": [
+        {
+          "datasource": "Loki",
+          "expr": "sum by (model) (sum_over_time({job=\"$job\", host=~\"$host\", event=\"usage\", model=~\"$model\"} | json | unwrap cost_usd [$__interval]))",
+          "refId": "A",
+          "legendFormat": "{{model}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 4,
+          "custom": {
+            "drawStyle": "bars",
+            "barAlignment": 0,
+            "lineWidth": 1,
+            "fillOpacity": 80,
+            "gradientMode": "scheme",
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {"mode": "normal", "group": "A"}
+          },
+          "color": {"mode": "palette-classic"}
+        }
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["sum", "mean"]},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      }
+    },
+    {
+      "datasource": "Loki",
+      "type": "timeseries",
+      "title": "Token Throughput (input vs output vs cache)",
+      "description": "Token rate per interval, broken into input / output / cache_read / cache_creation",
+      "id": 11,
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 7},
+      "targets": [
+        {
+          "datasource": "Loki",
+          "expr": "sum(sum_over_time({job=\"$job\", host=~\"$host\", event=\"usage\", model=~\"$model\"} | json | unwrap input_tokens [$__interval]))",
+          "refId": "A",
+          "legendFormat": "input"
+        },
+        {
+          "datasource": "Loki",
+          "expr": "sum(sum_over_time({job=\"$job\", host=~\"$host\", event=\"usage\", model=~\"$model\"} | json | unwrap output_tokens [$__interval]))",
+          "refId": "B",
+          "legendFormat": "output"
+        },
+        {
+          "datasource": "Loki",
+          "expr": "sum(sum_over_time({job=\"$job\", host=~\"$host\", event=\"usage\", model=~\"$model\"} | json | unwrap cache_read_tokens [$__interval]))",
+          "refId": "C",
+          "legendFormat": "cache_read"
+        },
+        {
+          "datasource": "Loki",
+          "expr": "sum(sum_over_time({job=\"$job\", host=~\"$host\", event=\"usage\", model=~\"$model\"} | json | unwrap cache_creation_tokens [$__interval]))",
+          "refId": "D",
+          "legendFormat": "cache_creation"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "locale",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "gradientMode": "scheme",
+            "showPoints": "auto",
+            "spanNulls": true,
+            "stacking": {"mode": "none", "group": "A"}
+          }
+        },
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "input"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "blue"}}]},
+          {"matcher": {"id": "byName", "options": "output"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "orange"}}]},
+          {"matcher": {"id": "byName", "options": "cache_read"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "green"}}, {"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [10, 10]}}]},
+          {"matcher": {"id": "byName", "options": "cache_creation"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "purple"}}]}
+        ]
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["sum", "mean", "max"]},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      }
+    },
+    {
+      "datasource": "Loki",
+      "type": "timeseries",
+      "title": "Requests / Minute (by host)",
+      "description": "Per-host request rate — shows when each device is active",
+      "id": 12,
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 16},
+      "targets": [
+        {
+          "datasource": "Loki",
+          "expr": "sum by (host) (rate({job=\"$job\", host=~\"$host\", event=\"usage\", model=~\"$model\"}[$__interval])) * 60",
+          "refId": "A",
+          "legendFormat": "{{host}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "decimals": 2,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "auto",
+            "spanNulls": true
+          },
+          "color": {"mode": "palette-classic"}
+        }
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["mean", "max"]},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      }
+    },
+    {
+      "datasource": "Loki",
+      "type": "timeseries",
+      "title": "Latency (p50 / p95 / max)",
+      "description": "End-to-end /v1/messages duration, percentiles per interval",
+      "id": 13,
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 16},
+      "targets": [
+        {
+          "datasource": "Loki",
+          "expr": "quantile_over_time(0.5, {job=\"$job\", host=~\"$host\", event=\"usage\", model=~\"$model\"} | json | unwrap duration_ms [$__interval])",
+          "refId": "A",
+          "legendFormat": "p50"
+        },
+        {
+          "datasource": "Loki",
+          "expr": "quantile_over_time(0.95, {job=\"$job\", host=~\"$host\", event=\"usage\", model=~\"$model\"} | json | unwrap duration_ms [$__interval])",
+          "refId": "B",
+          "legendFormat": "p95"
+        },
+        {
+          "datasource": "Loki",
+          "expr": "max_over_time({job=\"$job\", host=~\"$host\", event=\"usage\", model=~\"$model\"} | json | unwrap duration_ms [$__interval])",
+          "refId": "C",
+          "legendFormat": "max"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 5,
+            "showPoints": "auto",
+            "spanNulls": true
+          },
+          "color": {"mode": "palette-classic"}
+        }
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["mean", "max"]},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      }
+    },
+
+    {
+      "type": "row",
+      "title": "Breakdown",
+      "id": 102,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 25},
+      "collapsed": false
+    },
+    {
+      "datasource": "Loki",
+      "type": "piechart",
+      "title": "Cost by Model",
+      "id": 20,
+      "gridPos": {"h": 9, "w": 8, "x": 0, "y": 26},
+      "targets": [
+        {
+          "datasource": "Loki",
+          "expr": "sum by (model) (sum_over_time({job=\"$job\", host=~\"$host\", event=\"usage\", model=~\"$model\"} | json | unwrap cost_usd [$__range]))",
+          "refId": "A",
+          "legendFormat": "{{model}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 4,
+          "color": {"mode": "palette-classic"}
+        }
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "right", "showLegend": true, "values": ["value", "percent"]},
+        "tooltip": {"mode": "multi"},
+        "pieType": "donut",
+        "reduceOptions": {"calcs": ["sum"]}
+      }
+    },
+    {
+      "datasource": "Loki",
+      "type": "piechart",
+      "title": "Cost by Host",
+      "id": 21,
+      "gridPos": {"h": 9, "w": 8, "x": 8, "y": 26},
+      "targets": [
+        {
+          "datasource": "Loki",
+          "expr": "sum by (host) (sum_over_time({job=\"$job\", host=~\"$host\", event=\"usage\", model=~\"$model\"} | json | unwrap cost_usd [$__range]))",
+          "refId": "A",
+          "legendFormat": "{{host}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 4,
+          "color": {"mode": "palette-classic"}
+        }
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "right", "showLegend": true, "values": ["value", "percent"]},
+        "tooltip": {"mode": "multi"},
+        "pieType": "donut",
+        "reduceOptions": {"calcs": ["sum"]}
+      }
+    },
+    {
+      "datasource": "Loki",
+      "type": "bargauge",
+      "title": "Top 10 Sessions by Cost",
+      "description": "Highest-spending conversation_ids in range",
+      "id": 22,
+      "gridPos": {"h": 9, "w": 8, "x": 16, "y": 26},
+      "targets": [
+        {
+          "datasource": "Loki",
+          "expr": "topk(10, sum by (conversation_id) (sum_over_time({job=\"$job\", host=~\"$host\", event=\"usage\", model=~\"$model\"} | json | conversation_id != \"\" | unwrap cost_usd [$__range])))",
+          "refId": "A",
+          "legendFormat": "{{conversation_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 4,
+          "color": {"mode": "continuous-GrYlRd"}
+        }
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "showUnfilled": true,
+        "reduceOptions": {"calcs": ["sum"]}
+      }
+    },
+
+    {
+      "type": "row",
+      "title": "Cache & Efficiency",
+      "id": 103,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 35},
+      "collapsed": false
+    },
+    {
+      "datasource": "Loki",
+      "type": "stat",
+      "title": "Cache Hit Rate",
+      "description": "cache_read_tokens / (input_tokens + cache_read_tokens) — higher is cheaper",
+      "id": 30,
+      "gridPos": {"h": 5, "w": 6, "x": 0, "y": 36},
+      "targets": [
+        {
+          "datasource": "Loki",
+          "expr": "sum(sum_over_time({job=\"$job\", host=~\"$host\", event=\"usage\", model=~\"$model\"} | json | unwrap cache_read_tokens [$__range])) / clamp_min(sum(sum_over_time({job=\"$job\", host=~\"$host\", event=\"usage\", model=~\"$model\"} | json | unwrap input_tokens [$__range])) + sum(sum_over_time({job=\"$job\", host=~\"$host\", event=\"usage\", model=~\"$model\"} | json | unwrap cache_read_tokens [$__range])), 1) * 100",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 1,
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"value": null, "color": "red"},
+              {"value": 30, "color": "orange"},
+              {"value": 60, "color": "yellow"},
+              {"value": 80, "color": "green"}
+            ]
+          },
+          "mappings": [{"type": "special", "options": {"match": "null", "result": {"text": "—"}}}]
+        }
+      },
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"]},
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "auto",
+        "justifyMode": "center"
+      }
+    },
+    {
+      "datasource": "Loki",
+      "type": "stat",
+      "title": "Input Tokens",
+      "id": 31,
+      "gridPos": {"h": 5, "w": 4, "x": 6, "y": 36},
+      "targets": [
+        {
+          "datasource": "Loki",
+          "expr": "sum(sum_over_time({job=\"$job\", host=~\"$host\", event=\"usage\", model=~\"$model\"} | json | unwrap input_tokens [$__range]))",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "locale", "color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"value": null, "color": "blue"}]}}
+      },
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"]},
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "center"
+      }
+    },
+    {
+      "datasource": "Loki",
+      "type": "stat",
+      "title": "Output Tokens",
+      "id": 32,
+      "gridPos": {"h": 5, "w": 4, "x": 10, "y": 36},
+      "targets": [
+        {
+          "datasource": "Loki",
+          "expr": "sum(sum_over_time({job=\"$job\", host=~\"$host\", event=\"usage\", model=~\"$model\"} | json | unwrap output_tokens [$__range]))",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "locale", "color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"value": null, "color": "orange"}]}}
+      },
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"]},
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "center"
+      }
+    },
+    {
+      "datasource": "Loki",
+      "type": "stat",
+      "title": "Cache Read Tokens",
+      "id": 33,
+      "gridPos": {"h": 5, "w": 5, "x": 14, "y": 36},
+      "targets": [
+        {
+          "datasource": "Loki",
+          "expr": "sum(sum_over_time({job=\"$job\", host=~\"$host\", event=\"usage\", model=~\"$model\"} | json | unwrap cache_read_tokens [$__range]))",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "locale", "color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"value": null, "color": "green"}]}}
+      },
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"]},
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "center"
+      }
+    },
+    {
+      "datasource": "Loki",
+      "type": "stat",
+      "title": "Cache Creation Tokens",
+      "id": 34,
+      "gridPos": {"h": 5, "w": 5, "x": 19, "y": 36},
+      "targets": [
+        {
+          "datasource": "Loki",
+          "expr": "sum(sum_over_time({job=\"$job\", host=~\"$host\", event=\"usage\", model=~\"$model\"} | json | unwrap cache_creation_tokens [$__range]))",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "locale", "color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"value": null, "color": "purple"}]}}
+      },
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"]},
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "center"
+      }
+    },
+
+    {
+      "type": "row",
+      "title": "Errors & Telemetry Blocking",
+      "id": 104,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 41},
+      "collapsed": false
+    },
+    {
+      "datasource": "Loki",
+      "type": "stat",
+      "title": "Error Rate",
+      "description": "errors / (errors + successful usage) over range",
+      "id": 40,
+      "gridPos": {"h": 5, "w": 4, "x": 0, "y": 42},
+      "targets": [
+        {
+          "datasource": "Loki",
+          "expr": "sum(count_over_time({job=\"$job\", host=~\"$host\", event=\"error\"} [$__range])) / clamp_min(sum(count_over_time({job=\"$job\", host=~\"$host\", event=~\"usage|error\"} [$__range])), 1) * 100",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 2,
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"value": null, "color": "green"},
+              {"value": 1, "color": "yellow"},
+              {"value": 5, "color": "orange"},
+              {"value": 10, "color": "red"}
+            ]
+          },
+          "mappings": [{"type": "special", "options": {"match": "null", "result": {"text": "0%"}}}]
+        }
+      },
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"]},
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "auto",
+        "justifyMode": "center"
+      }
+    },
+    {
+      "datasource": "Loki",
+      "type": "stat",
+      "title": "Rate-Limited (429)",
+      "id": 41,
+      "gridPos": {"h": 5, "w": 4, "x": 4, "y": 42},
+      "targets": [
+        {
+          "datasource": "Loki",
+          "expr": "sum(count_over_time({job=\"$job\", host=~\"$host\", event=\"error\"} | json | error_type=\"rate_limit\" [$__range]))",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"value": null, "color": "green"},
+              {"value": 1, "color": "yellow"},
+              {"value": 10, "color": "orange"},
+              {"value": 50, "color": "red"}
+            ]
+          },
+          "mappings": [{"type": "special", "options": {"match": "null", "result": {"text": "0"}}}]
+        }
+      },
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"]},
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "auto",
+        "justifyMode": "center"
+      }
+    },
+    {
+      "datasource": "Loki",
+      "type": "stat",
+      "title": "Unauthorized (401)",
+      "id": 42,
+      "gridPos": {"h": 5, "w": 4, "x": 8, "y": 42},
+      "targets": [
+        {
+          "datasource": "Loki",
+          "expr": "sum(count_over_time({job=\"$job\", host=~\"$host\", event=\"error\"} | json | error_type=\"unauthorized\" [$__range]))",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"value": null, "color": "green"},
+              {"value": 1, "color": "red"}
+            ]
+          },
+          "mappings": [{"type": "special", "options": {"match": "null", "result": {"text": "0"}}}]
+        }
+      },
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"]},
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "center"
+      }
+    },
+    {
+      "datasource": "Loki",
+      "type": "stat",
+      "title": "Telemetry Blocked",
+      "description": "Telemetry endpoints intercepted by the proxy",
+      "id": 43,
+      "gridPos": {"h": 5, "w": 4, "x": 12, "y": 42},
+      "targets": [
+        {
+          "datasource": "Loki",
+          "expr": "sum(count_over_time({job=\"$job\", host=~\"$host\", event=\"blocked\"} [$__range]))",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"value": null, "color": "purple"}
+            ]
+          },
+          "mappings": [{"type": "special", "options": {"match": "null", "result": {"text": "0"}}}]
+        }
+      },
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"]},
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "auto",
+        "justifyMode": "center"
+      }
+    },
+    {
+      "datasource": "Loki",
+      "type": "stat",
+      "title": "Identity Captures",
+      "description": "First-time identity capture events",
+      "id": 44,
+      "gridPos": {"h": 5, "w": 4, "x": 16, "y": 42},
+      "targets": [
+        {
+          "datasource": "Loki",
+          "expr": "sum(count_over_time({job=\"$job\", host=~\"$host\", event=\"identity\"} [$__range]))",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"value": null, "color": "blue"}
+            ]
+          },
+          "mappings": [{"type": "special", "options": {"match": "null", "result": {"text": "0"}}}]
+        }
+      },
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"]},
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "center"
+      }
+    },
+    {
+      "datasource": "Loki",
+      "type": "stat",
+      "title": "Server Errors (5xx)",
+      "id": 45,
+      "gridPos": {"h": 5, "w": 4, "x": 20, "y": 42},
+      "targets": [
+        {
+          "datasource": "Loki",
+          "expr": "sum(count_over_time({job=\"$job\", host=~\"$host\", event=\"error\"} | json | error_type=~\"server_error|timeout|connect_error|proxy_error\" [$__range]))",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"value": null, "color": "green"},
+              {"value": 1, "color": "orange"},
+              {"value": 10, "color": "red"}
+            ]
+          },
+          "mappings": [{"type": "special", "options": {"match": "null", "result": {"text": "0"}}}]
+        }
+      },
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"]},
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "auto",
+        "justifyMode": "center"
+      }
+    },
+    {
+      "datasource": "Loki",
+      "type": "timeseries",
+      "title": "Errors Over Time (by type)",
+      "description": "Per-interval error counts split by error_type",
+      "id": 46,
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 47},
+      "targets": [
+        {
+          "datasource": "Loki",
+          "expr": "sum by (error_type) (count_over_time({job=\"$job\", host=~\"$host\", event=\"error\"} | json [$__interval]))",
+          "refId": "A",
+          "legendFormat": "{{error_type}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "drawStyle": "bars",
+            "barAlignment": 0,
+            "lineWidth": 1,
+            "fillOpacity": 80,
+            "gradientMode": "scheme",
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {"mode": "normal", "group": "A"}
+          },
+          "color": {"mode": "palette-classic"}
+        }
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["sum"]},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      }
+    },
+    {
+      "datasource": "Loki",
+      "type": "timeseries",
+      "title": "Telemetry Blocks (by path)",
+      "description": "Top blocked telemetry endpoints over time",
+      "id": 47,
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 47},
+      "targets": [
+        {
+          "datasource": "Loki",
+          "expr": "sum by (path) (count_over_time({job=\"$job\", host=~\"$host\", event=\"blocked\"} | json [$__interval]))",
+          "refId": "A",
+          "legendFormat": "{{path}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "drawStyle": "bars",
+            "barAlignment": 0,
+            "lineWidth": 1,
+            "fillOpacity": 80,
+            "gradientMode": "scheme",
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {"mode": "normal", "group": "A"}
+          },
+          "color": {"mode": "palette-classic"}
+        }
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["sum"]},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      }
+    },
+
+    {
+      "type": "row",
+      "title": "Raw Events",
+      "id": 105,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 56},
+      "collapsed": true,
+      "panels": [
+        {
+          "datasource": "Loki",
+          "type": "logs",
+          "title": "All Events (newest first)",
+          "id": 50,
+          "gridPos": {"h": 14, "w": 24, "x": 0, "y": 57},
+          "targets": [
+            {
+              "datasource": "Loki",
+              "expr": "{job=\"$job\", host=~\"$host\"}",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "dedupStrategy": "none",
+            "enableLogDetails": true,
+            "prettifyLogMessage": true,
+            "showCommonLabels": false,
+            "showLabels": true,
+            "showTime": true,
+            "sortOrder": "Descending",
+            "wrapLogMessage": true
+          }
+        }
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "time": {"from": "now-24h", "to": "now"},
+  "timepicker": {
+    "refresh_intervals": ["10s", "30s", "1m", "5m", "15m"],
+    "time_options": ["5m", "15m", "1h", "6h", "12h", "24h", "2d", "7d", "30d"]
+  },
+  "timezone": "browser",
+  "title": "Claude Cloak — Multi-Device Usage",
+  "uid": "claude-cloak-usage",
+  "version": 1,
+  "weekStart": ""
+}

@@ -350,6 +350,51 @@ QUOTA_MAX_DAYS=30              # Cap on per-day buckets
 
 `rate_limits` are NOT persisted — those values would be stale by next process start. Reset all stats by deleting `.quota.json`.
 
+### Auto Monthly Reset
+
+Set `QUOTA_MONTHLY_RESET=true` (default) to automatically clear `cost_usd_total`, `usage_total`, `by_model`, and `by_session` at the start of each calendar month. `by_day` history is preserved so the trend chart spans multiple months. The dashboard topbar shows a `YYYY-MM · resets in Nd` pill so you can see when the next reset happens.
+
+## Loki Log Shipping (optional)
+
+The proxy can forward structured events to a [Grafana Loki](https://grafana.com/oss/loki/) push endpoint, so you can visualise multi-device cost/usage in Grafana alongside whatever else you observe.
+
+Enable by setting `LOKI_URL` in `.env`:
+
+```env
+LOKI_URL=http://192.168.15.120:3100/loki/api/v1/push
+LOKI_JOB=claude-cloak           # default
+LOKI_HOST=                      # default: socket.gethostname()
+LOKI_USER_EMAIL=                # optional, becomes a Loki label if set
+LOKI_LABELS=team=eng,env=dev    # optional extra static labels
+LOKI_BATCH_SIZE=100
+LOKI_FLUSH_INTERVAL=5
+LOKI_MAX_BUFFER=2000
+```
+
+Events emitted (low-cardinality labels + JSON fields):
+
+| `event` | When | Key fields |
+|---|---|---|
+| `usage`    | After each successful `/v1/messages` | `conversation_id`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_creation_tokens`, `estimated_tokens`, `cost_usd`, `duration_ms`, label `model` |
+| `error`    | Non-2xx responses or transport errors  | `status`, `path`, `method`, `error_type` (`unauthorized`/`rate_limit`/`client_error`/`server_error`/`timeout`/`connect_error`/`proxy_error`), `duration_ms`, `retry_after`, `conversation_id` |
+| `blocked`  | Telemetry endpoint intercepted         | `path`, `method` |
+| `identity` | Identity headers captured first time   | `headers_count`, `headers` (list of header names — never values) |
+
+Standard labels: `job`, `host`, `event`, plus `model` on `usage`/`error`. Buffering is bounded (default 2000 events); flush failures warn at most once per minute and never block requests. If Loki goes down or `LOKI_URL` is unreachable, the proxy keeps running normally.
+
+### Bundled Grafana dashboard
+
+Import `client/grafana-dashboard.json` into Grafana (Dashboards → New → Import). It includes:
+
+- **Overview** — total cost, requests, total tokens, avg cost/request, active sessions, active hosts
+- **Cost & Volume Trends** — stacked cost over time by model, token throughput (input/output/cache), requests/min by host, latency (p50/p95/max)
+- **Breakdown** — cost by model (donut), cost by host (donut), top 10 sessions by cost
+- **Cache & Efficiency** — cache hit rate, input/output/cache_read/cache_creation token totals
+- **Errors & Telemetry Blocking** — error rate, 429/401/5xx counts, telemetry blocked, identity captures, errors over time, top blocked paths
+- **Raw Events** (collapsed) — full log stream
+
+The dashboard expects the `Loki` datasource to exist in Grafana; rename via the import dialog if yours has a different name.
+
 ### Caveats
 
 - Cost numbers are **estimates** based on the configured pricing table; the canonical source remains the Anthropic console.
@@ -369,14 +414,16 @@ QUOTA_MAX_DAYS=30              # Cap on per-day buckets
 
 ```
 client/
-├── proxy.py           # Main proxy server (FastAPI) — anonymity layers, token saver, quota tracking, dashboard
-├── setup_claude.py    # Auto-config Claude Code → proxy URL
-├── tray_app.py        # Optional Windows system tray app
-├── start.bat          # Launch script (kill old port + start proxy)
-├── install.bat        # Dependency installer
-├── .env.example       # Config template with all captured header fields
-├── .env               # Captured identity + config (git-ignored)
-├── .quota.json        # Persisted quota/cost counters (git-ignored, auto-managed)
+├── proxy.py               # Main proxy server (FastAPI) — anonymity layers, token saver, quota tracking, dashboard, Loki shipping
+├── setup_claude.py        # Auto-config Claude Code → proxy URL (reads LOCAL_PORT from .env)
+├── tray_app.py            # Optional Windows system tray app
+├── start.bat              # Windows launcher
+├── start.sh               # macOS / Linux launcher
+├── install.bat            # Windows dependency installer
+├── grafana-dashboard.json # Importable Grafana dashboard for Loki-shipped events
+├── .env.example           # Config template with all captured header fields
+├── .env                   # Captured identity + config (git-ignored)
+├── .quota.json            # Persisted quota/cost counters (git-ignored, auto-managed)
 └── requirements.txt   # Python dependencies
 ```
 

@@ -366,6 +366,54 @@ QUOTA_MAX_DAYS = int(os.getenv("QUOTA_MAX_DAYS", "30"))
 QUOTA_MONTHLY_RESET = os.getenv("QUOTA_MONTHLY_RESET", "true").lower() == "true"
 
 # ============================================================
+# LOKI LOG SHIPPING (optional)
+# Forward structured events to a Grafana Loki push endpoint so usage
+# can be queried/visualised in Grafana. Disabled by default — set
+# LOKI_URL to enable.
+#
+# Schema (low-cardinality labels + JSON fields per event):
+#   labels: job=claude-cloak, host=<hostname>, event, model
+#   fields: conversation_id, input_tokens, output_tokens,
+#           cache_read_tokens, cache_creation_tokens, estimated_tokens,
+#           cost_usd, duration_ms, status, path, method, error_type
+# Events emitted:
+#   usage     — one per successful /v1/messages (full metrics + duration)
+#   error     — non-2xx responses + transport errors
+#   blocked   — proxy blocked a telemetry endpoint
+#   identity  — identity headers were captured for the first time
+# A bundled Grafana dashboard JSON ships at client/grafana-dashboard.json.
+# ============================================================
+import socket as _socket
+LOKI_URL = os.getenv("LOKI_URL", "").strip()
+LOKI_ENABLED = bool(LOKI_URL)
+LOKI_JOB = os.getenv("LOKI_JOB", "claude-cloak").strip() or "claude-cloak"
+LOKI_HOST = os.getenv("LOKI_HOST", "").strip() or _socket.gethostname() or "unknown"
+LOKI_USER_EMAIL = os.getenv("LOKI_USER_EMAIL", "").strip()
+LOKI_LABELS_RAW = os.getenv("LOKI_LABELS", "").strip()
+LOKI_BATCH_SIZE = max(1, int(os.getenv("LOKI_BATCH_SIZE", "100")))
+LOKI_FLUSH_INTERVAL_SECONDS = max(0.5, float(os.getenv("LOKI_FLUSH_INTERVAL", "5")))
+LOKI_MAX_BUFFER = max(LOKI_BATCH_SIZE, int(os.getenv("LOKI_MAX_BUFFER", "2000")))
+LOKI_TIMEOUT_SECONDS = float(os.getenv("LOKI_TIMEOUT", "10"))
+
+# Buffer of (ts_ns: str, labels: dict, fields: dict). Single-process,
+# single-event-loop FastAPI ⇒ no lock needed (list ops are atomic in CPython).
+_loki_buffer: list[tuple[str, dict, dict]] = []
+_loki_dropped_count = 0
+_loki_last_warn_at = 0.0
+_loki_flusher_task = None  # asyncio.Task | None
+
+_LOKI_EXTRA_LABELS: dict[str, str] = {}
+if LOKI_LABELS_RAW:
+    for _pair in LOKI_LABELS_RAW.split(","):
+        _pair = _pair.strip()
+        if "=" in _pair:
+            _k, _v = _pair.split("=", 1)
+            _k = _k.strip()
+            _v = _v.strip()
+            if _k and _v:
+                _LOKI_EXTRA_LABELS[_k] = _v
+
+# ============================================================
 # QUOTA PERSISTENCE
 # Save accumulated stats to .quota.json (next to .env) so totals survive
 # proxy restarts. Writes are debounced — at most once per
@@ -870,6 +918,101 @@ def _check_monthly_reset() -> None:
     quota_stats["period_month"] = current_month
 
 
+def _build_loki_labels(extra: dict | None = None) -> dict:
+    """Assemble the label set for one Loki stream.
+
+    Loki indexes by label set, so keep cardinality low — only `model`
+    and `event` vary per request.
+    """
+    labels = {"job": LOKI_JOB, "host": LOKI_HOST}
+    if LOKI_USER_EMAIL:
+        labels["user_email"] = LOKI_USER_EMAIL
+    if _LOKI_EXTRA_LABELS:
+        labels.update(_LOKI_EXTRA_LABELS)
+    if extra:
+        for k, v in extra.items():
+            if v is None or v == "":
+                continue
+            labels[k] = str(v)
+    return labels
+
+
+def _loki_enqueue(event: str, fields: dict | None = None, model: str | None = None) -> None:
+    """Append a structured event to the Loki send buffer.
+
+    No-op when LOKI_URL is unset. Drops the oldest entry once the buffer
+    cap is hit to bound memory usage when Loki is unreachable.
+    """
+    if not LOKI_ENABLED:
+        return
+    global _loki_dropped_count
+    if len(_loki_buffer) >= LOKI_MAX_BUFFER:
+        _loki_buffer.pop(0)
+        _loki_dropped_count += 1
+    extra_labels: dict[str, str] = {"event": event}
+    if model:
+        extra_labels["model"] = model
+    labels = _build_loki_labels(extra_labels)
+    payload: dict = {"event": event}
+    if model:
+        payload["model"] = model
+    if fields:
+        for k, v in fields.items():
+            if v is None:
+                continue
+            payload[k] = v
+    ts_ns = str(time.time_ns())
+    _loki_buffer.append((ts_ns, labels, payload))
+
+
+async def _loki_flush_once() -> bool:
+    """Push up to LOKI_BATCH_SIZE entries to Loki. Returns True on success."""
+    global _loki_last_warn_at
+    if not _loki_buffer or http_client is None:
+        return True
+    batch_size = min(len(_loki_buffer), LOKI_BATCH_SIZE)
+    batch = _loki_buffer[:batch_size]
+
+    # Loki streams are keyed by label set, so group entries that share labels.
+    streams_map: dict[tuple, list[list[str]]] = {}
+    for ts, labels, fields in batch:
+        key = tuple(sorted(labels.items()))
+        line = json.dumps(fields, ensure_ascii=False, separators=(",", ":"))
+        streams_map.setdefault(key, []).append([ts, line])
+
+    payload = {
+        "streams": [
+            {"stream": dict(key), "values": values}
+            for key, values in streams_map.items()
+        ]
+    }
+    try:
+        r = await http_client.post(LOKI_URL, json=payload, timeout=LOKI_TIMEOUT_SECONDS)
+        if r.status_code >= 400:
+            raise RuntimeError(f"Loki returned {r.status_code}: {r.text[:200]}")
+        del _loki_buffer[:batch_size]
+        return True
+    except Exception as e:
+        now_ = time.monotonic()
+        if now_ - _loki_last_warn_at > 60:
+            log(f"  {YELLOW}Loki push failed: {e}{RESET}")
+            _loki_last_warn_at = now_
+        return False
+
+
+async def _loki_flusher_loop() -> None:
+    """Background task: flushes the buffer at LOKI_FLUSH_INTERVAL_SECONDS."""
+    while True:
+        try:
+            await asyncio.sleep(LOKI_FLUSH_INTERVAL_SECONDS)
+            await _loki_flush_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Never let a stray exception kill the flusher.
+            pass
+
+
 def _normalize_model_key(model: str | None) -> str:
     """Map a Claude model id to a PRICING key.
 
@@ -948,12 +1091,18 @@ def _compute_cost(model_key: str, usage: dict) -> float:
     return cost
 
 
-def _record_usage(model: str | None, usage: dict, session_id: str | None = None) -> None:
+def _record_usage(
+    model: str | None,
+    usage: dict,
+    session_id: str | None = None,
+    duration_ms: int | None = None,
+) -> None:
     """Accumulate a single response's usage into quota_stats and log it.
 
     `session_id` is the original `x-claude-code-session-id` from the incoming
     request (BEFORE the proxy rewrites it to the locked identity), so each
-    device's session shows up separately.
+    device's session shows up separately. `duration_ms` is the total wall
+    time including streaming, used only for Loki shipping.
     """
     if not QUOTA_TRACKING_ENABLED or not usage:
         return
@@ -1046,6 +1195,24 @@ def _record_usage(model: str | None, usage: dict, session_id: str | None = None)
         f"{DIM}in={in_t} out={out_t} cache_r={cr_t} cache_w={cw_t} "
         f"cost=${cost:.4f}{RESET}"
     )
+
+    if LOKI_ENABLED:
+        _loki_enqueue(
+            "usage",
+            {
+                "conversation_id": session_id or "",
+                "input_tokens": in_t,
+                "output_tokens": out_t,
+                "cache_read_tokens": cr_t,
+                "cache_creation_tokens": cw_t,
+                "cache_creation_5m_tokens": cw5,
+                "cache_creation_1h_tokens": cw1,
+                "estimated_tokens": in_t + out_t + cr_t + cw_t,
+                "cost_usd": round(cost, 6),
+                "duration_ms": duration_ms,
+            },
+            model=model_key,
+        )
 
     _save_quota_stats()
 
@@ -1188,6 +1355,12 @@ def capture_identity_from_request(request: Request):
         # Save session secret for consistent ID generation across devices
         save_to_env("SESSION_SECRET", SESSION_SECRET)
 
+        if LOKI_ENABLED:
+            _loki_enqueue("identity", {
+                "headers_count": len(captured_identity),
+                "headers": sorted(captured_identity.keys()),
+            })
+
         log("")
         log(f"  {BG_GREEN}{BOLD} IDENTITY CAPTURED {RESET}")
         log(f"  {GREEN}Da bat {len(captured_identity)} headers tu Claude Code:{RESET}")
@@ -1277,6 +1450,11 @@ def print_status():
     print(f"  {CYAN} Quota Track {RESET}{quota_status}")
     if QUOTA_TRACKING_ENABLED:
         print(f"  {CYAN} Dashboard   {RESET}{WHITE}http://localhost:{LOCAL_PORT}/dashboard{RESET}")
+    if LOKI_ENABLED:
+        loki_status = f"{GREEN}ON{RESET} {DIM}({LOKI_URL} · job={LOKI_JOB} · host={LOKI_HOST}){RESET}"
+    else:
+        loki_status = f"{YELLOW}OFF{RESET}"
+    print(f"  {CYAN} Loki        {RESET}{loki_status}")
     if identity_captured:
         print(f"  {DIM}{'─' * 60}{RESET}")
         for h, v in captured_identity.items():
@@ -1288,7 +1466,7 @@ def print_status():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global http_client
+    global http_client, _loki_flusher_task
     http_client = httpx.AsyncClient(
         timeout=httpx.Timeout(300.0, connect=10.0),
         limits=httpx.Limits(
@@ -1300,9 +1478,23 @@ async def lifespan(app: FastAPI):
     _load_quota_stats()
     print_banner()
     print_status()
+    if LOKI_ENABLED:
+        _loki_flusher_task = asyncio.create_task(_loki_flusher_loop())
     try:
         yield
     finally:
+        if _loki_flusher_task is not None:
+            _loki_flusher_task.cancel()
+            try:
+                await _loki_flusher_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            # Best-effort final flush so in-flight events aren't lost.
+            for _ in range(5):
+                if not _loki_buffer:
+                    break
+                if not await _loki_flush_once():
+                    break
         _save_quota_stats(force=True)
         await http_client.aclose()
 
@@ -2324,6 +2516,8 @@ async def proxy(path: str, request: Request):
         blocked_requests_count += 1
         log(f"  {DIM}{now}{RESET}  {CYAN}{BOLD}#{req_id}{RESET}  {BG_RED}{BOLD} BLOCKED {RESET} {RED}Telemetry: /{path}{RESET}")
         log("")
+        if LOKI_ENABLED:
+            _loki_enqueue("blocked", {"path": "/" + path, "method": request.method})
         return JSONResponse(
             status_code=200,
             content={"status": "ok"},
@@ -2433,6 +2627,25 @@ async def proxy(path: str, request: Request):
         log(f"  {DIM}{now}{RESET}  {CYAN}{BOLD}#{req_id}{RESET}  {status_str} {DIM}{elapsed:.1f}s{RESET}")
         log("")
 
+        if LOKI_ENABLED and status >= 400:
+            if status == 401:
+                err_type = "unauthorized"
+            elif status == 429:
+                err_type = "rate_limit"
+            elif status < 500:
+                err_type = "client_error"
+            else:
+                err_type = "server_error"
+            _loki_enqueue("error", {
+                "status": status,
+                "path": "/" + path,
+                "method": request.method,
+                "duration_ms": int(elapsed * 1000),
+                "error_type": err_type,
+                "retry_after": quota_stats["rate_limits"].get("retry-after"),
+                "conversation_id": client_session_id or "",
+            })
+
         response_headers = filter_response_headers(response)
 
         # Strip Set-Cookie from responses to prevent cookie-based tracking
@@ -2446,8 +2659,9 @@ async def proxy(path: str, request: Request):
             # harmless), so the tap sees the body too.
             usage_tap.feed(buffered_body)
             model, usage = usage_tap.finalize()
+            total_ms = int((time.monotonic() - start_time) * 1000)
             if usage:
-                _record_usage(model, usage, usage_tap.session_id)
+                _record_usage(model, usage, usage_tap.session_id, duration_ms=total_ms)
             return Response(
                 content=buffered_body,
                 status_code=response.status_code,
@@ -2462,9 +2676,10 @@ async def proxy(path: str, request: Request):
                     yield chunk
             finally:
                 await response.aclose()
+                total_ms = int((time.monotonic() - start_time) * 1000)
                 model, usage = usage_tap.finalize()
                 if usage:
-                    _record_usage(model, usage, usage_tap.session_id)
+                    _record_usage(model, usage, usage_tap.session_id, duration_ms=total_ms)
 
         return StreamingResponse(
             stream_response(),
@@ -2476,15 +2691,39 @@ async def proxy(path: str, request: Request):
     except httpx.TimeoutException:
         log(f"  {DIM}{now}{RESET}  {CYAN}{BOLD}#{req_id}{RESET}  {BG_RED}{BOLD} TIMEOUT {RESET}")
         log("")
+        if LOKI_ENABLED:
+            _loki_enqueue("error", {
+                "status": 504,
+                "path": "/" + path,
+                "method": request.method,
+                "duration_ms": int((time.monotonic() - start_time) * 1000),
+                "error_type": "timeout",
+            })
         raise HTTPException(status_code=504, detail="Gateway timeout")
     except httpx.ConnectError:
         log(f"  {DIM}{now}{RESET}  {CYAN}{BOLD}#{req_id}{RESET}  {BG_RED}{BOLD} CONNECT ERROR {RESET}")
         log("")
+        if LOKI_ENABLED:
+            _loki_enqueue("error", {
+                "status": 502,
+                "path": "/" + path,
+                "method": request.method,
+                "duration_ms": int((time.monotonic() - start_time) * 1000),
+                "error_type": "connect_error",
+            })
         raise HTTPException(status_code=502, detail="Bad gateway")
     except Exception:
         # Don't leak internal error details
         log(f"  {DIM}{now}{RESET}  {CYAN}{BOLD}#{req_id}{RESET}  {BG_RED}{BOLD} ERROR {RESET}")
         log("")
+        if LOKI_ENABLED:
+            _loki_enqueue("error", {
+                "status": 500,
+                "path": "/" + path,
+                "method": request.method,
+                "duration_ms": int((time.monotonic() - start_time) * 1000),
+                "error_type": "proxy_error",
+            })
         raise HTTPException(status_code=500, detail="Internal proxy error")
 
 
