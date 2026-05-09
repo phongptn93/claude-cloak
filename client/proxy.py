@@ -15,6 +15,12 @@ Security Layers:
   6. Response sanitization - Xóa tracking headers từ response
   7. Request timing jitter - Random delay để mask multi-device patterns
   8. Consistent request IDs - Dùng HMAC-based IDs thay vì random per-device
+
+Token Saver (optional, TOKEN_SAVER=true):
+  - Prompt cache 1h TTL: inject cache_control trên system + tools cuối
+    (yêu cầu beta header `extended-cache-ttl-2025-04-11`)
+  - Tool result truncation: cắt head+tail những tool_result quá lớn
+    trong các turn cũ để giảm input token
 """
 
 import asyncio
@@ -35,7 +41,7 @@ import httpx
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 # Enable ANSI colors on Windows
 if sys.platform == "win32":
@@ -255,6 +261,33 @@ TIMING_JITTER_ENABLED = os.getenv("TIMING_JITTER", "true").lower() == "true"
 TIMING_JITTER_MIN_MS = int(os.getenv("TIMING_JITTER_MIN_MS", "10"))
 TIMING_JITTER_MAX_MS = int(os.getenv("TIMING_JITTER_MAX_MS", "150"))
 
+# ============================================================
+# TOKEN SAVER MODE
+# Reduce input token cost on /v1/messages without changing semantics.
+#   1. CACHE_EXTEND_TTL: bump prompt-cache TTL from 5m → 1h on the
+#      stable prefix (system block + tool definitions). Requires the
+#      `extended-cache-ttl-2025-04-11` Anthropic beta header, which
+#      the proxy appends automatically when this is on.
+#   2. TOOL_RESULT_TRUNCATE: head+tail truncate large tool_result
+#      blocks in OLDER turns of messages[]. Recent turns are kept
+#      intact so the agent's active context is not damaged.
+# ============================================================
+TOKEN_SAVER_ENABLED = os.getenv("TOKEN_SAVER", "false").lower() == "true"
+CACHE_EXTEND_TTL = os.getenv("CACHE_EXTEND_TTL", "true").lower() == "true"
+TOOL_RESULT_TRUNCATE = os.getenv("TOOL_RESULT_TRUNCATE", "false").lower() == "true"
+TOOL_RESULT_MAX_BYTES = int(os.getenv("TOOL_RESULT_MAX_BYTES", "8000"))
+TOOL_RESULT_HEAD_BYTES = int(os.getenv("TOOL_RESULT_HEAD_BYTES", "4000"))
+TOOL_RESULT_TAIL_BYTES = int(os.getenv("TOOL_RESULT_TAIL_BYTES", "2000"))
+TOOL_RESULT_KEEP_RECENT = int(os.getenv("TOOL_RESULT_KEEP_RECENT", "2"))
+
+CACHE_TTL_BETA = "extended-cache-ttl-2025-04-11"
+MAX_CACHE_BREAKPOINTS = 4
+CHARS_PER_TOKEN = 4
+
+# Runtime flag — set to True if upstream rejects the cache TTL beta header,
+# so we stop attaching it for the rest of the process lifetime.
+_cache_ttl_runtime_disabled = False
+
 
 def env_key(header: str) -> str:
     return "CAPTURED_" + header.upper().replace("-", "_")
@@ -270,6 +303,16 @@ identity_captured = bool(captured_identity)
 warned_unknown_headers: set[str] = set()
 blocked_requests_count = 0
 sanitized_bodies_count = 0
+
+token_saver_stats = {
+    "requests_optimized": 0,
+    "cache_breakpoints_added": 0,
+    "cache_breakpoints_skipped_full": 0,
+    "tool_results_truncated": 0,
+    "bytes_saved": 0,
+    "tokens_saved_est": 0,
+    "beta_runtime_disabled": False,
+}
 
 http_client: httpx.AsyncClient | None = None
 request_count = 0
@@ -375,6 +418,238 @@ def _sanitize_dict(data: dict) -> bool:
     return changed
 
 
+def optimize_tokens(body: bytes, content_type: str | None, path: str) -> bytes:
+    """Apply token-saving transforms to /v1/messages JSON bodies."""
+    if not TOKEN_SAVER_ENABLED or not body:
+        return body
+    if not content_type or "json" not in content_type.lower():
+        return body
+    if "v1/messages" not in path:
+        return body
+
+    try:
+        data = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return body
+    if not isinstance(data, dict):
+        return body
+
+    original_size = len(body)
+    breakpoints = 0
+    skipped_full = 0
+    truncated = 0
+
+    if CACHE_EXTEND_TTL and not _cache_ttl_runtime_disabled:
+        breakpoints, skipped_full = _apply_cache_breakpoints(data)
+    if TOOL_RESULT_TRUNCATE:
+        truncated = _truncate_tool_results(data)
+
+    if breakpoints == 0 and truncated == 0:
+        if skipped_full:
+            token_saver_stats["cache_breakpoints_skipped_full"] += skipped_full
+        return body
+
+    new_body = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode()
+    saved_bytes = max(0, original_size - len(new_body))
+
+    token_saver_stats["requests_optimized"] += 1
+    token_saver_stats["cache_breakpoints_added"] += breakpoints
+    token_saver_stats["cache_breakpoints_skipped_full"] += skipped_full
+    token_saver_stats["tool_results_truncated"] += truncated
+    token_saver_stats["bytes_saved"] += saved_bytes
+    token_saver_stats["tokens_saved_est"] += saved_bytes // CHARS_PER_TOKEN
+
+    return new_body
+
+
+def _count_cache_breakpoints(data: dict) -> int:
+    """Count existing cache_control occurrences across system, tools, messages."""
+    count = 0
+
+    def visit(node):
+        nonlocal count
+        if isinstance(node, dict):
+            if "cache_control" in node:
+                count += 1
+            for v in node.values():
+                visit(v)
+        elif isinstance(node, list):
+            for item in node:
+                visit(item)
+
+    for field in ("system", "tools", "messages"):
+        if field in data:
+            visit(data[field])
+    return count
+
+
+def _apply_cache_breakpoints(data: dict) -> tuple[int, int]:
+    """Bump TTL on the stable prefix to 1h, respecting Anthropic's rules:
+
+    - Processing order: tools → system → messages
+    - Once a ttl='1h' block appears, no later ttl='5m' is allowed
+    - Max 4 cache_control breakpoints per request
+
+    Strategy: upgrade ALL existing cache_control in tools+system to 1h
+    (preserves ordering rule), then optionally add 1 new breakpoint at
+    the last tool / last system block if budget permits.
+    Messages are left untouched — they sit AFTER system in processing
+    order, so messages-5m after system-1h is allowed.
+
+    Returns (modified_count, skipped_full_count).
+    """
+    existing = _count_cache_breakpoints(data)
+    budget = MAX_CACHE_BREAKPOINTS - existing
+    modified = 0
+    skipped = 0
+
+    # Step 1: upgrade EVERY existing cache_control in tools + system to 1h.
+    # This is the critical step that prevents "1h after 5m" violations.
+    tools = data.get("tools")
+    if isinstance(tools, list):
+        for tool in tools:
+            if isinstance(tool, dict) and isinstance(tool.get("cache_control"), dict):
+                if tool["cache_control"].get("ttl") != "1h":
+                    tool["cache_control"]["ttl"] = "1h"
+                    if tool["cache_control"].get("type") != "ephemeral":
+                        tool["cache_control"]["type"] = "ephemeral"
+                    modified += 1
+
+    sys_field = data.get("system")
+    if isinstance(sys_field, list):
+        for block in sys_field:
+            if isinstance(block, dict) and isinstance(block.get("cache_control"), dict):
+                if block["cache_control"].get("ttl") != "1h":
+                    block["cache_control"]["ttl"] = "1h"
+                    if block["cache_control"].get("type") != "ephemeral":
+                        block["cache_control"]["type"] = "ephemeral"
+                    modified += 1
+
+    # Step 2: add a new breakpoint at the stable suffix if there isn't one
+    # already AND we have budget. Skip silently when full.
+    cc_new = {"type": "ephemeral", "ttl": "1h"}
+
+    if isinstance(sys_field, str) and sys_field:
+        if budget > 0:
+            data["system"] = [{"type": "text", "text": sys_field, "cache_control": dict(cc_new)}]
+            modified += 1
+            budget -= 1
+        else:
+            skipped += 1
+    elif isinstance(sys_field, list) and sys_field:
+        last = sys_field[-1]
+        if isinstance(last, dict) and "cache_control" not in last:
+            if budget > 0:
+                last["cache_control"] = dict(cc_new)
+                modified += 1
+                budget -= 1
+            else:
+                skipped += 1
+
+    if isinstance(tools, list) and tools:
+        last = tools[-1]
+        if isinstance(last, dict) and "cache_control" not in last:
+            if budget > 0:
+                last["cache_control"] = dict(cc_new)
+                modified += 1
+                budget -= 1
+            else:
+                skipped += 1
+
+    return modified, skipped
+
+
+def _head_tail_truncate(text: str) -> str:
+    head = text[:TOOL_RESULT_HEAD_BYTES]
+    tail = text[-TOOL_RESULT_TAIL_BYTES:] if TOOL_RESULT_TAIL_BYTES > 0 else ""
+    omitted = len(text) - len(head) - len(tail)
+    marker = f"\n\n[...{omitted} chars truncated by claude-cloak token-saver...]\n\n"
+    return head + marker + tail
+
+
+def _truncate_tool_results(data: dict) -> int:
+    """Truncate oversized tool_result blocks in older turns of messages[]."""
+    messages = data.get("messages")
+    if not isinstance(messages, list):
+        return 0
+
+    cutoff = max(0, len(messages) - TOOL_RESULT_KEEP_RECENT)
+    truncated = 0
+
+    for msg in messages[:cutoff]:
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_result":
+                continue
+            tc = block.get("content")
+            if isinstance(tc, str):
+                if len(tc) > TOOL_RESULT_MAX_BYTES:
+                    block["content"] = _head_tail_truncate(tc)
+                    truncated += 1
+            elif isinstance(tc, list):
+                for item in tc:
+                    if not isinstance(item, dict) or item.get("type") != "text":
+                        continue
+                    text = item.get("text", "")
+                    if isinstance(text, str) and len(text) > TOOL_RESULT_MAX_BYTES:
+                        item["text"] = _head_tail_truncate(text)
+                        truncated += 1
+
+    return truncated
+
+
+def inject_cache_ttl_beta(headers: dict[str, str]) -> None:
+    """Append the extended-cache-ttl beta to anthropic-beta header (if not present)."""
+    if not (TOKEN_SAVER_ENABLED and CACHE_EXTEND_TTL):
+        return
+    if _cache_ttl_runtime_disabled:
+        return
+    for k in list(headers.keys()):
+        if k.lower() == "anthropic-beta":
+            existing = headers[k]
+            betas = {b.strip() for b in existing.split(",") if b.strip()}
+            if CACHE_TTL_BETA not in betas:
+                headers[k] = existing + "," + CACHE_TTL_BETA if existing else CACHE_TTL_BETA
+            return
+    headers["anthropic-beta"] = CACHE_TTL_BETA
+
+
+def _looks_like_cache_ttl_beta_error(payload: bytes) -> bool:
+    """Detect Anthropic 400 errors caused by the extended-cache-ttl beta
+    or any cache_control validation failure (e.g. ordering, ttl shape).
+    """
+    if not payload:
+        return False
+    try:
+        text = payload.decode("utf-8", errors="replace").lower()
+    except Exception:
+        return False
+    if "extended-cache-ttl" in text:
+        return True
+    if "anthropic-beta" in text and "invalid" in text:
+        return True
+    if "cache_control" in text and ("ttl" in text or "1h" in text or "5m" in text):
+        return True
+    return False
+
+
+def disable_cache_ttl_runtime(reason: str):
+    """Latch off the extended-cache-ttl beta for the rest of the process."""
+    global _cache_ttl_runtime_disabled
+    if _cache_ttl_runtime_disabled:
+        return
+    _cache_ttl_runtime_disabled = True
+    token_saver_stats["beta_runtime_disabled"] = True
+    log("")
+    log(f"  {BG_YELLOW}{BOLD} TOKEN SAVER FALLBACK {RESET} {YELLOW}cache-ttl 1h disabled: {reason}{RESET}")
+    log(f"  {YELLOW}Will use Anthropic default 5m cache for the rest of this session.{RESET}")
+    log("")
+
+
 def capture_identity_from_request(request: Request):
     global identity_captured, captured_identity
 
@@ -459,6 +734,16 @@ def print_status():
     print(f"  {CYAN} Timing      {RESET}{jitter_status}")
     print(f"  {CYAN} Body Scrub  {RESET}{GREEN}{len(SANITIZE_BODY_FIELDS)} fields monitored{RESET}")
     print(f"  {CYAN} IP Strip    {RESET}{GREEN}{len(STRIP_REQUEST_HEADERS)} headers stripped{RESET}")
+    if TOKEN_SAVER_ENABLED:
+        ts_parts = []
+        if CACHE_EXTEND_TTL:
+            ts_parts.append("cache 1h")
+        if TOOL_RESULT_TRUNCATE:
+            ts_parts.append(f"tool-trunc>{TOOL_RESULT_MAX_BYTES}b")
+        ts_status = f"{GREEN}ON ({', '.join(ts_parts) or 'no-op'}){RESET}"
+    else:
+        ts_status = f"{YELLOW}OFF{RESET}"
+    print(f"  {CYAN} Token Saver {RESET}{ts_status}")
     if identity_captured:
         print(f"  {DIM}{'─' * 60}{RESET}")
         for h, v in captured_identity.items():
@@ -555,6 +840,16 @@ async def health():
         "bodies_sanitized": sanitized_bodies_count,
         "ip_headers_stripped": len(STRIP_REQUEST_HEADERS),
         "unknown_headers_seen": sorted(warned_unknown_headers),
+        "token_saver": {
+            "enabled": TOKEN_SAVER_ENABLED,
+            "cache_extend_ttl_configured": CACHE_EXTEND_TTL,
+            "cache_extend_ttl_active": (
+                CACHE_EXTEND_TTL and not _cache_ttl_runtime_disabled
+            ),
+            "tool_result_truncate": TOOL_RESULT_TRUNCATE,
+            "tool_result_max_bytes": TOOL_RESULT_MAX_BYTES,
+            **token_saver_stats,
+        },
     }
 
 
@@ -593,6 +888,11 @@ async def proxy(path: str, request: Request):
     content_type = request.headers.get("content-type", "")
     body = sanitize_body(body, content_type)
 
+    # ── Token saver ──
+    if TOKEN_SAVER_ENABLED:
+        body = optimize_tokens(body, content_type, path)
+        inject_cache_ttl_beta(headers)
+
     start_time = time.monotonic()
 
     # Request log
@@ -623,6 +923,22 @@ async def proxy(path: str, request: Request):
         elapsed = time.monotonic() - start_time
         status = response.status_code
 
+        # Buffer 400 bodies so we can detect Anthropic beta-header rejection
+        # and latch the cache-ttl beta off for subsequent requests.
+        buffered_body: bytes | None = None
+        if (
+            status == 400
+            and TOKEN_SAVER_ENABLED
+            and CACHE_EXTEND_TTL
+            and not _cache_ttl_runtime_disabled
+        ):
+            try:
+                buffered_body = await response.aread()
+            finally:
+                await response.aclose()
+            if _looks_like_cache_ttl_beta_error(buffered_body):
+                disable_cache_ttl_runtime("upstream rejected extended-cache-ttl beta")
+
         if 200 <= status < 300:
             status_str = f"{BG_GREEN}{BOLD} {status} {RESET}"
         elif status == 401:
@@ -646,6 +962,14 @@ async def proxy(path: str, request: Request):
             k: v for k, v in response_headers.items()
             if k.lower() != "set-cookie"
         }
+
+        if buffered_body is not None:
+            return Response(
+                content=buffered_body,
+                status_code=response.status_code,
+                headers=response_headers,
+                media_type=response.headers.get("content-type"),
+            )
 
         async def stream_response():
             try:
