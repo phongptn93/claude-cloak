@@ -249,6 +249,77 @@ TOOL_RESULT_KEEP_RECENT=2    # Recent turns left untouched
 
 `tokens_saved_est` is an approximation (`bytes_saved / 4`); use it as a directional metric, not an exact charge.
 
+## Quota & Cost Tracking
+
+Enabled by default (`QUOTA_TRACKING=true`). The proxy reads two things from every `/v1/messages` response:
+
+1. **`anthropic-ratelimit-*` headers** → live remaining quota (requests, input tokens, output tokens, reset time)
+2. **`usage` block** (from streaming SSE `message_start`/`message_delta` or non-streaming JSON) → input/output/cache token counts + computed USD cost
+
+Bytes are never modified — the tap inspects, the proxy still streams the original chunks to the client. A 5 MB safety cap prevents runaway buffers.
+
+### Endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /quota` | Compact JSON — `cost_usd_total`, `tokens` (totals), `by_model` breakdown, `rate_limits` (remaining/limit/reset for requests + input + output tokens, plus retry-after) |
+| `GET /health` | Full proxy status — includes a `quota` section with the same data |
+
+Example `/quota`:
+
+```json
+{
+  "cost_usd_total": 1.2345,
+  "messages_requests": 42,
+  "tokens": {
+    "input_tokens": 12000,
+    "output_tokens": 8400,
+    "cache_creation_input_tokens": 3200,
+    "cache_read_input_tokens": 87000
+  },
+  "by_model": [
+    {"model": "sonnet-4", "requests": 38, "input_tokens": 11000, "output_tokens": 7800, "cost_usd": 1.1024},
+    {"model": "haiku-4",  "requests":  4, "input_tokens":  1000, "output_tokens":  600, "cost_usd": 0.1321}
+  ],
+  "rate_limits": {
+    "requests_remaining": "1450",
+    "requests_limit": "2000",
+    "requests_reset": "2026-05-09T12:34:56Z",
+    "input_tokens_remaining": "780000",
+    "output_tokens_remaining": "120000",
+    "retry_after": null,
+    "updated_at": "2026-05-09T12:30:14"
+  }
+}
+```
+
+### Pricing
+
+Defaults are public Anthropic list prices (USD per million tokens). Override per-tier via env if Anthropic changes them or you want plan-specific rates:
+
+```env
+PRICING_SONNET_4_INPUT=3.00
+PRICING_SONNET_4_OUTPUT=15.00
+PRICING_SONNET_4_CACHE_WRITE_5M=3.75
+PRICING_SONNET_4_CACHE_WRITE_1H=6.00
+PRICING_SONNET_4_CACHE_READ=0.30
+```
+
+Model keys: `OPUS_4`, `SONNET_4`, `HAIKU_4`, `OPUS_3`, `SONNET_3_7`, `SONNET_3_5`, `HAIKU_3_5`, `HAIKU_3`. Cost calc uses the per-TTL breakdown when Anthropic provides it (`cache_creation.ephemeral_5m_input_tokens` / `ephemeral_1h_input_tokens`); falls back to default 5 m rate when only the legacy aggregate field is present.
+
+### What it's good for
+
+- **Multi-device share**: one dashboard for total spend across all devices using the proxy
+- **Avoid surprise rate-limits**: see remaining quota before hitting 429
+- **Token-saver verification**: compare `cache_read_input_tokens` (cheap) vs `input_tokens` (full price) to confirm cache hit rate
+- **Cost attribution**: `by_model` shows where the spend lands
+
+### Caveats
+
+- Cost numbers are **estimates** based on the configured pricing table; the canonical source remains the Anthropic console.
+- Counters live in-memory only — restart the proxy and they reset.
+- Requests served from the telemetry-block layer never touch Anthropic, so they're not counted.
+
 ## What It Does NOT Do
 
 | | Description |
@@ -276,7 +347,8 @@ client/
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET /health` | Returns proxy status: identity captured, headers locked, telemetry blocked count, bodies sanitized count, unknown headers seen |
+| `GET /health` | Returns proxy status: identity captured, headers locked, telemetry blocked count, bodies sanitized count, unknown headers seen, full quota/cost stats |
+| `GET /quota` | Compact quota + cost summary (see Quota & Cost Tracking section) |
 | `* /{path}` | Proxy catch-all — applies all 8 layers then forwards to `api.anthropic.com/{path}` |
 
 ## Requirements

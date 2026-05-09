@@ -288,6 +288,72 @@ CHARS_PER_TOKEN = 4
 # so we stop attaching it for the rest of the process lifetime.
 _cache_ttl_runtime_disabled = False
 
+# ============================================================
+# QUOTA / COST TRACKING
+# Parse `anthropic-ratelimit-*` response headers and `usage` blocks from
+# /v1/messages responses (both streaming SSE and non-streaming JSON) to
+# surface live remaining quota and accumulated cost across all devices
+# sharing this proxy. Useful for multi-device share to avoid surprise
+# rate-limit hits.
+# ============================================================
+QUOTA_TRACKING_ENABLED = os.getenv("QUOTA_TRACKING", "true").lower() == "true"
+
+# Per-million-token USD prices. Defaults are public Anthropic list prices
+# at the time of writing — override via PRICING_<KEY>_<TIER>=<usd> env if
+# Anthropic changes them or you want plan-specific rates.
+#
+# Tiers: input, output, cache_write_5m, cache_write_1h, cache_read.
+# Model key is matched by substring against the response `model` field.
+PRICING_DEFAULTS: dict[str, dict[str, float]] = {
+    "opus-4":    {"input": 15.00, "output": 75.00, "cache_write_5m": 18.75, "cache_write_1h": 30.00, "cache_read": 1.50},
+    "sonnet-4":  {"input":  3.00, "output": 15.00, "cache_write_5m":  3.75, "cache_write_1h":  6.00, "cache_read": 0.30},
+    "haiku-4":   {"input":  1.00, "output":  5.00, "cache_write_5m":  1.25, "cache_write_1h":  2.00, "cache_read": 0.10},
+    "opus-3":    {"input": 15.00, "output": 75.00, "cache_write_5m": 18.75, "cache_write_1h": 30.00, "cache_read": 1.50},
+    "sonnet-3.7":{"input":  3.00, "output": 15.00, "cache_write_5m":  3.75, "cache_write_1h":  6.00, "cache_read": 0.30},
+    "sonnet-3.5":{"input":  3.00, "output": 15.00, "cache_write_5m":  3.75, "cache_write_1h":  6.00, "cache_read": 0.30},
+    "haiku-3.5": {"input":  0.80, "output":  4.00, "cache_write_5m":  1.00, "cache_write_1h":  1.60, "cache_read": 0.08},
+    "haiku-3":   {"input":  0.25, "output":  1.25, "cache_write_5m":  0.30, "cache_write_1h":  0.50, "cache_read": 0.03},
+}
+
+
+def _load_pricing() -> dict[str, dict[str, float]]:
+    """Apply env overrides on top of PRICING_DEFAULTS."""
+    pricing = {k: dict(v) for k, v in PRICING_DEFAULTS.items()}
+    for model_key in pricing:
+        env_prefix = "PRICING_" + model_key.upper().replace("-", "_").replace(".", "_")
+        for tier in pricing[model_key]:
+            override = os.getenv(f"{env_prefix}_{tier.upper()}")
+            if override:
+                try:
+                    pricing[model_key][tier] = float(override)
+                except ValueError:
+                    pass
+    return pricing
+
+
+PRICING = _load_pricing()
+
+# Cap on how many bytes the usage extractor will buffer per response, to
+# avoid unbounded memory growth on a malformed upstream stream.
+USAGE_TAP_MAX_BUFFER = 5 * 1024 * 1024  # 5 MB
+
+quota_stats = {
+    "rate_limits": {},  # latest anthropic-ratelimit-* headers seen
+    "rate_limits_updated_at": None,
+    "usage_total": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_creation_5m_input_tokens": 0,
+        "cache_creation_1h_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+    },
+    "cost_usd_total": 0.0,
+    "by_model": {},  # model_key -> {usage..., cost_usd, requests}
+    "messages_requests": 0,
+    "last_request_at": None,
+}
+
 
 def env_key(header: str) -> str:
     return "CAPTURED_" + header.upper().replace("-", "_")
@@ -650,6 +716,237 @@ def disable_cache_ttl_runtime(reason: str):
     log("")
 
 
+def _normalize_model_key(model: str | None) -> str:
+    """Map a Claude model id to a PRICING key.
+
+    Anthropic's id ordering varies between generations:
+      - 4.x: family-first, e.g. `claude-sonnet-4-5-20250929`
+      - 3.x: version-first, e.g. `claude-3-5-sonnet-20241022`
+
+    We match both `<family>-<version>` and `<version>-<family>` forms,
+    using a hyphen-normalized version (so `3.5` lines up with `3-5`).
+    Longer keys are checked first so `sonnet-3.5` wins over `sonnet-3`.
+    """
+    if not model:
+        return "unknown"
+    m = model.lower().replace(".", "-")
+    candidates = sorted(
+        PRICING.keys(),
+        key=lambda k: len(k.replace(".", "-")),
+        reverse=True,
+    )
+    for key in candidates:
+        norm_key = key.replace(".", "-")
+        family, _, version = norm_key.partition("-")
+        if not version:
+            if family in m:
+                return key
+            continue
+        if f"{family}-{version}" in m or f"{version}-{family}" in m:
+            return key
+    return "unknown"
+
+
+def _record_rate_limits(headers) -> None:
+    """Capture anthropic-ratelimit-* and retry-after headers from a response."""
+    if not QUOTA_TRACKING_ENABLED:
+        return
+    latest = {}
+    for k, v in headers.items():
+        kl = k.lower()
+        if kl.startswith("anthropic-ratelimit-"):
+            latest[kl[len("anthropic-ratelimit-"):]] = v
+        elif kl == "retry-after":
+            latest["retry-after"] = v
+    if latest:
+        quota_stats["rate_limits"] = latest
+        quota_stats["rate_limits_updated_at"] = datetime.now().isoformat(timespec="seconds")
+
+
+def _compute_cost(model_key: str, usage: dict) -> float:
+    """Compute USD cost for a single /v1/messages response usage block."""
+    p = PRICING.get(model_key)
+    if not p:
+        return 0.0
+
+    input_t = usage.get("input_tokens", 0) or 0
+    output_t = usage.get("output_tokens", 0) or 0
+    cache_read = usage.get("cache_read_input_tokens", 0) or 0
+    cache_write_total = usage.get("cache_creation_input_tokens", 0) or 0
+
+    cache_write_5m = 0
+    cache_write_1h = 0
+    cc = usage.get("cache_creation")
+    if isinstance(cc, dict):
+        cache_write_5m = cc.get("ephemeral_5m_input_tokens", 0) or 0
+        cache_write_1h = cc.get("ephemeral_1h_input_tokens", 0) or 0
+    if cache_write_5m == 0 and cache_write_1h == 0 and cache_write_total:
+        # Older API shape: no breakdown — assume default 5m TTL.
+        cache_write_5m = cache_write_total
+
+    cost = (
+        input_t * p["input"]
+        + output_t * p["output"]
+        + cache_read * p["cache_read"]
+        + cache_write_5m * p["cache_write_5m"]
+        + cache_write_1h * p["cache_write_1h"]
+    ) / 1_000_000.0
+    return cost
+
+
+def _record_usage(model: str | None, usage: dict) -> None:
+    """Accumulate a single response's usage into quota_stats and log it."""
+    if not QUOTA_TRACKING_ENABLED or not usage:
+        return
+
+    model_key = _normalize_model_key(model)
+    cost = _compute_cost(model_key, usage)
+
+    cc = usage.get("cache_creation") if isinstance(usage.get("cache_creation"), dict) else {}
+    cw5 = cc.get("ephemeral_5m_input_tokens", 0) or 0
+    cw1 = cc.get("ephemeral_1h_input_tokens", 0) or 0
+
+    totals = quota_stats["usage_total"]
+    totals["input_tokens"] += usage.get("input_tokens", 0) or 0
+    totals["output_tokens"] += usage.get("output_tokens", 0) or 0
+    totals["cache_creation_input_tokens"] += usage.get("cache_creation_input_tokens", 0) or 0
+    totals["cache_creation_5m_input_tokens"] += cw5
+    totals["cache_creation_1h_input_tokens"] += cw1
+    totals["cache_read_input_tokens"] += usage.get("cache_read_input_tokens", 0) or 0
+
+    quota_stats["cost_usd_total"] += cost
+    quota_stats["messages_requests"] += 1
+    quota_stats["last_request_at"] = datetime.now().isoformat(timespec="seconds")
+
+    bucket = quota_stats["by_model"].setdefault(model_key, {
+        "model": model_key,
+        "requests": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "cost_usd": 0.0,
+    })
+    bucket["requests"] += 1
+    bucket["input_tokens"] += usage.get("input_tokens", 0) or 0
+    bucket["output_tokens"] += usage.get("output_tokens", 0) or 0
+    bucket["cache_creation_input_tokens"] += usage.get("cache_creation_input_tokens", 0) or 0
+    bucket["cache_read_input_tokens"] += usage.get("cache_read_input_tokens", 0) or 0
+    bucket["cost_usd"] += cost
+
+    in_t = usage.get("input_tokens", 0) or 0
+    out_t = usage.get("output_tokens", 0) or 0
+    cr_t = usage.get("cache_read_input_tokens", 0) or 0
+    cw_t = usage.get("cache_creation_input_tokens", 0) or 0
+    log(
+        f"           {DIM}usage: {RESET}{CYAN}{model_key}{RESET} "
+        f"{DIM}in={in_t} out={out_t} cache_r={cr_t} cache_w={cw_t} "
+        f"cost=${cost:.4f}{RESET}"
+    )
+
+
+class UsageTap:
+    """Tap a /v1/messages response stream to extract `usage` and `model`.
+
+    Handles both:
+      - Streaming SSE: parses `data: {...}` lines for message_start/message_delta
+        events incrementally, discarding parsed bytes to keep memory bounded.
+      - Non-streaming JSON: buffers full body (small for /v1/messages — typically
+        <100 KB) and parses at finalize() time.
+
+    Bytes are NEVER mutated — feed() inspects, the proxy still forwards the
+    untouched chunk to the client. A 5 MB safety cap prevents runaway buffers.
+    """
+
+    def __init__(self, content_type: str | None, path: str):
+        self.path = path
+        self.is_messages = "v1/messages" in path
+        ct = (content_type or "").lower()
+        self.is_sse = "event-stream" in ct
+        self.is_json = "json" in ct and not self.is_sse
+        self.buffer = bytearray()
+        self.usage: dict = {}
+        self.model: str | None = None
+        self.cache_creation: dict | None = None
+        self._overflow = False
+
+    def feed(self, chunk: bytes) -> None:
+        if not self.is_messages or not chunk or self._overflow:
+            return
+        if len(self.buffer) + len(chunk) > USAGE_TAP_MAX_BUFFER:
+            self._overflow = True
+            self.buffer.clear()
+            return
+        self.buffer.extend(chunk)
+        if self.is_sse:
+            self._drain_sse_lines()
+
+    def _drain_sse_lines(self) -> None:
+        while True:
+            nl = self.buffer.find(b"\n")
+            if nl < 0:
+                return
+            line = bytes(self.buffer[:nl]).rstrip(b"\r")
+            del self.buffer[: nl + 1]
+            if not line.startswith(b"data: "):
+                continue
+            payload = line[6:]
+            if payload == b"[DONE]":
+                continue
+            try:
+                event = json.loads(payload)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            if isinstance(event, dict):
+                self._absorb_event(event)
+
+    def _absorb_event(self, event: dict) -> None:
+        t = event.get("type")
+        if t == "message_start":
+            msg = event.get("message", {})
+            if isinstance(msg, dict):
+                self.model = msg.get("model") or self.model
+                u = msg.get("usage")
+                if isinstance(u, dict):
+                    self._merge_usage(u)
+        elif t == "message_delta":
+            u = event.get("usage")
+            if isinstance(u, dict):
+                self._merge_usage(u)
+
+    def _merge_usage(self, u: dict) -> None:
+        for k in (
+            "input_tokens",
+            "output_tokens",
+            "cache_creation_input_tokens",
+            "cache_read_input_tokens",
+        ):
+            if k in u and u[k] is not None:
+                self.usage[k] = u[k]
+        cc = u.get("cache_creation")
+        if isinstance(cc, dict):
+            self.cache_creation = cc
+
+    def finalize(self) -> tuple[str | None, dict]:
+        if not self.is_messages:
+            return None, {}
+        if self.is_json and self.buffer and not self._overflow:
+            try:
+                data = json.loads(bytes(self.buffer))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                data = None
+            if isinstance(data, dict):
+                self.model = data.get("model") or self.model
+                u = data.get("usage")
+                if isinstance(u, dict):
+                    self._merge_usage(u)
+        if self.cache_creation is not None:
+            self.usage["cache_creation"] = self.cache_creation
+        # Free the buffer; we're done with it.
+        self.buffer.clear()
+        return self.model, dict(self.usage)
+
+
 def capture_identity_from_request(request: Request):
     global identity_captured, captured_identity
 
@@ -744,6 +1041,11 @@ def print_status():
     else:
         ts_status = f"{YELLOW}OFF{RESET}"
     print(f"  {CYAN} Token Saver {RESET}{ts_status}")
+    if QUOTA_TRACKING_ENABLED:
+        quota_status = f"{GREEN}ON{RESET} {DIM}(GET /quota){RESET}"
+    else:
+        quota_status = f"{YELLOW}OFF{RESET}"
+    print(f"  {CYAN} Quota Track {RESET}{quota_status}")
     if identity_captured:
         print(f"  {DIM}{'─' * 60}{RESET}")
         for h, v in captured_identity.items():
@@ -850,7 +1152,60 @@ async def health():
             "tool_result_max_bytes": TOOL_RESULT_MAX_BYTES,
             **token_saver_stats,
         },
+        "quota": {
+            "enabled": QUOTA_TRACKING_ENABLED,
+            "messages_requests": quota_stats["messages_requests"],
+            "last_request_at": quota_stats["last_request_at"],
+            "rate_limits": quota_stats["rate_limits"],
+            "rate_limits_updated_at": quota_stats["rate_limits_updated_at"],
+            "usage_total": quota_stats["usage_total"],
+            "cost_usd_total": round(quota_stats["cost_usd_total"], 6),
+            "by_model": [
+                {**v, "cost_usd": round(v["cost_usd"], 6)}
+                for v in quota_stats["by_model"].values()
+            ],
+        },
     }
+
+
+@app.get("/quota")
+async def quota():
+    """Compact quota summary tuned for human display."""
+    rl = quota_stats["rate_limits"]
+    summary = {
+        "cost_usd_total": round(quota_stats["cost_usd_total"], 4),
+        "messages_requests": quota_stats["messages_requests"],
+        "tokens": quota_stats["usage_total"],
+        "by_model": [
+            {
+                "model": v["model"],
+                "requests": v["requests"],
+                "input_tokens": v["input_tokens"],
+                "output_tokens": v["output_tokens"],
+                "cache_read_input_tokens": v["cache_read_input_tokens"],
+                "cache_creation_input_tokens": v["cache_creation_input_tokens"],
+                "cost_usd": round(v["cost_usd"], 4),
+            }
+            for v in quota_stats["by_model"].values()
+        ],
+        "rate_limits": {
+            "requests_remaining": rl.get("requests-remaining"),
+            "requests_limit": rl.get("requests-limit"),
+            "requests_reset": rl.get("requests-reset"),
+            "input_tokens_remaining": rl.get("input-tokens-remaining"),
+            "input_tokens_limit": rl.get("input-tokens-limit"),
+            "input_tokens_reset": rl.get("input-tokens-reset"),
+            "output_tokens_remaining": rl.get("output-tokens-remaining"),
+            "output_tokens_limit": rl.get("output-tokens-limit"),
+            "output_tokens_reset": rl.get("output-tokens-reset"),
+            "tokens_remaining": rl.get("tokens-remaining"),
+            "tokens_limit": rl.get("tokens-limit"),
+            "tokens_reset": rl.get("tokens-reset"),
+            "retry_after": rl.get("retry-after"),
+            "updated_at": quota_stats["rate_limits_updated_at"],
+        },
+    }
+    return summary
 
 
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"])
@@ -923,6 +1278,12 @@ async def proxy(path: str, request: Request):
         elapsed = time.monotonic() - start_time
         status = response.status_code
 
+        # Capture anthropic-ratelimit-* headers regardless of status.
+        _record_rate_limits(response.headers)
+
+        # Set up usage tap for /v1/messages (no-op for other paths).
+        usage_tap = UsageTap(response.headers.get("content-type"), path)
+
         # Buffer 400 bodies so we can detect Anthropic beta-header rejection
         # and latch the cache-ttl beta off for subsequent requests.
         buffered_body: bytes | None = None
@@ -946,7 +1307,11 @@ async def proxy(path: str, request: Request):
             log(f"           {RED}{BOLD}TOKEN HET HAN! Login lai tren 1 may bat ky{RESET}")
         elif status == 429:
             status_str = f"{BG_YELLOW}{BOLD} {status} RATE LIMITED {RESET}"
-            log(f"           {YELLOW}Qua nhieu request - doi mot chut...{RESET}")
+            retry_after = quota_stats["rate_limits"].get("retry-after")
+            if retry_after:
+                log(f"           {YELLOW}Rate limited - retry-after: {retry_after}s{RESET}")
+            else:
+                log(f"           {YELLOW}Qua nhieu request - doi mot chut...{RESET}")
         elif 400 <= status < 500:
             status_str = f"{BG_YELLOW}{BOLD} {status} {RESET}"
         else:
@@ -964,6 +1329,12 @@ async def proxy(path: str, request: Request):
         }
 
         if buffered_body is not None:
+            # Even on 400 we still try to extract usage if present (rare but
+            # harmless), so the tap sees the body too.
+            usage_tap.feed(buffered_body)
+            model, usage = usage_tap.finalize()
+            if usage:
+                _record_usage(model, usage)
             return Response(
                 content=buffered_body,
                 status_code=response.status_code,
@@ -974,9 +1345,13 @@ async def proxy(path: str, request: Request):
         async def stream_response():
             try:
                 async for chunk in response.aiter_bytes():
+                    usage_tap.feed(chunk)
                     yield chunk
             finally:
                 await response.aclose()
+                model, usage = usage_tap.finalize()
+                if usage:
+                    _record_usage(model, usage)
 
         return StreamingResponse(
             stream_response(),
