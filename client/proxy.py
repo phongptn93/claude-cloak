@@ -41,7 +41,7 @@ import httpx
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 
 # Enable ANSI colors on Windows
 if sys.platform == "win32":
@@ -353,6 +353,23 @@ quota_stats = {
     "messages_requests": 0,
     "last_request_at": None,
 }
+
+# ============================================================
+# QUOTA PERSISTENCE
+# Save accumulated stats to .quota.json (next to .env) so totals survive
+# proxy restarts. Writes are debounced — at most once per
+# QUOTA_PERSIST_INTERVAL seconds during normal operation, plus a forced
+# flush on shutdown via the lifespan hook.
+# rate_limits is intentionally NOT persisted (the values are already
+# stale by the next process start).
+# ============================================================
+QUOTA_PERSIST_PATH = os.getenv(
+    "QUOTA_PERSIST_PATH",
+    os.path.join(os.path.dirname(ENV_PATH), ".quota.json"),
+)
+QUOTA_PERSIST_INTERVAL_SECONDS = int(os.getenv("QUOTA_PERSIST_INTERVAL", "30"))
+QUOTA_SCHEMA_VERSION = 1
+_last_quota_save_at = 0.0
 
 
 def env_key(header: str) -> str:
@@ -716,6 +733,81 @@ def disable_cache_ttl_runtime(reason: str):
     log("")
 
 
+def _load_quota_stats() -> bool:
+    """Load persisted quota counters from disk into quota_stats.
+
+    Returns True if a file was loaded, False otherwise. Bad files are
+    skipped silently — corrupt persistence shouldn't break the proxy.
+    """
+    if not QUOTA_TRACKING_ENABLED:
+        return False
+    if not os.path.exists(QUOTA_PERSIST_PATH):
+        return False
+    try:
+        with open(QUOTA_PERSIST_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    if data.get("version") != QUOTA_SCHEMA_VERSION:
+        return False
+
+    ut = data.get("usage_total")
+    if isinstance(ut, dict):
+        for k in quota_stats["usage_total"]:
+            v = ut.get(k, 0)
+            if isinstance(v, int):
+                quota_stats["usage_total"][k] = v
+
+    if isinstance(data.get("cost_usd_total"), (int, float)):
+        quota_stats["cost_usd_total"] = float(data["cost_usd_total"])
+    if isinstance(data.get("messages_requests"), int):
+        quota_stats["messages_requests"] = data["messages_requests"]
+    if isinstance(data.get("last_request_at"), str):
+        quota_stats["last_request_at"] = data["last_request_at"]
+
+    bm = data.get("by_model")
+    if isinstance(bm, dict):
+        for model_key, bucket in bm.items():
+            if isinstance(bucket, dict) and "model" in bucket:
+                quota_stats["by_model"][model_key] = bucket
+    return True
+
+
+def _save_quota_stats(force: bool = False) -> None:
+    """Atomically persist quota counters to disk.
+
+    Debounced: skipped if last write was less than
+    QUOTA_PERSIST_INTERVAL_SECONDS ago, unless force=True.
+    """
+    global _last_quota_save_at
+    if not QUOTA_TRACKING_ENABLED:
+        return
+    now = time.monotonic()
+    if not force and now - _last_quota_save_at < QUOTA_PERSIST_INTERVAL_SECONDS:
+        return
+
+    payload = {
+        "version": QUOTA_SCHEMA_VERSION,
+        "saved_at": datetime.now().isoformat(timespec="seconds"),
+        "messages_requests": quota_stats["messages_requests"],
+        "last_request_at": quota_stats["last_request_at"],
+        "usage_total": quota_stats["usage_total"],
+        "cost_usd_total": quota_stats["cost_usd_total"],
+        "by_model": quota_stats["by_model"],
+    }
+    tmp_path = QUOTA_PERSIST_PATH + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, QUOTA_PERSIST_PATH)
+        _last_quota_save_at = now
+    except OSError:
+        # Disk full / permission issue — skip silently, try again next time.
+        pass
+
+
 def _normalize_model_key(model: str | None) -> str:
     """Map a Claude model id to a PRICING key.
 
@@ -843,6 +935,8 @@ def _record_usage(model: str | None, usage: dict) -> None:
         f"{DIM}in={in_t} out={out_t} cache_r={cr_t} cache_w={cw_t} "
         f"cost=${cost:.4f}{RESET}"
     )
+
+    _save_quota_stats()
 
 
 class UsageTap:
@@ -1042,10 +1136,20 @@ def print_status():
         ts_status = f"{YELLOW}OFF{RESET}"
     print(f"  {CYAN} Token Saver {RESET}{ts_status}")
     if QUOTA_TRACKING_ENABLED:
-        quota_status = f"{GREEN}ON{RESET} {DIM}(GET /quota){RESET}"
+        if quota_stats["messages_requests"]:
+            cost = quota_stats["cost_usd_total"]
+            reqs = quota_stats["messages_requests"]
+            quota_status = (
+                f"{GREEN}ON{RESET} "
+                f"{DIM}(loaded ${cost:.4f} / {reqs} reqs from .quota.json){RESET}"
+            )
+        else:
+            quota_status = f"{GREEN}ON{RESET}"
     else:
         quota_status = f"{YELLOW}OFF{RESET}"
     print(f"  {CYAN} Quota Track {RESET}{quota_status}")
+    if QUOTA_TRACKING_ENABLED:
+        print(f"  {CYAN} Dashboard   {RESET}{WHITE}http://localhost:{LOCAL_PORT}/dashboard{RESET}")
     if identity_captured:
         print(f"  {DIM}{'─' * 60}{RESET}")
         for h, v in captured_identity.items():
@@ -1066,10 +1170,14 @@ async def lifespan(app: FastAPI):
             keepalive_expiry=30.0,
         ),
     )
+    _load_quota_stats()
     print_banner()
     print_status()
-    yield
-    await http_client.aclose()
+    try:
+        yield
+    finally:
+        _save_quota_stats(force=True)
+        await http_client.aclose()
 
 
 app = FastAPI(title="Claude Cloak", lifespan=lifespan)
@@ -1166,6 +1274,294 @@ async def health():
             ],
         },
     }
+
+
+DASHBOARD_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Claude Cloak — Quota Dashboard</title>
+<style>
+  :root {
+    --bg: #0d0d10;
+    --panel: #16161c;
+    --panel-2: #1d1d26;
+    --border: #2a2a36;
+    --text: #e8e8ee;
+    --muted: #8a8a99;
+    --accent: #c084fc;
+    --accent-2: #67e8f9;
+    --ok: #4ade80;
+    --warn: #fbbf24;
+    --danger: #f87171;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  header {
+    padding: 20px 28px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+  }
+  header h1 {
+    margin: 0;
+    font-size: 18px;
+    color: var(--accent);
+    letter-spacing: 0.04em;
+  }
+  header .sub { color: var(--muted); font-size: 12px; }
+  header .live { margin-left: auto; color: var(--ok); font-size: 12px; }
+  header .live::before { content: "●  "; }
+  main { padding: 24px 28px; max-width: 1280px; margin: 0 auto; }
+  section { margin-bottom: 28px; }
+  section h2 {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--muted);
+    margin: 0 0 12px;
+    font-weight: 600;
+  }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 18px;
+  }
+  .card.big { grid-column: span 2; background: linear-gradient(135deg, #1f1429 0%, #16161c 100%); }
+  .card .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 8px; }
+  .card .value { font-size: 22px; font-weight: 600; color: var(--text); }
+  .card.big .value { font-size: 32px; color: var(--accent); }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 18px; }
+  .bar-row { display: grid; grid-template-columns: 140px 1fr 220px; align-items: center; gap: 14px; margin-bottom: 10px; }
+  .bar-label { color: var(--muted); font-size: 12px; }
+  .bar-track { background: var(--panel-2); border-radius: 4px; height: 10px; overflow: hidden; border: 1px solid var(--border); }
+  .bar-fill { height: 100%; transition: width .4s ease, background-color .2s; }
+  .bar-row.ok .bar-fill { background: var(--ok); }
+  .bar-row.warn .bar-fill { background: var(--warn); }
+  .bar-row.danger .bar-fill { background: var(--danger); }
+  .bar-value { color: var(--text); font-size: 12px; text-align: right; }
+  .retry { color: var(--danger); font-size: 12px; margin-top: 10px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; }
+  td:last-child, th:last-child { text-align: right; color: var(--accent); }
+  .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  @media (max-width: 800px) { .charts { grid-template-columns: 1fr; } .card.big { grid-column: auto; } }
+  .empty { color: var(--muted); padding: 24px; text-align: center; font-size: 12px; }
+  .footer { color: var(--muted); font-size: 11px; padding: 24px 28px; border-top: 1px solid var(--border); }
+</style>
+</head>
+<body>
+<header>
+  <h1>CLAUDE CLOAK</h1>
+  <span class="sub">Quota &amp; Cost Dashboard</span>
+  <span class="live" id="live-indicator">live</span>
+</header>
+
+<main>
+  <section>
+    <h2>Totals</h2>
+    <div class="cards">
+      <div class="card big">
+        <div class="label">Total Cost (USD)</div>
+        <div class="value" id="cost-total">$0.0000</div>
+      </div>
+      <div class="card"><div class="label">Requests</div><div class="value" id="req-total">0</div></div>
+      <div class="card"><div class="label">Input Tokens</div><div class="value" id="in-total">0</div></div>
+      <div class="card"><div class="label">Output Tokens</div><div class="value" id="out-total">0</div></div>
+      <div class="card"><div class="label">Cache Read</div><div class="value" id="cache-read">0</div></div>
+      <div class="card"><div class="label">Cache Write</div><div class="value" id="cache-write">0</div></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Rate Limits (live from Anthropic)</h2>
+    <div class="panel">
+      <div id="rate-limits"></div>
+      <div class="bar-value" id="rate-updated" style="text-align:left;color:var(--muted);margin-top:10px;"></div>
+    </div>
+  </section>
+
+  <section class="charts">
+    <div class="panel">
+      <h2 style="margin-top:0">Cost by Model</h2>
+      <canvas id="model-chart" height="160"></canvas>
+    </div>
+    <div class="panel">
+      <h2 style="margin-top:0">Token Mix</h2>
+      <canvas id="token-chart" height="160"></canvas>
+    </div>
+  </section>
+
+  <section>
+    <h2>Per-Model Breakdown</h2>
+    <div class="panel" style="padding:0;overflow:hidden;">
+      <table id="model-table">
+        <thead><tr>
+          <th>Model</th><th>Requests</th><th>Input</th><th>Output</th><th>Cache R</th><th>Cache W</th><th>Cost</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="empty" id="model-empty" style="display:none">No /v1/messages requests recorded yet.</div>
+    </div>
+  </section>
+</main>
+
+<div class="footer">
+  Auto-refreshes every 5s. Source: <code>GET /quota</code>. Stats persisted to <code>.quota.json</code>.
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script>
+  let modelChart = null, tokenChart = null;
+
+  function fmtNum(n) {
+    n = Number(n) || 0;
+    if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+    if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+    return String(Math.round(n));
+  }
+  function fmtCost(c) { return '$' + (Number(c) || 0).toFixed(4); }
+
+  function addBar(container, label, remaining, limit, reset) {
+    if (remaining == null || limit == null) return;
+    const r = Number(remaining), l = Number(limit);
+    if (!Number.isFinite(r) || !Number.isFinite(l) || l <= 0) return;
+    const pct = Math.max(0, Math.min(100, (r / l) * 100));
+    const cls = pct < 10 ? 'danger' : pct < 30 ? 'warn' : 'ok';
+    const div = document.createElement('div');
+    div.className = 'bar-row ' + cls;
+    const meta = reset ? ' · resets ' + reset : '';
+    div.innerHTML = '<div class="bar-label">' + label + '</div>' +
+      '<div class="bar-track"><div class="bar-fill" style="width:' + pct.toFixed(1) + '%"></div></div>' +
+      '<div class="bar-value">' + fmtNum(r) + ' / ' + fmtNum(l) + meta + '</div>';
+    container.appendChild(div);
+  }
+
+  async function refresh() {
+    let q;
+    try {
+      const r = await fetch('/quota', { cache: 'no-store' });
+      q = await r.json();
+      document.getElementById('live-indicator').style.color = 'var(--ok)';
+    } catch (e) {
+      document.getElementById('live-indicator').style.color = 'var(--danger)';
+      document.getElementById('live-indicator').textContent = 'offline';
+      return;
+    }
+
+    const t = q.tokens || {};
+    document.getElementById('cost-total').textContent = fmtCost(q.cost_usd_total);
+    document.getElementById('req-total').textContent = fmtNum(q.messages_requests);
+    document.getElementById('in-total').textContent = fmtNum(t.input_tokens);
+    document.getElementById('out-total').textContent = fmtNum(t.output_tokens);
+    document.getElementById('cache-read').textContent = fmtNum(t.cache_read_input_tokens);
+    document.getElementById('cache-write').textContent = fmtNum(t.cache_creation_input_tokens);
+
+    const rl = q.rate_limits || {};
+    const rlEl = document.getElementById('rate-limits');
+    rlEl.innerHTML = '';
+    addBar(rlEl, 'Requests',     rl.requests_remaining,      rl.requests_limit,      rl.requests_reset);
+    addBar(rlEl, 'Input tokens', rl.input_tokens_remaining,  rl.input_tokens_limit,  rl.input_tokens_reset);
+    addBar(rlEl, 'Output tokens',rl.output_tokens_remaining, rl.output_tokens_limit, rl.output_tokens_reset);
+    addBar(rlEl, 'Total tokens', rl.tokens_remaining,        rl.tokens_limit,        rl.tokens_reset);
+    if (rl.retry_after) {
+      const div = document.createElement('div');
+      div.className = 'retry';
+      div.textContent = '⚠  retry-after: ' + rl.retry_after + 's';
+      rlEl.appendChild(div);
+    }
+    if (!rlEl.children.length) {
+      const div = document.createElement('div');
+      div.className = 'bar-value';
+      div.style.cssText = 'text-align:left;color:var(--muted);';
+      div.textContent = 'Waiting for first /v1/messages response…';
+      rlEl.appendChild(div);
+    }
+    document.getElementById('rate-updated').textContent =
+      rl.updated_at ? 'updated ' + rl.updated_at : '';
+
+    const models = q.by_model || [];
+    const labels = models.map(m => m.model);
+    const costs  = models.map(m => Number(m.cost_usd) || 0);
+    const palette = ['#c084fc','#67e8f9','#fbbf24','#4ade80','#f87171','#a3a3a3','#60a5fa','#f472b6'];
+    const colors = labels.map((_, i) => palette[i % palette.length]);
+
+    if (window.Chart) {
+      if (!modelChart) {
+        modelChart = new Chart(document.getElementById('model-chart'), {
+          type: 'bar',
+          data: { labels, datasets: [{ label: 'Cost (USD)', data: costs, backgroundColor: colors, borderRadius: 4 }] },
+          options: {
+            plugins: { legend: { display: false } },
+            scales: {
+              x: { ticks: { color: '#8a8a99' }, grid: { display: false } },
+              y: { ticks: { color: '#8a8a99', callback: v => '$' + v.toFixed(2) }, grid: { color: '#2a2a36' }, beginAtZero: true }
+            }
+          }
+        });
+      } else {
+        modelChart.data.labels = labels;
+        modelChart.data.datasets[0].data = costs;
+        modelChart.data.datasets[0].backgroundColor = colors;
+        modelChart.update();
+      }
+
+      const tokenLabels = ['Input (paid)', 'Output', 'Cache read', 'Cache write'];
+      const tokenData = [t.input_tokens || 0, t.output_tokens || 0, t.cache_read_input_tokens || 0, t.cache_creation_input_tokens || 0];
+      const tokenColors = ['#f87171','#67e8f9','#4ade80','#c084fc'];
+      if (!tokenChart) {
+        tokenChart = new Chart(document.getElementById('token-chart'), {
+          type: 'doughnut',
+          data: { labels: tokenLabels, datasets: [{ data: tokenData, backgroundColor: tokenColors, borderColor: '#16161c', borderWidth: 2 }] },
+          options: { plugins: { legend: { position: 'right', labels: { color: '#e8e8ee', boxWidth: 12 } } } }
+        });
+      } else {
+        tokenChart.data.datasets[0].data = tokenData;
+        tokenChart.update();
+      }
+    }
+
+    const tb = document.querySelector('#model-table tbody');
+    tb.innerHTML = '';
+    document.getElementById('model-empty').style.display = models.length ? 'none' : 'block';
+    document.getElementById('model-table').style.display = models.length ? '' : 'none';
+    for (const m of models) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = '<td>' + m.model + '</td>' +
+        '<td>' + fmtNum(m.requests) + '</td>' +
+        '<td>' + fmtNum(m.input_tokens) + '</td>' +
+        '<td>' + fmtNum(m.output_tokens) + '</td>' +
+        '<td>' + fmtNum(m.cache_read_input_tokens) + '</td>' +
+        '<td>' + fmtNum(m.cache_creation_input_tokens) + '</td>' +
+        '<td>' + fmtCost(m.cost_usd) + '</td>';
+      tb.appendChild(tr);
+    }
+  }
+
+  refresh();
+  setInterval(refresh, 5000);
+</script>
+</body>
+</html>
+"""
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard():
+    return HTMLResponse(content=DASHBOARD_HTML)
 
 
 @app.get("/quota")

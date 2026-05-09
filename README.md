@@ -314,11 +314,32 @@ Model keys: `OPUS_4`, `SONNET_4`, `HAIKU_4`, `OPUS_3`, `SONNET_3_7`, `SONNET_3_5
 - **Token-saver verification**: compare `cache_read_input_tokens` (cheap) vs `input_tokens` (full price) to confirm cache hit rate
 - **Cost attribution**: `by_model` shows where the spend lands
 
+### Web Dashboard
+
+Open `http://localhost:9999/dashboard` for a live web UI:
+
+- **Total cost** + per-model breakdown (bar chart)
+- **Token mix** doughnut (input / output / cache read / cache write)
+- **Rate-limit progress bars** (color-coded: green > 30%, amber 10–30%, red < 10%) with reset times
+- **Per-model table** with full token + cost breakdown
+- Auto-refreshes every 5 s, polls `/quota`. Chart.js loaded from CDN; the rest is self-contained vanilla JS
+
+### Persistence
+
+Counters are persisted to `.quota.json` next to `.env` so totals survive proxy restarts. Writes are debounced — at most every `QUOTA_PERSIST_INTERVAL` seconds (default 30) plus a forced flush on shutdown. The file is git-ignored.
+
+```env
+QUOTA_PERSIST_INTERVAL=30      # Write at most every N seconds
+# QUOTA_PERSIST_PATH=          # Override location (default: .quota.json next to .env)
+```
+
+`rate_limits` are NOT persisted — those values would be stale by next process start. Reset all stats by deleting `.quota.json`.
+
 ### Caveats
 
 - Cost numbers are **estimates** based on the configured pricing table; the canonical source remains the Anthropic console.
-- Counters live in-memory only — restart the proxy and they reset.
 - Requests served from the telemetry-block layer never touch Anthropic, so they're not counted.
+- The dashboard loads Chart.js from `cdn.jsdelivr.net`. If you're air-gapped or block third-party CDNs, the cards / table / progress bars still render — only the two charts will be blank.
 
 ## What It Does NOT Do
 
@@ -333,13 +354,14 @@ Model keys: `OPUS_4`, `SONNET_4`, `HAIKU_4`, `OPUS_3`, `SONNET_3_7`, `SONNET_3_5
 
 ```
 client/
-├── proxy.py           # Main proxy server (FastAPI) — all 8 anonymity layers
+├── proxy.py           # Main proxy server (FastAPI) — anonymity layers, token saver, quota tracking, dashboard
 ├── setup_claude.py    # Auto-config Claude Code → proxy URL
 ├── tray_app.py        # Optional Windows system tray app
 ├── start.bat          # Launch script (kill old port + start proxy)
 ├── install.bat        # Dependency installer
 ├── .env.example       # Config template with all captured header fields
 ├── .env               # Captured identity + config (git-ignored)
+├── .quota.json        # Persisted quota/cost counters (git-ignored, auto-managed)
 └── requirements.txt   # Python dependencies
 ```
 
@@ -349,6 +371,7 @@ client/
 |----------|-------------|
 | `GET /health` | Returns proxy status: identity captured, headers locked, telemetry blocked count, bodies sanitized count, unknown headers seen, full quota/cost stats |
 | `GET /quota` | Compact quota + cost summary (see Quota & Cost Tracking section) |
+| `GET /dashboard` | Web UI rendering `/quota` as charts (Chart.js, dark theme, auto-refresh 5s) |
 | `* /{path}` | Proxy catch-all — applies all 8 layers then forwards to `api.anthropic.com/{path}` |
 
 ## Requirements
