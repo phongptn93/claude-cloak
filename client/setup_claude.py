@@ -12,7 +12,21 @@ if sys.platform == "win32":
 
 CLAUDE_DIR = os.path.join(os.path.expanduser("~"), ".claude")
 SETTINGS_PATH = os.path.join(CLAUDE_DIR, "settings.json")
-PROXY_URL = "http://127.0.0.1:9999"
+
+# Read LOCAL_PORT from .env in the same directory (no dotenv dependency needed here).
+_env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+_local_port = "9999"
+if os.path.exists(_env_path):
+    with open(_env_path, "r", encoding="utf-8") as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if _line.startswith("LOCAL_PORT=") and not _line.startswith("#"):
+                _val = _line.split("=", 1)[1].strip()
+                if _val.isdigit():
+                    _local_port = _val
+                break
+
+PROXY_URL = f"http://127.0.0.1:{_local_port}"
 
 G = "\033[32m"
 Y = "\033[33m"

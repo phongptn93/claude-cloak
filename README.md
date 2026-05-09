@@ -249,6 +249,158 @@ TOOL_RESULT_KEEP_RECENT=2    # Recent turns left untouched
 
 `tokens_saved_est` is an approximation (`bytes_saved / 4`); use it as a directional metric, not an exact charge.
 
+## Quota & Cost Tracking
+
+Enabled by default (`QUOTA_TRACKING=true`). The proxy reads two things from every `/v1/messages` response:
+
+1. **`anthropic-ratelimit-*` headers** → live remaining quota (requests, input tokens, output tokens, reset time)
+2. **`usage` block** (from streaming SSE `message_start`/`message_delta` or non-streaming JSON) → input/output/cache token counts + computed USD cost
+
+Bytes are never modified — the tap inspects, the proxy still streams the original chunks to the client. A 5 MB safety cap prevents runaway buffers.
+
+### Endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /quota` | Compact JSON — `cost_usd_total`, `tokens` (totals), `by_model` breakdown, `rate_limits` (remaining/limit/reset for requests + input + output tokens, plus retry-after) |
+| `GET /health` | Full proxy status — includes a `quota` section with the same data |
+
+Example `/quota`:
+
+```json
+{
+  "cost_usd_total": 1.2345,
+  "messages_requests": 42,
+  "tokens": { "input_tokens": 12000, "output_tokens": 8400, "cache_creation_input_tokens": 3200, "cache_read_input_tokens": 87000 },
+  "by_model": [
+    {"model": "sonnet-4", "requests": 38, "input_tokens": 11000, "output_tokens": 7800, "cost_usd": 1.1024},
+    {"model": "haiku-4",  "requests":  4, "input_tokens":  1000, "output_tokens":  600, "cost_usd": 0.1321}
+  ],
+  "by_session": [
+    {"session_id": "abc123…f9e2", "requests": 24, "input_tokens": 7400, "output_tokens": 5100, "cost_usd": 0.6712,
+     "models": {"sonnet-4": 22, "haiku-4": 2}, "first_seen": "2026-05-09T09:12:03", "last_seen": "2026-05-09T12:30:14"}
+  ],
+  "by_day": [
+    {"date": "2026-05-09", "requests": 18, "input_tokens": 5200, "output_tokens": 3800, "cost_usd": 0.4912},
+    {"date": "2026-05-08", "requests": 24, "input_tokens": 6800, "output_tokens": 4600, "cost_usd": 0.7433}
+  ],
+  "rate_limits": {
+    "requests_remaining": "1450", "requests_limit": "2000", "requests_reset": "2026-05-09T12:34:56Z",
+    "input_tokens_remaining": "780000", "output_tokens_remaining": "120000",
+    "retry_after": null, "updated_at": "2026-05-09T12:30:14"
+  }
+}
+```
+
+### Pricing
+
+Defaults are public Anthropic list prices (USD per million tokens). Override per-tier via env if Anthropic changes them or you want plan-specific rates:
+
+```env
+PRICING_SONNET_4_INPUT=3.00
+PRICING_SONNET_4_OUTPUT=15.00
+PRICING_SONNET_4_CACHE_WRITE_5M=3.75
+PRICING_SONNET_4_CACHE_WRITE_1H=6.00
+PRICING_SONNET_4_CACHE_READ=0.30
+```
+
+Model keys: `OPUS_4`, `SONNET_4`, `HAIKU_4`, `OPUS_3`, `SONNET_3_7`, `SONNET_3_5`, `HAIKU_3_5`, `HAIKU_3`. Cost calc uses the per-TTL breakdown when Anthropic provides it (`cache_creation.ephemeral_5m_input_tokens` / `ephemeral_1h_input_tokens`); falls back to default 5 m rate when only the legacy aggregate field is present.
+
+### What it's good for
+
+- **Multi-device share**: one dashboard for total spend across all devices using the proxy
+- **Avoid surprise rate-limits**: see remaining quota before hitting 429
+- **Token-saver verification**: compare `cache_read_input_tokens` (cheap) vs `input_tokens` (full price) to confirm cache hit rate
+- **Cost attribution**: `by_model` shows where the spend lands
+
+### Web Dashboard
+
+Open `http://localhost:9999/dashboard` for a live web UI:
+
+- **Totals** card grid — total cost, requests, distinct sessions, paid input / output / cache read / cache write
+- **Live rate-limit progress bars** color-coded green / amber / red with reset times
+- **Daily trend chart** — last 15 days, cost line + input/output token bars on dual y-axes
+- **Cost-by-model doughnut** — lifetime breakdown
+- **Daily breakdown table** — date · requests · tokens · cost
+- **Per-model breakdown table**
+- **Per-session breakdown table** — each device's `x-claude-code-session-id` shown separately (the proxy locks identity outbound, but tracks each session inbound)
+- Auto-refreshes every 5 s, polls `/quota`. Sticky header with live status pill. Chart.js loaded from CDN; the rest is self-contained vanilla JS that degrades gracefully if blocked
+
+### Per-Session & Daily Tracking
+
+The proxy reads `x-claude-code-session-id` from each **incoming** request (before the proxy rewrites it to the locked identity) and groups stats per session. So even though every device sends the same locked session-id outbound, the dashboard shows each device's own session distinctly.
+
+Daily buckets use **local time** (`datetime.now()`). The dashboard shows the most recent 15 days; the proxy keeps up to `QUOTA_MAX_DAYS` (default 30) on disk.
+
+| Cap | Default | Behavior when exceeded |
+|---|---|---|
+| `QUOTA_MAX_SESSIONS` | 100 | Oldest session (by `last_seen`) evicted |
+| `QUOTA_MAX_DAYS`     | 30  | Oldest date evicted |
+
+### Persistence
+
+Counters are persisted to `.quota.json` next to `.env` so totals survive proxy restarts. Writes are debounced — at most every `QUOTA_PERSIST_INTERVAL` seconds (default 30) plus a forced flush on shutdown. The file is git-ignored. Schema v1 files are migrated forward automatically (by_session / by_day start empty).
+
+```env
+QUOTA_PERSIST_INTERVAL=30      # Write at most every N seconds
+QUOTA_MAX_SESSIONS=100         # Cap on per-session buckets
+QUOTA_MAX_DAYS=30              # Cap on per-day buckets
+# QUOTA_PERSIST_PATH=          # Override location (default: .quota.json next to .env)
+```
+
+`rate_limits` are NOT persisted — those values would be stale by next process start. Reset all stats by deleting `.quota.json`.
+
+### Auto Monthly Reset
+
+Set `QUOTA_MONTHLY_RESET=true` (default) to automatically clear `cost_usd_total`, `usage_total`, `by_model`, and `by_session` at the start of each calendar month. `by_day` history is preserved so the trend chart spans multiple months. The dashboard topbar shows a `YYYY-MM · resets in Nd` pill so you can see when the next reset happens.
+
+## Loki Log Shipping (optional)
+
+The proxy can forward structured events to a [Grafana Loki](https://grafana.com/oss/loki/) push endpoint, so you can visualise multi-device cost/usage in Grafana alongside whatever else you observe.
+
+Enable by setting `LOKI_URL` in `.env`:
+
+```env
+LOKI_URL=http://192.168.15.120:3100/loki/api/v1/push
+LOKI_JOB=claude-cloak           # default
+LOKI_HOST=                      # default: socket.gethostname()
+LOKI_USER_EMAIL=                # optional, becomes a Loki label if set
+LOKI_LABELS=team=eng,env=dev    # optional extra static labels
+LOKI_BATCH_SIZE=100
+LOKI_FLUSH_INTERVAL=5
+LOKI_MAX_BUFFER=2000
+```
+
+Events emitted (low-cardinality labels + JSON fields):
+
+| `event` | When | Key fields |
+|---|---|---|
+| `usage`    | After each successful `/v1/messages` | `conversation_id`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_creation_tokens`, `estimated_tokens`, `cost_usd`, `duration_ms`, label `model` |
+| `error`    | Non-2xx responses or transport errors  | `status`, `path`, `method`, `error_type` (`unauthorized`/`rate_limit`/`client_error`/`server_error`/`timeout`/`connect_error`/`proxy_error`), `duration_ms`, `retry_after`, `conversation_id` |
+| `blocked`  | Telemetry endpoint intercepted         | `path`, `method` |
+| `identity` | Identity headers captured first time   | `headers_count`, `headers` (list of header names — never values) |
+
+Standard labels: `job`, `host`, `event`, plus `model` on `usage`/`error`. Buffering is bounded (default 2000 events); flush failures warn at most once per minute and never block requests. If Loki goes down or `LOKI_URL` is unreachable, the proxy keeps running normally.
+
+### Bundled Grafana dashboard
+
+Import `client/grafana-dashboard.json` into Grafana (Dashboards → New → Import). It includes:
+
+- **Overview** — total cost, requests, total tokens, avg cost/request, active sessions, active hosts
+- **Cost & Volume Trends** — stacked cost over time by model, token throughput (input/output/cache), requests/min by host, latency (p50/p95/max)
+- **Breakdown** — cost by model (donut), cost by host (donut), top 10 sessions by cost
+- **Cache & Efficiency** — cache hit rate, input/output/cache_read/cache_creation token totals
+- **Errors & Telemetry Blocking** — error rate, 429/401/5xx counts, telemetry blocked, identity captures, errors over time, top blocked paths
+- **Raw Events** (collapsed) — full log stream
+
+The dashboard expects the `Loki` datasource to exist in Grafana; rename via the import dialog if yours has a different name.
+
+### Caveats
+
+- Cost numbers are **estimates** based on the configured pricing table; the canonical source remains the Anthropic console.
+- Requests served from the telemetry-block layer never touch Anthropic, so they're not counted.
+- The dashboard loads Chart.js from `cdn.jsdelivr.net`. If you're air-gapped or block third-party CDNs, the cards / table / progress bars still render — only the two charts will be blank.
+
 ## What It Does NOT Do
 
 | | Description |
@@ -262,13 +414,16 @@ TOOL_RESULT_KEEP_RECENT=2    # Recent turns left untouched
 
 ```
 client/
-├── proxy.py           # Main proxy server (FastAPI) — all 8 anonymity layers
-├── setup_claude.py    # Auto-config Claude Code → proxy URL
-├── tray_app.py        # Optional Windows system tray app
-├── start.bat          # Launch script (kill old port + start proxy)
-├── install.bat        # Dependency installer
-├── .env.example       # Config template with all captured header fields
-├── .env               # Captured identity + config (git-ignored)
+├── proxy.py               # Main proxy server (FastAPI) — anonymity layers, token saver, quota tracking, dashboard, Loki shipping
+├── setup_claude.py        # Auto-config Claude Code → proxy URL (reads LOCAL_PORT from .env)
+├── tray_app.py            # Optional Windows system tray app
+├── start.bat              # Windows launcher
+├── start.sh               # macOS / Linux launcher
+├── install.bat            # Windows dependency installer
+├── grafana-dashboard.json # Importable Grafana dashboard for Loki-shipped events
+├── .env.example           # Config template with all captured header fields
+├── .env                   # Captured identity + config (git-ignored)
+├── .quota.json            # Persisted quota/cost counters (git-ignored, auto-managed)
 └── requirements.txt   # Python dependencies
 ```
 
@@ -276,7 +431,9 @@ client/
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET /health` | Returns proxy status: identity captured, headers locked, telemetry blocked count, bodies sanitized count, unknown headers seen |
+| `GET /health` | Returns proxy status: identity captured, headers locked, telemetry blocked count, bodies sanitized count, unknown headers seen, full quota/cost stats |
+| `GET /quota` | Compact quota + cost summary (see Quota & Cost Tracking section) |
+| `GET /dashboard` | Web UI rendering `/quota` as charts (Chart.js, dark theme, auto-refresh 5s) |
 | `* /{path}` | Proxy catch-all — applies all 8 layers then forwards to `api.anthropic.com/{path}` |
 
 ## Requirements
