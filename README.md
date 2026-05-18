@@ -401,6 +401,85 @@ The dashboard expects the `Loki` datasource to exist in Grafana; rename via the 
 - Requests served from the telemetry-block layer never touch Anthropic, so they're not counted.
 - The dashboard loads Chart.js from `cdn.jsdelivr.net`. If you're air-gapped or block third-party CDNs, the cards / table / progress bars still render — only the two charts will be blank.
 
+## Server Mode (shared VM)
+
+Instead of running one proxy per device, deploy a single proxy on a VM and point every client at it. Identity-spoofing + token-saving + quota tracking all keep working; access is gated by source-IP whitelist and (optionally) per-user spend caps.
+
+### Why server mode
+
+- One `.env` to maintain (the VM's). New devices just point `ANTHROPIC_BASE_URL` at the VM — no need to copy the captured fingerprint around.
+- Centralised dashboard + per-user cost cap.
+- Same anonymity layers as local mode — only the deployment topology changes.
+
+### VM-side setup
+
+1. Capture identity on one source machine first by running the proxy in **local** mode and logging in to Claude Code once. The fingerprint lands in `client/.env`.
+2. Copy that `.env` to the VM (keep all `CAPTURED_*` lines + `SESSION_SECRET`).
+3. Edit the VM's `.env`:
+   ```env
+   DEPLOY_MODE=server
+   # LOCAL_HOST=0.0.0.0           # default in server mode
+   ALLOWED_IPS=203.0.113.5,198.51.100.0/24,2001:db8::/32
+   IP_LABELS=203.0.113.5:phong,198.51.100.7:huy
+   USER_QUOTA_ENABLED=true
+   USER_QUOTA_PERIOD=monthly      # monthly | daily
+   USER_QUOTA_DEFAULT_USD=20.0
+   USER_QUOTA_HARD_LIMIT=true     # 429 when over cap (false = warn only)
+   USER_QUOTA_CAPS=phong:50.0,huy:30.0
+   ```
+4. Open the port on the VM firewall / cloud security group (matching whatever `LOCAL_PORT` is — default 9999).
+5. Run:
+   ```bash
+   cd client
+   ./start-server.sh
+   ```
+   `start-server.sh` forces `DEPLOY_MODE=server`, refuses to boot with an empty `ALLOWED_IPS`, and skips the local Claude Code auto-config.
+
+> **Safety guard:** if `DEPLOY_MODE=server` and `ALLOWED_IPS` is empty, the proxy aborts at startup. Identity auto-capture is also disabled in server mode, so a random first caller can't lock the fingerprint for everyone.
+
+### Client-side setup
+
+Each device just needs Claude Code pointed at the VM. Two equivalent ways:
+
+```bash
+# Option A — write settings.json (persisted)
+python client/setup_claude.py --remote http://VM_IP:9999
+
+# Option B — per-shell env var
+export ANTHROPIC_BASE_URL=http://VM_IP:9999
+claude
+```
+
+No local proxy is started. The original `start.bat` / `start.sh` workflow still works unchanged for anyone who wants the per-device proxy — server mode is purely additive.
+
+### Per-User Quota
+
+When `USER_QUOTA_ENABLED=true`, every `/v1/*` request is attributed to the source IP, mapped to a label via `IP_LABELS` (unmapped IPs use the raw IP string). The proxy tracks USD cost per user and either soft-warns or hard-blocks once the cap is hit.
+
+| Behaviour | `USER_QUOTA_HARD_LIMIT=true` (default) | `USER_QUOTA_HARD_LIMIT=false` |
+|---|---|---|
+| Over cap | Returns 429 with `Retry-After: <secs until period reset>` | Still proxies the request; only `blocked_count` increments |
+| Tracking | Always on (visible in dashboard + `/quota/users`) | Always on |
+
+Period rolls over automatically at the start of each `daily` / `monthly` boundary (local time). Cap overrides per-label live in `USER_QUOTA_CAPS`; unmapped users fall back to `USER_QUOTA_DEFAULT_USD` (set to `0` for unlimited).
+
+### Endpoints (server mode additions)
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /quota/users` | All users + cap usage |
+| `GET /quota/users/{label}` | Detail for one user |
+| `POST /admin/quota/reset/{label}` | Manually zero a user's counters. Caller must come from `ADMIN_IPS` (default loopback only) |
+
+The dashboard at `/dashboard` auto-renders a **Per-User Quota** table when the feature is on, with colour-coded cap-usage badges (green / amber / red).
+
+### Security notes
+
+- The whitelist matches the raw TCP source (`request.client.host`), not any `X-Forwarded-For` header — there's no reverse proxy in this setup, so spoofing isn't possible.
+- All identity sanitization layers still apply, so even though many clients now share one VM, Anthropic still sees a single device.
+- The `.env` on the VM contains the captured fingerprint + `SESSION_SECRET`. Treat it like a credential — anyone who reads it can impersonate that device pool. Same goes for `.quota.json` if you care about hiding spend history.
+- Defence in depth: pair `ALLOWED_IPS` with an OS firewall rule (ufw / iptables / cloud security group) for the same CIDR. If a code bug ever opens up the app-level whitelist, the firewall still holds.
+
 ## What It Does NOT Do
 
 | | Description |
@@ -417,8 +496,9 @@ client/
 ├── proxy.py               # Main proxy server (FastAPI) — anonymity layers, token saver, quota tracking, dashboard, Loki shipping
 ├── setup_claude.py        # Auto-config Claude Code → proxy URL (reads LOCAL_PORT from .env)
 ├── tray_app.py            # Optional Windows system tray app
-├── start.bat              # Windows launcher
-├── start.sh               # macOS / Linux launcher
+├── start.bat              # Windows launcher (local mode)
+├── start.sh               # macOS / Linux launcher (local mode)
+├── start-server.sh        # macOS / Linux launcher for shared VM (server mode)
 ├── install.bat            # Windows dependency installer
 ├── grafana-dashboard.json # Importable Grafana dashboard for Loki-shipped events
 ├── .env.example           # Config template with all captured header fields
@@ -433,6 +513,9 @@ client/
 |----------|-------------|
 | `GET /health` | Returns proxy status: identity captured, headers locked, telemetry blocked count, bodies sanitized count, unknown headers seen, full quota/cost stats |
 | `GET /quota` | Compact quota + cost summary (see Quota & Cost Tracking section) |
+| `GET /quota/users` | All per-user buckets + cap usage (server mode) |
+| `GET /quota/users/{label}` | Detail for one user |
+| `POST /admin/quota/reset/{label}` | Reset a user's counters (loopback / `ADMIN_IPS` only) |
 | `GET /dashboard` | Web UI rendering `/quota` as charts (Chart.js, dark theme, auto-refresh 5s) |
 | `* /{path}` | Proxy catch-all — applies all 8 layers then forwards to `api.anthropic.com/{path}` |
 

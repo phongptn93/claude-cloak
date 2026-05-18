@@ -26,6 +26,7 @@ Token Saver (optional, TOKEN_SAVER=true):
 import asyncio
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import os
@@ -91,6 +92,144 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 LOCAL_PORT = int(os.getenv("LOCAL_PORT", "9999"))
 ANTHROPIC_BASE_URL = "https://api.anthropic.com"
+
+# ============================================================
+# DEPLOY MODE
+#   local  — bind 127.0.0.1, no IP whitelist, identity auto-captured.
+#            Each device runs its own proxy (original behaviour).
+#   server — bind LOCAL_HOST (default 0.0.0.0) so other machines can reach it,
+#            require ALLOWED_IPS, identity must be pre-populated in .env
+#            (auto-capture is disabled so random first caller can't lock it).
+# ============================================================
+DEPLOY_MODE = os.getenv("DEPLOY_MODE", "local").strip().lower()
+if DEPLOY_MODE not in ("local", "server"):
+    DEPLOY_MODE = "local"
+LOCAL_HOST = os.getenv(
+    "LOCAL_HOST",
+    "0.0.0.0" if DEPLOY_MODE == "server" else "127.0.0.1",
+).strip() or "127.0.0.1"
+
+
+def _parse_allowed_networks(raw: str) -> list:
+    """Parse a comma-separated list of IPs / CIDR blocks (v4 + v6)."""
+    nets = []
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            if "/" in token:
+                nets.append(ipaddress.ip_network(token, strict=False))
+            else:
+                addr = ipaddress.ip_address(token)
+                prefix = 32 if isinstance(addr, ipaddress.IPv4Address) else 128
+                nets.append(ipaddress.ip_network(f"{addr}/{prefix}", strict=False))
+        except ValueError:
+            print(f"  [WARN] Invalid ALLOWED_IPS entry ignored: {token!r}", file=sys.stderr)
+    return nets
+
+
+ALLOWED_IPS_RAW = os.getenv("ALLOWED_IPS", "").strip()
+ALLOWED_NETWORKS = _parse_allowed_networks(ALLOWED_IPS_RAW)
+
+# Admin-only endpoints (e.g. /admin/quota/reset/*) require the caller to come
+# from one of these IPs. Defaults to loopback so the VM operator can curl them
+# but no remote whitelisted client can reset other users' caps.
+ADMIN_IPS = {
+    ip.strip()
+    for ip in os.getenv("ADMIN_IPS", "127.0.0.1,::1").split(",")
+    if ip.strip()
+}
+
+# IP → human label mapping for the dashboard / per-user quota.
+# Format: IP_LABELS=203.0.113.5:phong,198.51.100.7:huy
+IP_LABEL_MAP: dict = {}
+for _pair in os.getenv("IP_LABELS", "").split(","):
+    _pair = _pair.strip()
+    if ":" not in _pair:
+        continue
+    _ip, _label = _pair.split(":", 1)
+    _ip = _ip.strip()
+    _label = _label.strip()
+    if not _ip or not _label:
+        continue
+    try:
+        IP_LABEL_MAP[ipaddress.ip_address(_ip)] = _label
+    except ValueError:
+        print(f"  [WARN] Invalid IP_LABELS entry ignored: {_pair!r}", file=sys.stderr)
+
+# ============================================================
+# PER-USER QUOTA (per source IP, identified by IP_LABELS mapping)
+# Tracks $ usage per "user" and optionally hard-stops requests with 429
+# once the cap is reached. Resets at the start of each daily / monthly period.
+# ============================================================
+USER_QUOTA_ENABLED = os.getenv("USER_QUOTA_ENABLED", "false").lower() == "true"
+USER_QUOTA_PERIOD = os.getenv("USER_QUOTA_PERIOD", "monthly").strip().lower()
+if USER_QUOTA_PERIOD not in ("daily", "monthly"):
+    USER_QUOTA_PERIOD = "monthly"
+USER_QUOTA_DEFAULT_USD = float(os.getenv("USER_QUOTA_DEFAULT_USD", "0") or "0")
+USER_QUOTA_HARD_LIMIT = os.getenv("USER_QUOTA_HARD_LIMIT", "true").lower() == "true"
+
+USER_QUOTA_CAPS: dict[str, float] = {}
+for _pair in os.getenv("USER_QUOTA_CAPS", "").split(","):
+    _pair = _pair.strip()
+    if ":" not in _pair:
+        continue
+    _label, _cap = _pair.split(":", 1)
+    _label = _label.strip()
+    try:
+        USER_QUOTA_CAPS[_label] = float(_cap.strip())
+    except ValueError:
+        print(f"  [WARN] Invalid USER_QUOTA_CAPS entry ignored: {_pair!r}", file=sys.stderr)
+
+
+def is_ip_allowed(ip: str) -> bool:
+    """Return True when ip falls inside any configured CIDR in ALLOWED_NETWORKS."""
+    if not ALLOWED_NETWORKS:
+        return False
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(addr in net for net in ALLOWED_NETWORKS)
+
+
+def label_for_ip(ip: str) -> str:
+    """Return the human label for a source IP, falling back to the IP string."""
+    if not ip:
+        return "unknown"
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip
+    return IP_LABEL_MAP.get(addr, ip)
+
+
+def cap_for_label(label: str) -> float:
+    """Resolve the spend cap (USD) for a given user label."""
+    return USER_QUOTA_CAPS.get(label, USER_QUOTA_DEFAULT_USD)
+
+
+def current_user_period_key() -> str:
+    """Period key used to detect roll-over: 'YYYY-MM' or 'YYYY-MM-DD'."""
+    if USER_QUOTA_PERIOD == "daily":
+        return datetime.now().strftime("%Y-%m-%d")
+    return datetime.now().strftime("%Y-%m")
+
+
+def seconds_until_user_period_reset() -> int:
+    """Approx seconds until the current daily/monthly cap resets — for Retry-After."""
+    now = datetime.now()
+    if USER_QUOTA_PERIOD == "daily":
+        tomorrow = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        from datetime import timedelta
+        target = tomorrow + timedelta(days=1)
+    else:
+        # First of next month at 00:00 local.
+        year = now.year + (1 if now.month == 12 else 0)
+        month = 1 if now.month == 12 else now.month + 1
+        target = now.replace(year=year, month=month, day=1, hour=0, minute=0, second=0, microsecond=0)
+    return max(1, int((target - now).total_seconds()))
 
 # ============================================================
 # CONSISTENT SESSION SECRET
@@ -352,6 +491,7 @@ quota_stats = {
     "by_model": {},  # model_key -> {usage..., cost_usd, requests}
     "by_session": {},  # session_id -> {requests, tokens, cost_usd, first_seen, last_seen}
     "by_day": {},  # YYYY-MM-DD -> {requests, tokens, cost_usd}
+    "by_user": {},  # label -> {cap_usd, period_key, cost_usd, requests, tokens, blocked_count, ...}
     "messages_requests": 0,
     "last_request_at": None,
     "period_month": "",  # YYYY-MM of current tracking period; auto-reset on rollover
@@ -427,8 +567,8 @@ QUOTA_PERSIST_PATH = os.getenv(
     os.path.join(os.path.dirname(ENV_PATH), ".quota.json"),
 )
 QUOTA_PERSIST_INTERVAL_SECONDS = int(os.getenv("QUOTA_PERSIST_INTERVAL", "30"))
-QUOTA_SCHEMA_VERSION = 2  # v1 = totals + by_model. v2 adds by_session + by_day.
-QUOTA_SCHEMA_MIN_LOAD = 1  # accept v1 files for migration
+QUOTA_SCHEMA_VERSION = 3  # v1 = totals+by_model. v2 += by_session+by_day. v3 += by_user.
+QUOTA_SCHEMA_MIN_LOAD = 1  # accept v1+ files for forward migration
 _last_quota_save_at = 0.0
 
 
@@ -850,6 +990,13 @@ def _load_quota_stats() -> bool:
     if isinstance(data.get("period_month"), str):
         quota_stats["period_month"] = data["period_month"]
 
+    # v3 — per-user buckets (absent in v1/v2, default empty).
+    bu = data.get("by_user")
+    if isinstance(bu, dict):
+        for label, bucket in bu.items():
+            if isinstance(bucket, dict) and "label" in bucket:
+                quota_stats["by_user"][label] = bucket
+
     _check_monthly_reset()
     return True
 
@@ -877,6 +1024,7 @@ def _save_quota_stats(force: bool = False) -> None:
         "by_model": quota_stats["by_model"],
         "by_session": quota_stats["by_session"],
         "by_day": quota_stats["by_day"],
+        "by_user": quota_stats["by_user"],
         "period_month": quota_stats["period_month"],
     }
     tmp_path = QUOTA_PERSIST_PATH + ".tmp"
@@ -1096,6 +1244,7 @@ def _record_usage(
     usage: dict,
     session_id: str | None = None,
     duration_ms: int | None = None,
+    user_label: str | None = None,
 ) -> None:
     """Accumulate a single response's usage into quota_stats and log it.
 
@@ -1190,6 +1339,9 @@ def _record_usage(
     db["cost_usd"] += cost
     _evict_oldest("by_day", "date", QUOTA_MAX_DAYS)
 
+    if user_label:
+        record_user_usage(user_label, usage, cost)
+
     log(
         f"           {DIM}usage: {RESET}{CYAN}{model_key}{RESET} "
         f"{DIM}in={in_t} out={out_t} cache_r={cr_t} cache_w={cw_t} "
@@ -1232,6 +1384,80 @@ def _evict_oldest(field: str, sort_key: str, max_entries: int) -> None:
         del bucket[key]
 
 
+def _new_user_bucket(label: str) -> dict:
+    return {
+        "label": label,
+        "cap_usd": cap_for_label(label),
+        "period": USER_QUOTA_PERIOD,
+        "period_key": current_user_period_key(),
+        "period_start": datetime.now().isoformat(timespec="seconds"),
+        "cost_usd": 0.0,
+        "requests": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "blocked_count": 0,
+        "first_seen": datetime.now().isoformat(timespec="seconds"),
+        "last_seen": None,
+    }
+
+
+def _reset_user_bucket(bucket: dict, period_key: str) -> None:
+    """Zero out a user's counters at the start of a new period."""
+    bucket["period_key"] = period_key
+    bucket["period_start"] = datetime.now().isoformat(timespec="seconds")
+    bucket["cost_usd"] = 0.0
+    bucket["requests"] = 0
+    bucket["input_tokens"] = 0
+    bucket["output_tokens"] = 0
+    bucket["cache_read_input_tokens"] = 0
+    bucket["cache_creation_input_tokens"] = 0
+    bucket["blocked_count"] = 0
+
+
+def get_or_create_user_bucket(label: str) -> dict:
+    """Return the per-user bucket, refreshing cap + rolling over period if needed."""
+    cur_period = current_user_period_key()
+    b = quota_stats["by_user"].get(label)
+    if b is None:
+        b = _new_user_bucket(label)
+        quota_stats["by_user"][label] = b
+        return b
+    # Live-refresh cap from env so changes apply without restart.
+    b["cap_usd"] = cap_for_label(label)
+    b["period"] = USER_QUOTA_PERIOD
+    if b.get("period_key") != cur_period:
+        _reset_user_bucket(b, cur_period)
+    return b
+
+
+def is_user_over_cap(label: str) -> tuple[bool, float, float]:
+    """Return (over, used_usd, cap_usd). cap<=0 means unlimited (never over)."""
+    if not USER_QUOTA_ENABLED:
+        return False, 0.0, 0.0
+    b = get_or_create_user_bucket(label)
+    cap = b["cap_usd"]
+    used = b["cost_usd"]
+    if cap <= 0:
+        return False, used, 0.0
+    return used >= cap, used, cap
+
+
+def record_user_usage(label: str, usage: dict, cost: float) -> None:
+    """Accumulate one response's cost/usage into the per-user bucket."""
+    if not USER_QUOTA_ENABLED or not label:
+        return
+    b = get_or_create_user_bucket(label)
+    b["cost_usd"] += cost
+    b["requests"] += 1
+    b["input_tokens"] += usage.get("input_tokens", 0) or 0
+    b["output_tokens"] += usage.get("output_tokens", 0) or 0
+    b["cache_read_input_tokens"] += usage.get("cache_read_input_tokens", 0) or 0
+    b["cache_creation_input_tokens"] += usage.get("cache_creation_input_tokens", 0) or 0
+    b["last_seen"] = datetime.now().isoformat(timespec="seconds")
+
+
 class UsageTap:
     """Tap a /v1/messages response stream to extract `usage` and `model`.
 
@@ -1245,9 +1471,10 @@ class UsageTap:
     untouched chunk to the client. A 5 MB safety cap prevents runaway buffers.
     """
 
-    def __init__(self, content_type: str | None, path: str, session_id: str | None = None):
+    def __init__(self, content_type: str | None, path: str, session_id: str | None = None, user_label: str | None = None):
         self.path = path
         self.session_id = session_id
+        self.user_label = user_label
         self.is_messages = "v1/messages" in path
         ct = (content_type or "").lower()
         self.is_sse = "event-stream" in ct
@@ -1341,6 +1568,13 @@ def capture_identity_from_request(request: Request):
     if identity_captured:
         return
 
+    # In server mode the .env must be pre-populated by the operator (typically
+    # by running the proxy locally first to capture). We refuse to auto-capture
+    # from a random whitelisted client because their fingerprint would then be
+    # locked in for everyone else.
+    if DEPLOY_MODE == "server":
+        return
+
     req_headers = {k.lower(): v for k, v in request.headers.items()}
 
     for h in CAPTURE_HEADERS:
@@ -1416,8 +1650,22 @@ def print_status():
     jitter_status = f"{GREEN}ON ({TIMING_JITTER_MIN_MS}-{TIMING_JITTER_MAX_MS}ms){RESET}" if TIMING_JITTER_ENABLED else f"{YELLOW}OFF{RESET}"
     telemetry_status = f"{GREEN}{len(BLOCKED_PATH_PATTERNS)} patterns blocked{RESET}"
 
+    if DEPLOY_MODE == "server":
+        mode_status = f"{GREEN}server{RESET} {DIM}(bind {LOCAL_HOST}:{LOCAL_PORT}, {len(ALLOWED_NETWORKS)} CIDR whitelisted){RESET}"
+    else:
+        mode_status = f"{YELLOW}local{RESET} {DIM}(127.0.0.1:{LOCAL_PORT}, no whitelist){RESET}"
+
+    if USER_QUOTA_ENABLED:
+        uq_status = (
+            f"{GREEN}ON{RESET} {DIM}({USER_QUOTA_PERIOD}, default cap "
+            f"${USER_QUOTA_DEFAULT_USD:.2f}, hard={USER_QUOTA_HARD_LIMIT}){RESET}"
+        )
+    else:
+        uq_status = f"{YELLOW}OFF{RESET}"
+
     print(f"  {DIM}{'─' * 60}{RESET}")
-    print(f"  {CYAN} Server      {RESET}{WHITE}http://localhost:{LOCAL_PORT}{RESET}")
+    print(f"  {CYAN} Mode        {RESET}{mode_status}")
+    print(f"  {CYAN} Server      {RESET}{WHITE}http://{'localhost' if LOCAL_HOST in ('127.0.0.1', '0.0.0.0') else LOCAL_HOST}:{LOCAL_PORT}{RESET}")
     print(f"  {CYAN} Target      {RESET}{WHITE}{ANTHROPIC_BASE_URL}{RESET}")
     print(f"  {DIM}{'─' * 60}{RESET}")
     print(f"  {CYAN} Identity    {RESET}{identity_status}")
@@ -1448,6 +1696,7 @@ def print_status():
     else:
         quota_status = f"{YELLOW}OFF{RESET}"
     print(f"  {CYAN} Quota Track {RESET}{quota_status}")
+    print(f"  {CYAN} User Quota  {RESET}{uq_status}")
     if QUOTA_TRACKING_ENABLED:
         print(f"  {CYAN} Dashboard   {RESET}{WHITE}http://localhost:{LOCAL_PORT}/dashboard{RESET}")
     if LOKI_ENABLED:
@@ -1500,6 +1749,70 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Claude Cloak", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def access_control_middleware(request: Request, call_next):
+    """Server-mode access gate: IP whitelist + per-user spend cap.
+
+    - In local mode this is a no-op (preserves the original single-machine UX).
+    - In server mode every request must come from an IP inside ALLOWED_IPS.
+    - When USER_QUOTA_ENABLED, /v1/ requests from a user that exceeded their
+      cap are short-circuited with HTTP 429 (plus Retry-After).
+    """
+    client_ip = request.client.host if request.client else ""
+    request.state.client_ip = client_ip
+    request.state.user_label = label_for_ip(client_ip)
+
+    path = request.url.path or "/"
+
+    # IP whitelist — applies to ALL paths in server mode (dashboard included).
+    if DEPLOY_MODE == "server":
+        if not is_ip_allowed(client_ip):
+            log(
+                f"  {BG_RED}{BOLD} 403 {RESET} {RED}IP not allowed: "
+                f"{client_ip or '<unknown>'} → {request.method} {path}{RESET}"
+            )
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+
+    # Admin endpoints additionally require the caller to come from ADMIN_IPS.
+    if path.startswith("/admin/"):
+        if client_ip not in ADMIN_IPS:
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+
+    # Per-user spend cap — only meaningful for upstream API calls.
+    if (
+        USER_QUOTA_ENABLED
+        and USER_QUOTA_HARD_LIMIT
+        and path.startswith("/v1/")
+        and not is_blocked_path(path.lstrip("/"))
+    ):
+        label = request.state.user_label
+        over, used, cap = is_user_over_cap(label)
+        if over:
+            bucket = get_or_create_user_bucket(label)
+            bucket["blocked_count"] += 1
+            retry = seconds_until_user_period_reset()
+            log(
+                f"  {BG_YELLOW}{BOLD} 429 {RESET} {YELLOW}user '{label}' over cap "
+                f"${used:.2f}/${cap:.2f} (period={USER_QUOTA_PERIOD}, reset in {retry}s){RESET}"
+            )
+            return JSONResponse(
+                {
+                    "type": "error",
+                    "error": {
+                        "type": "user_quota_exceeded",
+                        "message": (
+                            f"User '{label}' exceeded {USER_QUOTA_PERIOD} cap "
+                            f"${cap:.2f} (used ${used:.4f}). Resets at next period boundary."
+                        ),
+                    },
+                },
+                status_code=429,
+                headers={"Retry-After": str(retry)},
+            )
+
+    return await call_next(request)
 
 
 # Headers không forward từ client request
@@ -1593,6 +1906,15 @@ async def health():
             ],
             "by_session_count": len(quota_stats["by_session"]),
             "by_day_count": len(quota_stats["by_day"]),
+            "by_user_count": len(quota_stats["by_user"]),
+        },
+        "deploy": {
+            "mode": DEPLOY_MODE,
+            "bind_host": LOCAL_HOST,
+            "allowed_ips": [str(n) for n in ALLOWED_NETWORKS],
+            "labels_configured": len(IP_LABEL_MAP),
+            "user_quota_enabled": USER_QUOTA_ENABLED,
+            "user_quota_period": USER_QUOTA_PERIOD,
         },
     }
 
@@ -1878,6 +2200,9 @@ DASHBOARD_HTML = """<!doctype html>
     color: var(--text-soft);
     margin-right: 4px;
   }
+  td .badge.ok     { color: var(--ok); }
+  td .badge.warn   { color: var(--warn); }
+  td .badge.danger { color: var(--danger); }
   td .timestamp {
     font-family: var(--font-mono);
     font-size: 12px;
@@ -2066,6 +2391,32 @@ DASHBOARD_HTML = """<!doctype html>
       <div class="empty-state" id="model-empty" style="display:none">
         <strong>No model data yet</strong>
         Per-model breakdown appears after the first response.
+      </div>
+    </div>
+  </section>
+
+  <!-- Per-user (only visible when USER_QUOTA_ENABLED) -->
+  <section id="user-section" style="display:none">
+    <div class="section-head">
+      <h2>Per-User Quota</h2>
+      <span class="hint">Cap is enforced per source IP (mapped via <code>IP_LABELS</code>). Resets at the start of each <code id="user-period">monthly</code> period.</span>
+    </div>
+    <div class="panel">
+      <table id="user-table">
+        <thead><tr>
+          <th>User</th>
+          <th>Used / Cap</th>
+          <th class="num">% of cap</th>
+          <th class="num">Requests</th>
+          <th class="num">Tokens (in/out)</th>
+          <th class="num">Blocked</th>
+          <th>Last seen</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="empty-state" id="user-empty" style="display:none">
+        <strong>No users tracked yet</strong>
+        Per-user buckets appear after the first <code>/v1/messages</code> response.
       </div>
     </div>
   </section>
@@ -2381,6 +2732,47 @@ DASHBOARD_HTML = """<!doctype html>
       modelTb.appendChild(tr);
     }
 
+    /* Per-user quota table */
+    const uq = q.user_quota || {};
+    const userSection = document.getElementById('user-section');
+    const users = uq.users || [];
+    if (uq.enabled) {
+      userSection.style.display = '';
+      document.getElementById('user-period').textContent = uq.period || 'monthly';
+      const userTb = document.querySelector('#user-table tbody');
+      userTb.innerHTML = '';
+      document.getElementById('user-empty').style.display = users.length ? 'none' : 'block';
+      document.getElementById('user-table').style.display = users.length ? '' : 'none';
+      for (const u of users) {
+        const tr = document.createElement('tr');
+        const cap = Number(u.cap_usd) || 0;
+        const used = Number(u.cost_usd) || 0;
+        const pct = u.cost_pct == null ? null : Number(u.cost_pct);
+        let pctCell = '—';
+        if (pct != null) {
+          const cls = pct >= 100 ? 'danger' : pct >= 80 ? 'warn' : 'ok';
+          pctCell = `<span class="badge ${cls}">${pct.toFixed(1)}%</span>`;
+        }
+        const capCell = cap > 0
+          ? `${fmtCostExact(used)} / ${fmtCostExact(cap)}`
+          : `${fmtCostExact(used)} <span class="badge">unlimited</span>`;
+        const lastSeen = u.last_seen
+          ? `<span class="timestamp">${fmtRelativeTime(u.last_seen)}<small>${u.last_seen.replace('T',' ')}</small></span>`
+          : '—';
+        tr.innerHTML = `
+          <td><strong>${u.label}</strong></td>
+          <td class="num cost">${capCell}</td>
+          <td class="num">${pctCell}</td>
+          <td class="num">${fmtCount.format(u.requests || 0)}</td>
+          <td class="num">${fmtNum(u.input_tokens)} / ${fmtNum(u.output_tokens)}</td>
+          <td class="num">${fmtCount.format(u.blocked_count || 0)}</td>
+          <td>${lastSeen}</td>`;
+        userTb.appendChild(tr);
+      }
+    } else {
+      userSection.style.display = 'none';
+    }
+
     /* Per-session table */
     const sessions = q.by_session || [];
     const sessTb = document.querySelector('#session-table tbody');
@@ -2483,6 +2875,19 @@ async def quota():
         ],
         "period_month": quota_stats["period_month"],
         "monthly_reset_enabled": QUOTA_MONTHLY_RESET,
+        "deploy_mode": DEPLOY_MODE,
+        "user_quota": {
+            "enabled": USER_QUOTA_ENABLED,
+            "period": USER_QUOTA_PERIOD,
+            "hard_limit": USER_QUOTA_HARD_LIMIT,
+            "default_cap_usd": USER_QUOTA_DEFAULT_USD,
+            "reset_in_seconds": seconds_until_user_period_reset() if USER_QUOTA_ENABLED else None,
+            "users": sorted(
+                (_user_bucket_view(b) for b in quota_stats["by_user"].values()),
+                key=lambda u: u.get("cost_usd") or 0.0,
+                reverse=True,
+            ),
+        },
         "rate_limits": {
             "requests_remaining": rl.get("requests-remaining"),
             "requests_limit": rl.get("requests-limit"),
@@ -2501,6 +2906,73 @@ async def quota():
         },
     }
     return summary
+
+
+def _user_bucket_view(b: dict) -> dict:
+    """Public-facing shape of a per-user bucket (rounded cost, derived %)."""
+    cap = float(b.get("cap_usd") or 0.0)
+    used = float(b.get("cost_usd") or 0.0)
+    pct = round((used / cap) * 100, 2) if cap > 0 else None
+    return {
+        "label": b.get("label"),
+        "cap_usd": round(cap, 4),
+        "cost_usd": round(used, 6),
+        "cost_pct": pct,
+        "over_cap": (cap > 0 and used >= cap),
+        "period": b.get("period", USER_QUOTA_PERIOD),
+        "period_key": b.get("period_key"),
+        "period_start": b.get("period_start"),
+        "requests": b.get("requests", 0),
+        "input_tokens": b.get("input_tokens", 0),
+        "output_tokens": b.get("output_tokens", 0),
+        "cache_read_input_tokens": b.get("cache_read_input_tokens", 0),
+        "cache_creation_input_tokens": b.get("cache_creation_input_tokens", 0),
+        "blocked_count": b.get("blocked_count", 0),
+        "first_seen": b.get("first_seen"),
+        "last_seen": b.get("last_seen"),
+    }
+
+
+@app.get("/quota/users")
+async def quota_users():
+    """List every per-user bucket with cap usage."""
+    # Refresh period roll-over on labels we already know about.
+    for label in list(quota_stats["by_user"].keys()):
+        get_or_create_user_bucket(label)
+    users = sorted(
+        (_user_bucket_view(b) for b in quota_stats["by_user"].values()),
+        key=lambda u: u.get("cost_usd") or 0.0,
+        reverse=True,
+    )
+    return {
+        "enabled": USER_QUOTA_ENABLED,
+        "period": USER_QUOTA_PERIOD,
+        "hard_limit": USER_QUOTA_HARD_LIMIT,
+        "default_cap_usd": USER_QUOTA_DEFAULT_USD,
+        "reset_in_seconds": seconds_until_user_period_reset() if USER_QUOTA_ENABLED else None,
+        "users": users,
+    }
+
+
+@app.get("/quota/users/{label}")
+async def quota_user(label: str):
+    b = quota_stats["by_user"].get(label)
+    if b is None:
+        raise HTTPException(status_code=404, detail="user not found")
+    get_or_create_user_bucket(label)  # period roll-over check
+    return _user_bucket_view(b)
+
+
+@app.post("/admin/quota/reset/{label}")
+async def admin_reset_user(label: str):
+    """Manually zero out one user's cap counters (auth via ADMIN_IPS middleware)."""
+    b = quota_stats["by_user"].get(label)
+    if b is None:
+        raise HTTPException(status_code=404, detail="user not found")
+    _reset_user_bucket(b, current_user_period_key())
+    _save_quota_stats(force=True)
+    log(f"  {BG_GREEN}{BOLD} RESET {RESET} {GREEN}per-user quota reset for '{label}'{RESET}")
+    return _user_bucket_view(b)
 
 
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"])
@@ -2589,6 +3061,7 @@ async def proxy(path: str, request: Request):
             response.headers.get("content-type"),
             path,
             session_id=client_session_id,
+            user_label=getattr(request.state, "user_label", None),
         )
 
         # Buffer 400 bodies so we can detect Anthropic beta-header rejection
@@ -2661,7 +3134,10 @@ async def proxy(path: str, request: Request):
             model, usage = usage_tap.finalize()
             total_ms = int((time.monotonic() - start_time) * 1000)
             if usage:
-                _record_usage(model, usage, usage_tap.session_id, duration_ms=total_ms)
+                _record_usage(
+                    model, usage, usage_tap.session_id,
+                    duration_ms=total_ms, user_label=usage_tap.user_label,
+                )
             return Response(
                 content=buffered_body,
                 status_code=response.status_code,
@@ -2679,7 +3155,10 @@ async def proxy(path: str, request: Request):
                 total_ms = int((time.monotonic() - start_time) * 1000)
                 model, usage = usage_tap.finalize()
                 if usage:
-                    _record_usage(model, usage, usage_tap.session_id, duration_ms=total_ms)
+                    _record_usage(
+                        model, usage, usage_tap.session_id,
+                        duration_ms=total_ms, user_label=usage_tap.user_label,
+                    )
 
         return StreamingResponse(
             stream_response(),
@@ -2733,9 +3212,33 @@ async def _async_sleep(seconds: float):
 
 
 if __name__ == "__main__":
+    # In server mode the proxy is reachable from the network, so the operator
+    # MUST configure ALLOWED_IPS. We refuse to start with an empty whitelist
+    # to prevent accidentally exposing the upstream Anthropic billing surface.
+    if DEPLOY_MODE == "server" and not ALLOWED_NETWORKS:
+        print()
+        print(f"  {BG_RED}{BOLD} BOOT ABORTED {RESET}")
+        print(
+            f"  {RED}DEPLOY_MODE=server but ALLOWED_IPS is empty.{RESET}\n"
+            f"  {YELLOW}Set ALLOWED_IPS in .env, e.g.:{RESET}\n"
+            f"    {CYAN}ALLOWED_IPS=203.0.113.5,198.51.100.0/24{RESET}\n"
+            f"  {YELLOW}Refusing to bind {LOCAL_HOST}:{LOCAL_PORT} with no whitelist.{RESET}"
+        )
+        print()
+        sys.exit(1)
+
+    if DEPLOY_MODE == "server" and not identity_captured:
+        print()
+        print(f"  {BG_YELLOW}{BOLD} WARNING {RESET} "
+              f"{YELLOW}server mode booted without captured identity in .env — "
+              f"auto-capture is disabled in server mode.{RESET}")
+        print(f"  {YELLOW}Run the proxy in local mode on a source machine first, "
+              f"then copy the CAPTURED_* lines into this VM's .env.{RESET}")
+        print()
+
     uvicorn.run(
         app,
-        host="127.0.0.1",
+        host=LOCAL_HOST,
         port=LOCAL_PORT,
         log_level="warning",
         # Don't expose server header
