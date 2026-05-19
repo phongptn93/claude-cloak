@@ -440,13 +440,18 @@ Instead of running one proxy per device, deploy a single proxy on a VM and point
 
 ### Client-side setup
 
-Each device just needs Claude Code pointed at the VM. Two equivalent ways:
+Each device just needs Claude Code pointed at the VM. Pick whichever is easiest:
 
 ```bash
-# Option A — write settings.json (persisted)
+# Option A — one-shot launcher (recommended)
+setup-remote.bat http://VM_IP:9999          # Windows
+./setup-remote.sh http://VM_IP:9999         # macOS / Linux
+# Run with no args to be prompted for the URL.
+
+# Option B — call the Python script directly
 python client/setup_claude.py --remote http://VM_IP:9999
 
-# Option B — per-shell env var
+# Option C — per-shell env var (no settings.json change)
 export ANTHROPIC_BASE_URL=http://VM_IP:9999
 claude
 ```
@@ -501,6 +506,8 @@ client/
 ├── start.sh               # macOS / Linux launcher (local mode)
 ├── start-server.bat       # Windows launcher for shared VM (server mode)
 ├── start-server.sh        # macOS / Linux launcher for shared VM (server mode)
+├── setup-remote.bat       # Windows: point Claude Code at a remote VM proxy
+├── setup-remote.sh        # macOS / Linux: same, for remote VM clients
 ├── install.bat            # Windows dependency installer
 ├── grafana-dashboard.json # Importable Grafana dashboard for Loki-shipped events
 ├── .env.example           # Config template with all captured header fields
