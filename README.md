@@ -428,12 +428,13 @@ Instead of running one proxy per device, deploy a single proxy on a VM and point
    USER_QUOTA_CAPS=phong:50.0,huy:30.0
    ```
 4. Open the port on the VM firewall / cloud security group (matching whatever `LOCAL_PORT` is — default 9999).
-5. Run:
+5. Run the launcher for your VM's OS:
    ```bash
    cd client
-   ./start-server.sh
+   ./start-server.sh     # macOS / Linux
+   start-server.bat      # Windows
    ```
-   `start-server.sh` forces `DEPLOY_MODE=server`, refuses to boot with an empty `ALLOWED_IPS`, and skips the local Claude Code auto-config.
+   Both launchers force `DEPLOY_MODE=server`, refuse to boot with an empty `ALLOWED_IPS`, and skip the local Claude Code auto-config.
 
 > **Safety guard:** if `DEPLOY_MODE=server` and `ALLOWED_IPS` is empty, the proxy aborts at startup. Identity auto-capture is also disabled in server mode, so a random first caller can't lock the fingerprint for everyone.
 
@@ -498,6 +499,7 @@ client/
 ├── tray_app.py            # Optional Windows system tray app
 ├── start.bat              # Windows launcher (local mode)
 ├── start.sh               # macOS / Linux launcher (local mode)
+├── start-server.bat       # Windows launcher for shared VM (server mode)
 ├── start-server.sh        # macOS / Linux launcher for shared VM (server mode)
 ├── install.bat            # Windows dependency installer
 ├── grafana-dashboard.json # Importable Grafana dashboard for Loki-shipped events
