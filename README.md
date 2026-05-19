@@ -413,30 +413,35 @@ Instead of running one proxy per device, deploy a single proxy on a VM and point
 
 ### VM-side setup
 
-1. Capture identity on one source machine first by running the proxy in **local** mode and logging in to Claude Code once. The fingerprint lands in `client/.env`.
-2. Copy that `.env` to the VM (keep all `CAPTURED_*` lines + `SESSION_SECRET`).
-3. Edit the VM's `.env`:
-   ```env
-   DEPLOY_MODE=server
-   # LOCAL_HOST=0.0.0.0           # default in server mode
-   ALLOWED_IPS=203.0.113.5,198.51.100.0/24,2001:db8::/32
-   IP_LABELS=203.0.113.5:phong,198.51.100.7:huy
-   USER_QUOTA_ENABLED=true
-   USER_QUOTA_PERIOD=monthly      # monthly | daily
-   USER_QUOTA_DEFAULT_USD=20.0
-   USER_QUOTA_HARD_LIMIT=true     # 429 when over cap (false = warn only)
-   USER_QUOTA_CAPS=phong:50.0,huy:30.0
-   ```
-4. Open the port on the VM firewall / cloud security group (matching whatever `LOCAL_PORT` is — default 9999).
-5. Run the launcher for your VM's OS:
+1. Open the proxy's port on the VM firewall / cloud security group (default 9999).
+2. Run the launcher for your VM's OS:
    ```bash
    cd client
    ./start-server.sh     # macOS / Linux
    start-server.bat      # Windows
    ```
-   Both launchers force `DEPLOY_MODE=server`, refuse to boot with an empty `ALLOWED_IPS`, and skip the local Claude Code auto-config.
+3. **First run only** — the launcher prompts interactively for:
+   - `ALLOWED_IPS` (required) — comma-separated IPs / CIDRs that may use the proxy
+   - `IP_LABELS` (optional) — `<ip>:<label>` map, used for the dashboard + per-user quota
+   - Per-user spend cap (optional) — period (monthly / daily), default cap, and per-label overrides
+   These get saved to `.env`. Re-running just boots the proxy unless `ALLOWED_IPS` is empty.
+4. **First request from a whitelisted device** auto-captures that device's identity headers (user-agent, `x-stainless-*`, etc.) and locks them in `.env`. Every subsequent request — from any device — has those headers injected, so Anthropic sees one device.
 
-> **Safety guard:** if `DEPLOY_MODE=server` and `ALLOWED_IPS` is empty, the proxy aborts at startup. Identity auto-capture is also disabled in server mode, so a random first caller can't lock the fingerprint for everyone.
+> **Safety guard:** if `DEPLOY_MODE=server` and `ALLOWED_IPS` is empty, the proxy aborts at startup. Since identity auto-capture only fires from inside the access-control middleware, only whitelisted callers can ever set the fingerprint.
+
+Want to bypass the wizard? Edit `.env` directly:
+
+```env
+DEPLOY_MODE=server
+# LOCAL_HOST=0.0.0.0           # default in server mode
+ALLOWED_IPS=203.0.113.5,198.51.100.0/24,2001:db8::/32
+IP_LABELS=203.0.113.5:phong,198.51.100.7:huy
+USER_QUOTA_ENABLED=true
+USER_QUOTA_PERIOD=monthly      # monthly | daily
+USER_QUOTA_DEFAULT_USD=20.0
+USER_QUOTA_HARD_LIMIT=true     # 429 when over cap (false = warn only)
+USER_QUOTA_CAPS=phong:50.0,huy:30.0
+```
 
 ### Client-side setup
 

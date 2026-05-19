@@ -1,72 +1,119 @@
 @echo off
 :: Claude Cloak - server-mode launcher for a shared VM (Windows).
 ::
-:: Forces DEPLOY_MODE=server, refuses to start without ALLOWED_IPS, and binds
-:: the proxy on LOCAL_HOST (default 0.0.0.0) so whitelisted client machines
-:: can point their Claude Code at it via ANTHROPIC_BASE_URL=http://<vm>:9999.
+:: Interactive setup the first time it runs: prompts for ALLOWED_IPS and
+:: (optionally) IP_LABELS + per-user spend caps, then writes .env and boots
+:: the proxy. On subsequent runs it just boots — re-runs the wizard only
+:: when ALLOWED_IPS is missing.
 ::
-:: Run once on the VM. Each client just runs `setup_claude.py --remote URL`.
+:: After the first /v1/messages request from a whitelisted device, the proxy
+:: auto-captures that device's identity headers and locks them in .env for
+:: every other device.
 
+setlocal EnableDelayedExpansion
 cd /d "%~dp0"
 
 if not exist .env (
     if exist .env.example (
         copy .env.example .env >nul
-        echo Created .env from .env.example - edit it before re-running.
-        echo Required: DEPLOY_MODE=server, ALLOWED_IPS=..., CAPTURED_* identity.
+        echo Created .env from .env.example
+    ) else (
+        echo LOCAL_PORT=9999> .env
+        echo DEPLOY_MODE=server>> .env
+    )
+)
+
+:: Force server mode for this process (overrides whatever's in .env).
+set DEPLOY_MODE=server
+
+:: ── Read LOCAL_PORT + ALLOWED_IPS from .env ───────────────────────────────
+set LOCAL_PORT=9999
+set ALLOWED_IPS=
+for /f "usebackq tokens=1,* delims==" %%a in (".env") do (
+    if /i "%%a"=="LOCAL_PORT"  set LOCAL_PORT=%%b
+    if /i "%%a"=="ALLOWED_IPS" set ALLOWED_IPS=%%b
+)
+
+:: ── First-run wizard: prompt when ALLOWED_IPS is empty ────────────────────
+if "%ALLOWED_IPS%"=="" (
+    echo.
+    echo ============================================================
+    echo   Claude Cloak - Server Mode Setup
+    echo ============================================================
+    echo This VM will accept Claude Code traffic only from the IPs you
+    echo whitelist below. Press Enter to skip optional sections.
+    echo.
+
+    set /p ALLOWED_IPS="Allowed IPs / CIDRs (comma-separated, e.g. 203.0.113.5,10.0.0.0/24): "
+    if "!ALLOWED_IPS!"=="" (
+        echo.
+        echo   ERROR: ALLOWED_IPS cannot be empty in server mode.
+        echo   Re-run start-server.bat and provide at least one IP / CIDR.
+        echo.
         pause
         exit /b 1
     )
-    echo .env is missing. Aborting.
-    pause
-    exit /b 1
-)
 
-:: Force server mode regardless of what .env says.
-set DEPLOY_MODE=server
+    set /p IP_LABELS="IP labels (optional, e.g. 203.0.113.5:phong,10.0.0.7:huy): "
 
-:: Read LOCAL_PORT from .env (default 9999).
-set LOCAL_PORT=9999
-for /f "usebackq tokens=1,2 delims==" %%a in (".env") do (
-    if /i "%%a"=="LOCAL_PORT" set LOCAL_PORT=%%b
-)
+    set USER_QUOTA_ENABLED=
+    set /p USER_QUOTA_ENABLED="Enable per-user spend cap? (y/N): "
+    if /i "!USER_QUOTA_ENABLED!"=="y" (
+        set USER_QUOTA_ENABLED=true
+        set USER_QUOTA_PERIOD=monthly
+        set /p USER_QUOTA_PERIOD="  Period (monthly/daily) [monthly]: "
+        if "!USER_QUOTA_PERIOD!"=="" set USER_QUOTA_PERIOD=monthly
+        set USER_QUOTA_DEFAULT_USD=20.0
+        set /p USER_QUOTA_DEFAULT_USD="  Default cap USD per user [20.0]: "
+        if "!USER_QUOTA_DEFAULT_USD!"=="" set USER_QUOTA_DEFAULT_USD=20.0
+        set /p USER_QUOTA_CAPS="  Per-label overrides (optional, e.g. phong:50,huy:30): "
+    ) else (
+        set USER_QUOTA_ENABLED=false
+        set USER_QUOTA_PERIOD=monthly
+        set USER_QUOTA_DEFAULT_USD=0
+        set USER_QUOTA_CAPS=
+    )
 
-:: Sanity check: ALLOWED_IPS must be set in .env.
-set ALLOWED_IPS=
-for /f "usebackq tokens=1,* delims==" %%a in (".env") do (
-    if /i "%%a"=="ALLOWED_IPS" set ALLOWED_IPS=%%b
-)
-if "%ALLOWED_IPS%"=="" (
     echo.
-    echo   ERROR: ALLOWED_IPS is empty in .env.
-    echo   Set ALLOWED_IPS=^<comma-separated IPs/CIDRs^> before starting server mode.
-    echo   Example: ALLOWED_IPS=203.0.113.5,198.51.100.0/24
-    echo.
-    pause
-    exit /b 1
-)
-
-:: Sanity check: CAPTURED_USER_AGENT must be present (warn only).
-findstr /b /r "^CAPTURED_USER_AGENT=." .env >nul 2>&1
-if errorlevel 1 (
-    echo.
-    echo   WARNING: no CAPTURED_USER_AGENT in .env.
-    echo   Run the proxy in local mode on one machine first to capture identity,
-    echo   then copy the CAPTURED_* lines into this VM's .env.
+    echo Writing config to .env...
+    call :upsert_env DEPLOY_MODE server
+    call :upsert_env ALLOWED_IPS "!ALLOWED_IPS!"
+    call :upsert_env IP_LABELS "!IP_LABELS!"
+    call :upsert_env USER_QUOTA_ENABLED "!USER_QUOTA_ENABLED!"
+    call :upsert_env USER_QUOTA_PERIOD "!USER_QUOTA_PERIOD!"
+    call :upsert_env USER_QUOTA_DEFAULT_USD "!USER_QUOTA_DEFAULT_USD!"
+    call :upsert_env USER_QUOTA_CAPS "!USER_QUOTA_CAPS!"
+    echo Done.
     echo.
 )
 
-:: Kill any stale process on the port.
+:: ── Kill any stale process on the port ────────────────────────────────────
 for /f "tokens=5" %%a in ('netstat -ano ^| findstr :%LOCAL_PORT% ^| findstr LISTENING') do (
     taskkill /PID %%a /F >nul 2>&1
 )
 
-:: Auto-install dependencies if missing.
+:: ── Auto-install dependencies if missing ──────────────────────────────────
 python -c "import httpx" >nul 2>&1 || python -m pip install -r requirements.txt
 
-:: Server mode never auto-configures local Claude Code - skip setup_claude.py.
 echo Starting Claude Cloak in SERVER mode on port %LOCAL_PORT%...
 echo Whitelisted: %ALLOWED_IPS%
 echo.
+echo The first request from a whitelisted device will auto-capture its
+echo identity headers and lock them in .env for all other devices.
+echo.
 python proxy.py
 pause
+exit /b 0
+
+
+:: ── Helper: upsert KEY=VALUE in .env (replace if present, else append) ────
+:upsert_env
+set "KEY=%~1"
+set "VAL=%~2"
+findstr /b /r /c:"^%KEY%=" .env >nul 2>&1
+if errorlevel 1 (
+    >>.env echo %KEY%=%VAL%
+) else (
+    powershell -NoProfile -Command "(Get-Content .env) -replace '^%KEY%=.*', '%KEY%=%VAL%' | Set-Content .env"
+)
+goto :eof

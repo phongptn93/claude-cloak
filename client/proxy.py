@@ -1568,12 +1568,11 @@ def capture_identity_from_request(request: Request):
     if identity_captured:
         return
 
-    # In server mode the .env must be pre-populated by the operator (typically
-    # by running the proxy locally first to capture). We refuse to auto-capture
-    # from a random whitelisted client because their fingerprint would then be
-    # locked in for everyone else.
-    if DEPLOY_MODE == "server":
-        return
+    # In server mode, identity is still captured from the first request — but
+    # only whitelisted IPs can reach this code (the access-control middleware
+    # 403s everyone else before this runs), so the "first caller" is already
+    # vetted. The captured fingerprint is then locked in .env for all
+    # subsequent requests from every other whitelisted device.
 
     req_headers = {k.lower(): v for k, v in request.headers.items()}
 
@@ -3229,11 +3228,8 @@ if __name__ == "__main__":
 
     if DEPLOY_MODE == "server" and not identity_captured:
         print()
-        print(f"  {BG_YELLOW}{BOLD} WARNING {RESET} "
-              f"{YELLOW}server mode booted without captured identity in .env — "
-              f"auto-capture is disabled in server mode.{RESET}")
-        print(f"  {YELLOW}Run the proxy in local mode on a source machine first, "
-              f"then copy the CAPTURED_* lines into this VM's .env.{RESET}")
+        print(f"  {DIM}server mode booted without captured identity in .env — "
+              f"the first request from a whitelisted IP will lock it.{RESET}")
         print()
 
     uvicorn.run(

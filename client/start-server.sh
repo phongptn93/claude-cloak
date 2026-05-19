@@ -1,53 +1,104 @@
 #!/usr/bin/env bash
-# Claude Cloak — server-mode launcher for a shared VM.
+# Claude Cloak — server-mode launcher for a shared VM (macOS / Linux).
 #
-# Sets DEPLOY_MODE=server, refuses to start without ALLOWED_IPS, and binds
-# the proxy on LOCAL_HOST (default 0.0.0.0) so whitelisted client machines
-# can point their Claude Code at it via ANTHROPIC_BASE_URL=http://<vm>:9999.
+# Interactive setup the first time it runs: prompts for ALLOWED_IPS and
+# (optionally) IP_LABELS + per-user spend caps, then writes .env and boots
+# the proxy. On subsequent runs it just boots — re-runs the wizard only
+# when ALLOWED_IPS is missing.
 #
-# Run once on the VM. Each client just runs `setup_claude.py --remote URL`.
+# After the first /v1/messages request from a whitelisted device, the proxy
+# auto-captures that device's identity headers and locks them in .env for
+# every other device.
 set -euo pipefail
 cd "$(dirname "$0")"
 
 if [ ! -f .env ]; then
     if [ -f .env.example ]; then
         cp .env.example .env
-        echo "Created .env from .env.example — edit it before re-running."
-        echo "Required: DEPLOY_MODE=server, ALLOWED_IPS=..., CAPTURED_* identity."
-        exit 1
+        echo "Created .env from .env.example"
+    else
+        printf 'LOCAL_PORT=9999\nDEPLOY_MODE=server\n' > .env
     fi
-    echo ".env is missing. Aborting." >&2
-    exit 1
 fi
 
-# ── Force server mode (override anything in .env) ──────────────────────────
+# Force server mode for this process (overrides whatever's in .env).
 export DEPLOY_MODE=server
 
-# ── Read LOCAL_PORT from .env ──────────────────────────────────────────────
-LOCAL_PORT=$(grep -E '^LOCAL_PORT=' .env 2>/dev/null | cut -d= -f2 | tr -d '[:space:]')
-LOCAL_PORT=${LOCAL_PORT:-9999}
+# ── Helpers ───────────────────────────────────────────────────────────────
+read_env() {
+    # read_env KEY → value (empty if not set)
+    grep -E "^$1=" .env 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '\r'
+}
 
-# ── Sanity check: ALLOWED_IPS must be non-empty in .env ────────────────────
-ALLOWED=$(grep -E '^ALLOWED_IPS=' .env 2>/dev/null | cut -d= -f2- | tr -d '[:space:]')
-if [ -z "$ALLOWED" ]; then
+upsert_env() {
+    # upsert_env KEY VALUE — replace if present, else append.
+    local key="$1" val="$2" tmp
+    if grep -qE "^${key}=" .env 2>/dev/null; then
+        tmp=$(mktemp)
+        awk -v k="$key" -v v="$val" -F= '
+            BEGIN { done=0 }
+            $1==k && !done { print k "=" v; done=1; next }
+            { print }
+        ' .env > "$tmp"
+        mv "$tmp" .env
+    else
+        printf '%s=%s\n' "$key" "$val" >> .env
+    fi
+}
+
+LOCAL_PORT="$(read_env LOCAL_PORT)"
+LOCAL_PORT="${LOCAL_PORT:-9999}"
+ALLOWED_IPS="$(read_env ALLOWED_IPS)"
+
+# ── First-run wizard ──────────────────────────────────────────────────────
+if [ -z "$ALLOWED_IPS" ]; then
     echo
-    echo "  ERROR: ALLOWED_IPS is empty in .env."
-    echo "  Set ALLOWED_IPS=<comma-separated IPs/CIDRs> before starting server mode."
-    echo "  Example: ALLOWED_IPS=203.0.113.5,198.51.100.0/24"
+    echo "============================================================"
+    echo "  Claude Cloak — Server Mode Setup"
+    echo "============================================================"
+    echo "This VM will accept Claude Code traffic only from the IPs you"
+    echo "whitelist below. Press Enter to skip optional sections."
     echo
-    exit 1
+
+    read -rp "Allowed IPs / CIDRs (comma-separated, e.g. 203.0.113.5,10.0.0.0/24): " ALLOWED_IPS
+    if [ -z "$ALLOWED_IPS" ]; then
+        echo
+        echo "  ERROR: ALLOWED_IPS cannot be empty in server mode."
+        echo "  Re-run ./start-server.sh and provide at least one IP / CIDR."
+        echo
+        exit 1
+    fi
+
+    read -rp "IP labels (optional, e.g. 203.0.113.5:phong,10.0.0.7:huy): " IP_LABELS
+
+    USER_QUOTA_ENABLED=false
+    USER_QUOTA_PERIOD=monthly
+    USER_QUOTA_DEFAULT_USD=0
+    USER_QUOTA_CAPS=
+    read -rp "Enable per-user spend cap? (y/N): " enable_uq
+    if [[ "$enable_uq" =~ ^[Yy]$ ]]; then
+        USER_QUOTA_ENABLED=true
+        read -rp "  Period (monthly/daily) [monthly]: " USER_QUOTA_PERIOD
+        USER_QUOTA_PERIOD="${USER_QUOTA_PERIOD:-monthly}"
+        read -rp "  Default cap USD per user [20.0]: " USER_QUOTA_DEFAULT_USD
+        USER_QUOTA_DEFAULT_USD="${USER_QUOTA_DEFAULT_USD:-20.0}"
+        read -rp "  Per-label overrides (optional, e.g. phong:50,huy:30): " USER_QUOTA_CAPS
+    fi
+
+    echo
+    echo "Writing config to .env…"
+    upsert_env DEPLOY_MODE server
+    upsert_env ALLOWED_IPS "$ALLOWED_IPS"
+    upsert_env IP_LABELS "$IP_LABELS"
+    upsert_env USER_QUOTA_ENABLED "$USER_QUOTA_ENABLED"
+    upsert_env USER_QUOTA_PERIOD "$USER_QUOTA_PERIOD"
+    upsert_env USER_QUOTA_DEFAULT_USD "$USER_QUOTA_DEFAULT_USD"
+    upsert_env USER_QUOTA_CAPS "$USER_QUOTA_CAPS"
+    echo "Done."
+    echo
 fi
 
-# ── Sanity check: CAPTURED_USER_AGENT must be present ──────────────────────
-if ! grep -E '^CAPTURED_USER_AGENT=.+' .env >/dev/null 2>&1; then
-    echo
-    echo "  WARNING: no CAPTURED_USER_AGENT in .env."
-    echo "  Run the proxy in local mode on one machine first to capture identity,"
-    echo "  then copy the CAPTURED_* lines into this VM's .env."
-    echo
-fi
-
-# ── Kill any stale process on the port ────────────────────────────────────
+# ── Kill stale process on the port ────────────────────────────────────────
 if command -v lsof &>/dev/null; then
     PIDS=$(lsof -ti ":$LOCAL_PORT" 2>/dev/null || true)
     if [ -n "$PIDS" ]; then
@@ -64,8 +115,10 @@ if ! python3 -c "import httpx" 2>/dev/null; then
     python3 -m pip install -r requirements.txt
 fi
 
-# Server mode never auto-configures local Claude Code — skip setup_claude.py.
 echo "Starting Claude Cloak in SERVER mode on port $LOCAL_PORT…"
-echo "Whitelisted: $ALLOWED"
+echo "Whitelisted: $ALLOWED_IPS"
+echo
+echo "The first request from a whitelisted device will auto-capture its"
+echo "identity headers and lock them in .env for all other devices."
 echo
 python3 proxy.py
