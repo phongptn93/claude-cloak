@@ -141,6 +141,23 @@ ADMIN_IPS = {
     if ip.strip()
 }
 
+# Stats endpoints (/health, /quota, /quota/users, /quota/users/{label},
+# /dashboard) can leak per-user spend info. STATS_PRIVATE=true gates them to
+# STATS_VIEW_IPS only — useful when not every whitelisted user should see
+# every other user's cost. Defaults to ADMIN_IPS when not explicitly set.
+STATS_PRIVATE = os.getenv("STATS_PRIVATE", "false").lower() == "true"
+_stats_ips_raw = os.getenv("STATS_VIEW_IPS", "").strip()
+if _stats_ips_raw:
+    STATS_VIEW_IPS = {ip.strip() for ip in _stats_ips_raw.split(",") if ip.strip()}
+else:
+    STATS_VIEW_IPS = set(ADMIN_IPS)
+
+# When set, only this exact IP is allowed to lock the device identity on the
+# first request (server mode only). Stops a stray whitelisted caller from
+# accidentally fingerprinting the entire pool as their machine. Empty = any
+# whitelisted IP can be the first-capturer (original behaviour).
+CAPTURE_LOCK_FROM_IP = os.getenv("CAPTURE_LOCK_FROM_IP", "").strip()
+
 # IP → human label mapping for the dashboard / per-user quota.
 # Format: IP_LABELS=203.0.113.5:phong,198.51.100.7:huy
 IP_LABEL_MAP: dict = {}
@@ -1600,6 +1617,15 @@ def capture_identity_from_request(request: Request):
     # vetted. The captured fingerprint is then locked in .env for all
     # subsequent requests from every other whitelisted device.
 
+    # CAPTURE_LOCK_FROM_IP narrows the first-capturer to one specific IP —
+    # useful when the admin wants to control which machine's fingerprint
+    # becomes the locked one for the entire pool. When empty (default), any
+    # whitelisted caller may be first.
+    if CAPTURE_LOCK_FROM_IP:
+        client_ip = (request.client.host if request.client else "") or ""
+        if client_ip != CAPTURE_LOCK_FROM_IP:
+            return
+
     req_headers = {k.lower(): v for k, v in request.headers.items()}
 
     for h in CAPTURE_HEADERS:
@@ -1810,6 +1836,16 @@ async def access_control_middleware(request: Request, call_next):
     # Admin endpoints additionally require the caller to come from ADMIN_IPS.
     if raw_path.startswith("/admin/"):
         if client_ip not in ADMIN_IPS:
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+
+    # Stats endpoints — gate to STATS_VIEW_IPS when STATS_PRIVATE is enabled.
+    # /u/{label}/whoami stays open so every client can self-check its setup.
+    if STATS_PRIVATE:
+        is_stats = (
+            raw_path in ("/health", "/quota", "/quota/users", "/dashboard")
+            or raw_path.startswith("/quota/users/")
+        )
+        if is_stats and client_ip not in STATS_VIEW_IPS:
             return JSONResponse({"error": "forbidden"}, status_code=403)
 
     # Per-user spend cap — only meaningful for upstream API calls. We use the
@@ -3287,8 +3323,14 @@ if __name__ == "__main__":
 
     if DEPLOY_MODE == "server" and not identity_captured:
         print()
-        print(f"  {DIM}server mode booted without captured identity in .env — "
-              f"the first request from a whitelisted IP will lock it.{RESET}")
+        if CAPTURE_LOCK_FROM_IP:
+            print(f"  {YELLOW}server mode: identity will be locked from the first "
+                  f"request whose source IP = {BOLD}{CAPTURE_LOCK_FROM_IP}{RESET}{YELLOW}.{RESET}")
+        else:
+            print(f"  {YELLOW}server mode: the next request from ANY whitelisted IP "
+                  f"will lock the device identity for the whole pool.{RESET}")
+            print(f"  {DIM}set CAPTURE_LOCK_FROM_IP=<ip> in .env if you want to restrict "
+                  f"who can be the first-capturer.{RESET}")
         print()
 
     uvicorn.run(

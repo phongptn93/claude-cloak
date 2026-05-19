@@ -417,14 +417,17 @@ Instead of running one proxy per device, deploy a single proxy on a VM and point
 2. Run the launcher for your VM's OS:
    ```bash
    cd client
-   ./start-server.sh     # macOS / Linux
-   start-server.bat      # Windows
+   ./start-server.sh                 # macOS / Linux
+   start-server.bat                  # Windows
+   ./start-server.sh --reconfigure   # re-run the wizard to change settings
    ```
 3. **First run only** — the launcher prompts interactively for:
    - `ALLOWED_IPS` (required) — comma-separated IPs / CIDRs that may use the proxy
-   - `IP_LABELS` (optional) — `<ip>:<label>` map, used for the dashboard + per-user quota
+   - `IP_LABELS` (optional) — `<ip>:<label>` map, used as a fallback when a client doesn't supply a `/u/<name>/` URL prefix
    - Per-user spend cap (optional) — period (monthly / daily), default cap, and per-label overrides
-   These get saved to `.env`. Re-running just boots the proxy unless `ALLOWED_IPS` is empty.
+   - `CAPTURE_LOCK_FROM_IP` (optional) — restrict the first-request fingerprint capture to one specific source IP. Use this when you want a specific machine to provide the locked device identity, instead of "whoever happens to hit the proxy first"
+   - `STATS_PRIVATE` (optional) — when on, gate `/health`, `/quota`, `/quota/users`, and `/dashboard` behind `STATS_VIEW_IPS` (defaults to loopback) so whitelisted users can't see each other's spending
+   All get saved to `.env`. Re-runs skip the wizard unless `ALLOWED_IPS` is empty or you pass `--reconfigure`.
 4. **First request from a whitelisted device** auto-captures that device's identity headers (user-agent, `x-stainless-*`, etc.) and locks them in `.env`. Every subsequent request — from any device — has those headers injected, so Anthropic sees one device.
 
 > **Safety guard:** if `DEPLOY_MODE=server` and `ALLOWED_IPS` is empty, the proxy aborts at startup. Since identity auto-capture only fires from inside the access-control middleware, only whitelisted callers can ever set the fingerprint.
@@ -504,6 +507,9 @@ The dashboard at `/dashboard` auto-renders a **Per-User Quota** table when the f
 - All identity sanitization layers still apply, so even though many clients now share one VM, Anthropic still sees a single device.
 - The `.env` on the VM contains the captured fingerprint + `SESSION_SECRET`. Treat it like a credential — anyone who reads it can impersonate that device pool. Same goes for `.quota.json` if you care about hiding spend history.
 - Defence in depth: pair `ALLOWED_IPS` with an OS firewall rule (ufw / iptables / cloud security group) for the same CIDR. If a code bug ever opens up the app-level whitelist, the firewall still holds.
+- **Stats visibility**: by default any whitelisted client can `GET /quota` or open `/dashboard` and see the whole team's spend, including per-user breakdowns. Set `STATS_PRIVATE=true` (and optionally `STATS_VIEW_IPS`) to restrict those endpoints. `/u/<label>/whoami` stays open so each client can still self-check.
+- **First-capture race**: whoever sends the first `/v1/messages` after a fresh boot locks the device fingerprint for the whole pool. If you care which machine that is, set `CAPTURE_LOCK_FROM_IP` to that machine's source IP — every other request that arrives before will be allowed through but won't trigger capture.
+- **Trust model for `/u/<label>/`**: the URL prefix is *identification*, not *authentication*. Any whitelisted user can claim any username. Inside a trusted team that's fine (the IP whitelist is the actual gate); if you need cryptographic guarantees, put nginx + mTLS in front.
 
 ## What It Does NOT Do
 
