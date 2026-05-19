@@ -210,6 +210,32 @@ def cap_for_label(label: str) -> float:
     return USER_QUOTA_CAPS.get(label, USER_QUOTA_DEFAULT_USD)
 
 
+# Allowed character set for URL-prefix user labels. Restricted so labels can't
+# inject path traversal, query strings, or other surprises into the upstream URL.
+_USER_LABEL_RE = re.compile(r"^[A-Za-z0-9_\-.]{1,32}$")
+
+
+def parse_user_prefix(path: str) -> tuple[str | None, str]:
+    """Strip a leading `/u/<label>/...` from path.
+
+    Returns (label, remaining_path). If no prefix is present or the label
+    contains forbidden chars, returns (None, original_path).
+
+    Client config example:
+        ANTHROPIC_BASE_URL=http://vm:9999/u/phong
+    Claude Code then sends /u/phong/v1/messages, which we account to
+    user 'phong' and forward as /v1/messages.
+    """
+    stripped = path.lstrip("/")
+    parts = stripped.split("/", 2)
+    if len(parts) >= 2 and parts[0] == "u" and parts[1]:
+        candidate = parts[1]
+        if _USER_LABEL_RE.match(candidate):
+            rest = parts[2] if len(parts) > 2 else ""
+            return candidate, "/" + rest
+    return None, path
+
+
 def current_user_period_key() -> str:
     """Period key used to detect roll-over: 'YYYY-MM' or 'YYYY-MM-DD'."""
     if USER_QUOTA_PERIOD == "daily":
@@ -1761,30 +1787,38 @@ async def access_control_middleware(request: Request, call_next):
     """
     client_ip = request.client.host if request.client else ""
     request.state.client_ip = client_ip
-    request.state.user_label = label_for_ip(client_ip)
 
-    path = request.url.path or "/"
+    raw_path = request.url.path or "/"
+
+    # If the client embedded its username in the URL (/u/<label>/...), prefer
+    # that — it's the only way to distinguish multiple users behind the same
+    # NAT'd IP. Falls back to IP_LABELS otherwise.
+    url_label, stripped_path = parse_user_prefix(raw_path)
+    request.state.url_user_label = url_label
+    request.state.stripped_path = stripped_path
+    request.state.user_label = url_label or label_for_ip(client_ip)
 
     # IP whitelist — applies to ALL paths in server mode (dashboard included).
     if DEPLOY_MODE == "server":
         if not is_ip_allowed(client_ip):
             log(
                 f"  {BG_RED}{BOLD} 403 {RESET} {RED}IP not allowed: "
-                f"{client_ip or '<unknown>'} → {request.method} {path}{RESET}"
+                f"{client_ip or '<unknown>'} → {request.method} {raw_path}{RESET}"
             )
             return JSONResponse({"error": "forbidden"}, status_code=403)
 
     # Admin endpoints additionally require the caller to come from ADMIN_IPS.
-    if path.startswith("/admin/"):
+    if raw_path.startswith("/admin/"):
         if client_ip not in ADMIN_IPS:
             return JSONResponse({"error": "forbidden"}, status_code=403)
 
-    # Per-user spend cap — only meaningful for upstream API calls.
+    # Per-user spend cap — only meaningful for upstream API calls. We use the
+    # URL-stripped path so /u/phong/v1/messages is correctly treated as /v1/messages.
     if (
         USER_QUOTA_ENABLED
         and USER_QUOTA_HARD_LIMIT
-        and path.startswith("/v1/")
-        and not is_blocked_path(path.lstrip("/"))
+        and stripped_path.startswith("/v1/")
+        and not is_blocked_path(stripped_path.lstrip("/"))
     ):
         label = request.state.user_label
         over, used, cap = is_user_over_cap(label)
@@ -2962,6 +2996,24 @@ async def quota_user(label: str):
     return _user_bucket_view(b)
 
 
+@app.get("/u/{label}/whoami")
+async def whoami(label: str):
+    """Client setup verification: returns the bucket for the URL-prefix label.
+
+    Hitting GET http://vm:9999/u/phong/whoami from a whitelisted client
+    confirms (a) the IP is allowed, (b) the label is parsed correctly,
+    (c) the cap is what the operator configured.
+    """
+    if not _USER_LABEL_RE.match(label):
+        raise HTTPException(status_code=400, detail="invalid label")
+    b = get_or_create_user_bucket(label) if USER_QUOTA_ENABLED else None
+    return {
+        "label": label,
+        "user_quota_enabled": USER_QUOTA_ENABLED,
+        "bucket": _user_bucket_view(b) if b else None,
+    }
+
+
 @app.post("/admin/quota/reset/{label}")
 async def admin_reset_user(label: str):
     """Manually zero out one user's cap counters (auth via ADMIN_IPS middleware)."""
@@ -2981,6 +3033,13 @@ async def proxy(path: str, request: Request):
     req_id = request_count
 
     now = datetime.now().strftime("%H:%M:%S")
+
+    # Honour URL user-prefix (/u/<label>/<real-path>): drop the prefix so the
+    # rest of this function works on the real upstream path. The middleware
+    # already stored the parsed label in request.state.user_label.
+    stripped = getattr(request.state, "stripped_path", None)
+    if stripped is not None and stripped != "/" + path:
+        path = stripped.lstrip("/")
 
     # ── Telemetry blocking ──
     if is_blocked_path(path):

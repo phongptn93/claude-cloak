@@ -445,23 +445,37 @@ USER_QUOTA_CAPS=phong:50.0,huy:30.0
 
 ### Client-side setup
 
-Each device just needs Claude Code pointed at the VM. Pick whichever is easiest:
+Each device points Claude Code at the VM with a **per-user URL prefix** so the dashboard can attribute every request to the right person. No local proxy is started on the client.
 
 ```bash
-# Option A — one-shot launcher (recommended)
-setup-remote.bat http://VM_IP:9999          # Windows
-./setup-remote.sh http://VM_IP:9999         # macOS / Linux
-# Run with no args to be prompted for the URL.
+# Recommended — one-shot launcher
+setup-remote.bat http://VM_IP:9999 phong         # Windows
+./setup-remote.sh http://VM_IP:9999 phong        # macOS / Linux
+# Run with no args to be prompted for both URL and username.
 
-# Option B — call the Python script directly
-python client/setup_claude.py --remote http://VM_IP:9999
+# Equivalent: call the Python script directly
+python client/setup_claude.py --remote http://VM_IP:9999/u/phong
 
-# Option C — per-shell env var (no settings.json change)
-export ANTHROPIC_BASE_URL=http://VM_IP:9999
+# Equivalent: per-shell env var (no settings.json change)
+export ANTHROPIC_BASE_URL=http://VM_IP:9999/u/phong
 claude
 ```
 
-No local proxy is started. The original `start.bat` / `start.sh` workflow still works unchanged for anyone who wants the per-device proxy — server mode is purely additive.
+Claude Code then sends `/u/phong/v1/messages`. The VM strips the `/u/phong/` prefix, attributes the request to user `phong`, then forwards `/v1/messages` to Anthropic with the locked fingerprint.
+
+#### Why the URL prefix beats IP-based attribution
+
+A single source IP can be 20 people behind one office NAT, or one person whose 4G IP changes every hour. `IP_LABELS` is brittle in both cases. The `/u/<name>/` prefix means each user identifies themselves to the proxy — independent of network topology — so the dashboard / quota cap always lands on the right person.
+
+Trust model: this is **identification, not authentication**. Anyone whose source IP is in `ALLOWED_IPS` can claim any username. That's fine inside a trusted team (`ALLOWED_IPS` is already the network-level gate); if you need cryptographic guarantees, layer a reverse proxy with mTLS in front.
+
+Verify your client setup at any time:
+```bash
+curl http://VM_IP:9999/u/phong/whoami
+# → { "label": "phong", "user_quota_enabled": true, "bucket": { "cap_usd": 50.0, "cost_usd": 12.34, ... } }
+```
+
+The original `start.bat` / `start.sh` workflow still works unchanged for anyone who wants the **local** per-device proxy instead — server mode is purely additive.
 
 ### Per-User Quota
 
@@ -507,12 +521,12 @@ client/
 ├── proxy.py               # Main proxy server (FastAPI) — anonymity layers, token saver, quota tracking, dashboard, Loki shipping
 ├── setup_claude.py        # Auto-config Claude Code → proxy URL (reads LOCAL_PORT from .env)
 ├── tray_app.py            # Optional Windows system tray app
-├── start.bat              # Windows launcher (local mode)
-├── start.sh               # macOS / Linux launcher (local mode)
-├── start-server.bat       # Windows launcher for shared VM (server mode)
-├── start-server.sh        # macOS / Linux launcher for shared VM (server mode)
-├── setup-remote.bat       # Windows: point Claude Code at a remote VM proxy
-├── setup-remote.sh        # macOS / Linux: same, for remote VM clients
+├── start.bat              # Windows: LOCAL mode (per-device proxy on 127.0.0.1)
+├── start.sh               # macOS / Linux: LOCAL mode (per-device proxy)
+├── start-server.bat       # Windows: SERVER mode (shared VM, IP whitelist + wizard)
+├── start-server.sh        # macOS / Linux: SERVER mode (shared VM)
+├── setup-remote.bat       # Windows client: point Claude Code at VM with /u/<username>
+├── setup-remote.sh        # macOS / Linux client: same
 ├── install.bat            # Windows dependency installer
 ├── grafana-dashboard.json # Importable Grafana dashboard for Loki-shipped events
 ├── .env.example           # Config template with all captured header fields
@@ -529,7 +543,9 @@ client/
 | `GET /quota` | Compact quota + cost summary (see Quota & Cost Tracking section) |
 | `GET /quota/users` | All per-user buckets + cap usage (server mode) |
 | `GET /quota/users/{label}` | Detail for one user |
+| `GET /u/{label}/whoami` | Client self-check: confirms IP is whitelisted + label is parsed + cap is what the operator set |
 | `POST /admin/quota/reset/{label}` | Reset a user's counters (loopback / `ADMIN_IPS` only) |
+| `* /u/{label}/{path}` | Same as `* /{path}` but accounts the request to `<label>` regardless of source IP |
 | `GET /dashboard` | Web UI rendering `/quota` as charts (Chart.js, dark theme, auto-refresh 5s) |
 | `* /{path}` | Proxy catch-all — applies all 8 layers then forwards to `api.anthropic.com/{path}` |
 
