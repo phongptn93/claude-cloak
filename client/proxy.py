@@ -1344,6 +1344,7 @@ def _record_usage(
     if session_id:
         sb = quota_stats["by_session"].setdefault(session_id, {
             "session_id": session_id,
+            "user_label": user_label or "",
             "requests": 0,
             "input_tokens": 0,
             "output_tokens": 0,
@@ -1354,6 +1355,10 @@ def _record_usage(
             "first_seen": now_iso,
             "last_seen": now_iso,
         })
+        # Always refresh user_label — a session may legitimately move between
+        # users (e.g. URL prefix changes), or older buckets predate this field.
+        if user_label:
+            sb["user_label"] = user_label
         sb["requests"] += 1
         sb["input_tokens"] += in_t
         sb["output_tokens"] += out_t
@@ -1488,8 +1493,12 @@ def is_user_over_cap(label: str) -> tuple[bool, float, float]:
 
 
 def record_user_usage(label: str, usage: dict, cost: float) -> None:
-    """Accumulate one response's cost/usage into the per-user bucket."""
-    if not USER_QUOTA_ENABLED or not label:
+    """Accumulate one response's cost/usage into the per-user bucket.
+
+    Runs even when USER_QUOTA_ENABLED=false — we still want the dashboard
+    to attribute spend to a user. The cap is only ENFORCED when enabled.
+    """
+    if not label:
         return
     b = get_or_create_user_bucket(label)
     b["cost_usd"] += cost
@@ -2350,6 +2359,11 @@ DASHBOARD_HTML = """<!doctype html>
         <div class="card-meta">on /v1/messages</div>
       </div>
       <div class="card">
+        <div class="card-label">Active users</div>
+        <div class="card-value num" id="user-count">0</div>
+        <div class="card-meta" id="user-count-meta">via /u/&lt;name&gt; or IP label</div>
+      </div>
+      <div class="card">
         <div class="card-label">Distinct sessions</div>
         <div class="card-value num" id="session-count">0</div>
         <div class="card-meta">x-claude-code-session-id</div>
@@ -2409,6 +2423,13 @@ DASHBOARD_HTML = """<!doctype html>
         </div>
         <div class="chart-canvas-wrap"><canvas id="model-chart"></canvas></div>
       </div>
+      <div class="panel" id="user-chart-panel" style="display:none">
+        <div class="panel-title">
+          <h3>Cost by user</h3>
+          <span class="sub">current period</span>
+        </div>
+        <div class="chart-canvas-wrap"><canvas id="user-chart"></canvas></div>
+      </div>
     </div>
   </section>
 
@@ -2464,17 +2485,17 @@ DASHBOARD_HTML = """<!doctype html>
     </div>
   </section>
 
-  <!-- Per-user (only visible when USER_QUOTA_ENABLED) -->
+  <!-- Per-user (always shown once any user has activity) -->
   <section id="user-section" style="display:none">
     <div class="section-head">
-      <h2>Per-User Quota</h2>
-      <span class="hint">Cap is enforced per source IP (mapped via <code>IP_LABELS</code>). Resets at the start of each <code id="user-period">monthly</code> period.</span>
+      <h2 id="user-section-title">Per-User Breakdown</h2>
+      <span class="hint" id="user-section-hint">Attribution by URL prefix <code>/u/&lt;name&gt;/</code> or by IP label.</span>
     </div>
     <div class="panel">
       <table id="user-table">
         <thead><tr>
           <th>User</th>
-          <th>Used / Cap</th>
+          <th>Cost / Cap</th>
           <th class="num">% of cap</th>
           <th class="num">Requests</th>
           <th class="num">Tokens (in/out)</th>
@@ -2485,7 +2506,7 @@ DASHBOARD_HTML = """<!doctype html>
       </table>
       <div class="empty-state" id="user-empty" style="display:none">
         <strong>No users tracked yet</strong>
-        Per-user buckets appear after the first <code>/v1/messages</code> response.
+        User buckets appear after the first <code>/v1/messages</code> response.
       </div>
     </div>
   </section>
@@ -2499,6 +2520,7 @@ DASHBOARD_HTML = """<!doctype html>
     <div class="panel">
       <table id="session-table">
         <thead><tr>
+          <th>User</th>
           <th>Session</th>
           <th>Models</th>
           <th class="num">Requests</th>
@@ -2582,7 +2604,7 @@ DASHBOARD_HTML = """<!doctype html>
   }
 
   /*  Chart factories  ---------------------------------------------------- */
-  let dailyChart = null, modelChart = null;
+  let dailyChart = null, modelChart = null, userChart = null;
   const PALETTE = ['#c084fc','#67e8f9','#fbbf24','#4ade80','#f87171','#60a5fa','#f472b6','#a78bfa'];
   const GRID_COLOR = '#22222e';
   const TICK_COLOR = '#7c7c8c';
@@ -2690,6 +2712,35 @@ DASHBOARD_HTML = """<!doctype html>
       modelChart = new Chart(document.getElementById('model-chart'), cfg);
     } else {
       modelChart.data = cfg.data; modelChart.update();
+    }
+  }
+
+  function buildUserChart(users) {
+    const labels = users.map(u => u.label);
+    const data = users.map(u => Number(u.cost_usd) || 0);
+    const colors = labels.map((_, i) => PALETTE[i % PALETTE.length]);
+    const cfg = {
+      type: 'doughnut',
+      data: {
+        labels,
+        datasets: [{ data, backgroundColor: colors, borderColor: '#111118', borderWidth: 2, hoverOffset: 4 }],
+      },
+      options: {
+        ...COMMON_OPTS,
+        cutout: '62%',
+        plugins: {
+          legend: { position: 'bottom', labels: { color: '#b8b8c4', boxWidth: 10, font: { size: 11 }, padding: 10 } },
+          tooltip: {
+            ...COMMON_OPTS.plugins.tooltip,
+            callbacks: { label: ctx => ' ' + ctx.label + ': ' + fmtCostExact(ctx.parsed) },
+          },
+        },
+      },
+    };
+    if (!userChart) {
+      userChart = new Chart(document.getElementById('user-chart'), cfg);
+    } else {
+      userChart.data = cfg.data; userChart.update();
     }
   }
 
@@ -2801,30 +2852,49 @@ DASHBOARD_HTML = """<!doctype html>
       modelTb.appendChild(tr);
     }
 
-    /* Per-user quota table */
+    /* Per-user breakdown — always shown once at least one user has activity.
+       The cap columns only carry meaning when USER_QUOTA_ENABLED is true. */
     const uq = q.user_quota || {};
-    const userSection = document.getElementById('user-section');
     const users = uq.users || [];
+    const userSection = document.getElementById('user-section');
+    const userTitle = document.getElementById('user-section-title');
+    const userHint = document.getElementById('user-section-hint');
+    document.getElementById('user-count').textContent = fmtCount.format(users.length);
+
     if (uq.enabled) {
+      userTitle.textContent = 'Per-User Quota';
+      userHint.innerHTML = `Cap enforced per <code>${uq.period || 'monthly'}</code> period. Resets in ${
+        uq.reset_in_seconds != null ? Math.ceil(uq.reset_in_seconds / 86400) + 'd' : '—'
+      }.`;
+    } else {
+      userTitle.textContent = 'Per-User Breakdown';
+      userHint.innerHTML = 'Attribution by URL prefix <code>/u/&lt;name&gt;/</code> or by IP label. Enable <code>USER_QUOTA_ENABLED</code> to add caps.';
+    }
+
+    if (users.length) {
       userSection.style.display = '';
-      document.getElementById('user-period').textContent = uq.period || 'monthly';
       const userTb = document.querySelector('#user-table tbody');
       userTb.innerHTML = '';
-      document.getElementById('user-empty').style.display = users.length ? 'none' : 'block';
-      document.getElementById('user-table').style.display = users.length ? '' : 'none';
+      document.getElementById('user-empty').style.display = 'none';
+      document.getElementById('user-table').style.display = '';
       for (const u of users) {
         const tr = document.createElement('tr');
         const cap = Number(u.cap_usd) || 0;
         const used = Number(u.cost_usd) || 0;
         const pct = u.cost_pct == null ? null : Number(u.cost_pct);
-        let pctCell = '—';
-        if (pct != null) {
+        let pctCell = '<span class="badge">—</span>';
+        if (uq.enabled && pct != null) {
           const cls = pct >= 100 ? 'danger' : pct >= 80 ? 'warn' : 'ok';
           pctCell = `<span class="badge ${cls}">${pct.toFixed(1)}%</span>`;
         }
-        const capCell = cap > 0
-          ? `${fmtCostExact(used)} / ${fmtCostExact(cap)}`
-          : `${fmtCostExact(used)} <span class="badge">unlimited</span>`;
+        let capCell;
+        if (!uq.enabled) {
+          capCell = fmtCostExact(used);
+        } else if (cap > 0) {
+          capCell = `${fmtCostExact(used)} / ${fmtCostExact(cap)}`;
+        } else {
+          capCell = `${fmtCostExact(used)} <span class="badge">unlimited</span>`;
+        }
         const lastSeen = u.last_seen
           ? `<span class="timestamp">${fmtRelativeTime(u.last_seen)}<small>${u.last_seen.replace('T',' ')}</small></span>`
           : '—';
@@ -2834,12 +2904,27 @@ DASHBOARD_HTML = """<!doctype html>
           <td class="num">${pctCell}</td>
           <td class="num">${fmtCount.format(u.requests || 0)}</td>
           <td class="num">${fmtNum(u.input_tokens)} / ${fmtNum(u.output_tokens)}</td>
-          <td class="num">${fmtCount.format(u.blocked_count || 0)}</td>
+          <td class="num">${uq.enabled ? fmtCount.format(u.blocked_count || 0) : '—'}</td>
           <td>${lastSeen}</td>`;
         userTb.appendChild(tr);
       }
     } else {
-      userSection.style.display = 'none';
+      // No users yet — only show the section in server mode so local users
+      // aren't shown an empty per-user widget that doesn't apply to them.
+      userSection.style.display = (q.deploy_mode === 'server') ? '' : 'none';
+      if (q.deploy_mode === 'server') {
+        document.getElementById('user-empty').style.display = 'block';
+        document.getElementById('user-table').style.display = 'none';
+      }
+    }
+
+    /* Cost-by-user doughnut */
+    const userChartPanel = document.getElementById('user-chart-panel');
+    if (users.length >= 1 && window.Chart) {
+      userChartPanel.style.display = '';
+      buildUserChart(users);
+    } else {
+      userChartPanel.style.display = 'none';
     }
 
     /* Per-session table */
@@ -2858,7 +2943,11 @@ DASHBOARD_HTML = """<!doctype html>
       const lastSeen = s.last_seen
         ? `<span class="timestamp">${fmtRelativeTime(s.last_seen)}<small>${s.last_seen.replace('T',' ')}</small></span>`
         : '—';
+      const userCell = s.user_label
+        ? `<strong>${s.user_label}</strong>`
+        : '<span class="badge">—</span>';
       tr.innerHTML = `
+        <td>${userCell}</td>
         <td class="session-id" title="${id}">${idHead}<span class="session-tail">${idTail}</span></td>
         <td>${modelBadges || '<span class="badge">—</span>'}</td>
         <td class="num">${fmtCount.format(s.requests)}</td>
@@ -2918,6 +3007,7 @@ async def quota():
         "by_session": [
             {
                 "session_id": s["session_id"],
+                "user_label": s.get("user_label", ""),
                 "requests": s["requests"],
                 "input_tokens": s["input_tokens"],
                 "output_tokens": s["output_tokens"],
@@ -2945,8 +3035,13 @@ async def quota():
         "period_month": quota_stats["period_month"],
         "monthly_reset_enabled": QUOTA_MONTHLY_RESET,
         "deploy_mode": DEPLOY_MODE,
+        # `users` is always populated when at least one labelled request has
+        # been recorded, even with USER_QUOTA_ENABLED=false — that way the
+        # dashboard can attribute spend to users regardless of cap config.
+        # `cap_enforced` lets the UI decide whether to show cap progress bars.
         "user_quota": {
             "enabled": USER_QUOTA_ENABLED,
+            "cap_enforced": USER_QUOTA_ENABLED and USER_QUOTA_HARD_LIMIT,
             "period": USER_QUOTA_PERIOD,
             "hard_limit": USER_QUOTA_HARD_LIMIT,
             "default_cap_usd": USER_QUOTA_DEFAULT_USD,
