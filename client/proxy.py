@@ -534,7 +534,8 @@ quota_stats = {
     "by_model": {},  # model_key -> {usage..., cost_usd, requests}
     "by_session": {},  # session_id -> {requests, tokens, cost_usd, first_seen, last_seen}
     "by_day": {},  # YYYY-MM-DD -> {requests, tokens, cost_usd}
-    "by_user": {},  # label -> {cap_usd, period_key, cost_usd, requests, tokens, blocked_count, ...}
+    "by_day_user": {},  # YYYY-MM-DD -> {user_label -> {requests, tokens, cost_usd}}
+    "by_user": {},  # label -> {cap_usd, period_key, cost_usd, requests, tokens, blocked_count, models, ...}
     "messages_requests": 0,
     "last_request_at": None,
     "period_month": "",  # YYYY-MM of current tracking period; auto-reset on rollover
@@ -610,7 +611,7 @@ QUOTA_PERSIST_PATH = os.getenv(
     os.path.join(os.path.dirname(ENV_PATH), ".quota.json"),
 )
 QUOTA_PERSIST_INTERVAL_SECONDS = int(os.getenv("QUOTA_PERSIST_INTERVAL", "30"))
-QUOTA_SCHEMA_VERSION = 3  # v1 = totals+by_model. v2 += by_session+by_day. v3 += by_user.
+QUOTA_SCHEMA_VERSION = 4  # v1=base, v2 +by_session+by_day, v3 +by_user, v4 +by_day_user+user.models
 QUOTA_SCHEMA_MIN_LOAD = 1  # accept v1+ files for forward migration
 _last_quota_save_at = 0.0
 
@@ -1038,7 +1039,23 @@ def _load_quota_stats() -> bool:
     if isinstance(bu, dict):
         for label, bucket in bu.items():
             if isinstance(bucket, dict) and "label" in bucket:
+                # v4 backfill: older v3 buckets won't have the models sub-dict.
+                if "models" not in bucket or not isinstance(bucket.get("models"), dict):
+                    bucket["models"] = {}
                 quota_stats["by_user"][label] = bucket
+
+    # v4 — per-day per-user buckets.
+    bdu = data.get("by_day_user")
+    if isinstance(bdu, dict):
+        for date_str, by_label in bdu.items():
+            if not isinstance(by_label, dict):
+                continue
+            cleaned = {}
+            for label, entry in by_label.items():
+                if isinstance(entry, dict):
+                    cleaned[label] = entry
+            if cleaned:
+                quota_stats["by_day_user"][date_str] = cleaned
 
     _check_monthly_reset()
     return True
@@ -1067,6 +1084,7 @@ def _save_quota_stats(force: bool = False) -> None:
         "by_model": quota_stats["by_model"],
         "by_session": quota_stats["by_session"],
         "by_day": quota_stats["by_day"],
+        "by_day_user": quota_stats["by_day_user"],
         "by_user": quota_stats["by_user"],
         "period_month": quota_stats["period_month"],
     }
@@ -1388,7 +1406,29 @@ def _record_usage(
     _evict_oldest("by_day", "date", QUOTA_MAX_DAYS)
 
     if user_label:
-        record_user_usage(user_label, usage, cost)
+        record_user_usage(user_label, usage, cost, model_key=model_key)
+
+    # by_day_user — same per-day aggregation as by_day but split per user.
+    if user_label:
+        day_users = quota_stats["by_day_user"].setdefault(today, {})
+        dub = day_users.setdefault(user_label, {
+            "date": today,
+            "user_label": user_label,
+            "requests": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cost_usd": 0.0,
+        })
+        dub["requests"] += 1
+        dub["input_tokens"] += in_t
+        dub["output_tokens"] += out_t
+        dub["cache_read_input_tokens"] += cr_t
+        dub["cache_creation_input_tokens"] += cw_t
+        dub["cost_usd"] += cost
+        # Cap dates the same way by_day is capped, so the two stay in lockstep.
+        _evict_by_day_user_to_match_by_day()
 
     log(
         f"           {DIM}usage: {RESET}{CYAN}{model_key}{RESET} "
@@ -1415,6 +1455,19 @@ def _record_usage(
         )
 
     _save_quota_stats()
+
+
+def _evict_by_day_user_to_match_by_day() -> None:
+    """Keep by_day_user's date set ⊆ by_day's date set.
+
+    by_day is the canonical date list (eviction-capped via _evict_oldest);
+    by_day_user just adds the user dimension, so we drop any date that's
+    no longer present in by_day to avoid orphan stats.
+    """
+    valid = set(quota_stats["by_day"].keys())
+    for d in list(quota_stats["by_day_user"].keys()):
+        if d not in valid:
+            del quota_stats["by_day_user"][d]
 
 
 def _evict_oldest(field: str, sort_key: str, max_entries: int) -> None:
@@ -1446,6 +1499,7 @@ def _new_user_bucket(label: str) -> dict:
         "cache_read_input_tokens": 0,
         "cache_creation_input_tokens": 0,
         "blocked_count": 0,
+        "models": {},  # model_key -> {requests, input_tokens, output_tokens, cache_*, cost_usd}
         "first_seen": datetime.now().isoformat(timespec="seconds"),
         "last_seen": None,
     }
@@ -1462,6 +1516,7 @@ def _reset_user_bucket(bucket: dict, period_key: str) -> None:
     bucket["cache_read_input_tokens"] = 0
     bucket["cache_creation_input_tokens"] = 0
     bucket["blocked_count"] = 0
+    bucket["models"] = {}
 
 
 def get_or_create_user_bucket(label: str) -> dict:
@@ -1492,22 +1547,48 @@ def is_user_over_cap(label: str) -> tuple[bool, float, float]:
     return used >= cap, used, cap
 
 
-def record_user_usage(label: str, usage: dict, cost: float) -> None:
+def record_user_usage(label: str, usage: dict, cost: float, model_key: str | None = None) -> None:
     """Accumulate one response's cost/usage into the per-user bucket.
 
     Runs even when USER_QUOTA_ENABLED=false — we still want the dashboard
     to attribute spend to a user. The cap is only ENFORCED when enabled.
+
+    `model_key` enables per-user × per-model breakdown for the dashboard.
     """
     if not label:
         return
     b = get_or_create_user_bucket(label)
+    in_t = usage.get("input_tokens", 0) or 0
+    out_t = usage.get("output_tokens", 0) or 0
+    cr_t = usage.get("cache_read_input_tokens", 0) or 0
+    cw_t = usage.get("cache_creation_input_tokens", 0) or 0
     b["cost_usd"] += cost
     b["requests"] += 1
-    b["input_tokens"] += usage.get("input_tokens", 0) or 0
-    b["output_tokens"] += usage.get("output_tokens", 0) or 0
-    b["cache_read_input_tokens"] += usage.get("cache_read_input_tokens", 0) or 0
-    b["cache_creation_input_tokens"] += usage.get("cache_creation_input_tokens", 0) or 0
+    b["input_tokens"] += in_t
+    b["output_tokens"] += out_t
+    b["cache_read_input_tokens"] += cr_t
+    b["cache_creation_input_tokens"] += cw_t
     b["last_seen"] = datetime.now().isoformat(timespec="seconds")
+
+    if model_key:
+        # Older buckets loaded from v3 .quota.json don't have this dict yet.
+        if "models" not in b or not isinstance(b.get("models"), dict):
+            b["models"] = {}
+        mb = b["models"].setdefault(model_key, {
+            "model": model_key,
+            "requests": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cost_usd": 0.0,
+        })
+        mb["requests"] += 1
+        mb["input_tokens"] += in_t
+        mb["output_tokens"] += out_t
+        mb["cache_read_input_tokens"] += cr_t
+        mb["cache_creation_input_tokens"] += cw_t
+        mb["cost_usd"] += cost
 
 
 class UsageTap:
@@ -2281,6 +2362,22 @@ DASHBOARD_HTML = """<!doctype html>
   td .badge.ok     { color: var(--ok); }
   td .badge.warn   { color: var(--warn); }
   td .badge.danger { color: var(--danger); }
+
+  /* Sub-rows under a group (e.g. user breakdown under a date row). */
+  tr.sub td {
+    background: var(--bg-1);
+    color: var(--text-soft);
+    font-size: 13px;
+    border-top: 1px dashed var(--border-soft);
+  }
+  tr.sub td:first-child {
+    padding-left: 36px;
+    color: var(--muted);
+  }
+  tr.group-head td {
+    background: var(--bg-2);
+    font-weight: 600;
+  }
   td .timestamp {
     font-family: var(--font-mono);
     font-size: 12px;
@@ -2386,6 +2483,21 @@ DASHBOARD_HTML = """<!doctype html>
         <div class="card-value num" id="cache-write">0</div>
         <div class="card-meta">125% (5m) / 200% (1h)</div>
       </div>
+      <div class="card">
+        <div class="card-label">Avg cost / request</div>
+        <div class="card-value num" id="avg-cost">$0.0000</div>
+        <div class="card-meta">across all /v1/messages</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Cache hit rate</div>
+        <div class="card-value num" id="cache-hit-rate">0%</div>
+        <div class="card-meta">cache_read / total input</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Top spender</div>
+        <div class="card-value" id="top-spender" style="font-size:22px">—</div>
+        <div class="card-meta" id="top-spender-cost"></div>
+      </div>
     </div>
   </section>
 
@@ -2429,6 +2541,13 @@ DASHBOARD_HTML = """<!doctype html>
           <span class="sub">current period</span>
         </div>
         <div class="chart-canvas-wrap"><canvas id="user-chart"></canvas></div>
+      </div>
+      <div class="panel" id="daily-user-chart-panel" style="display:none">
+        <div class="panel-title">
+          <h3>Daily cost stacked by user</h3>
+          <span class="sub" id="daily-user-range">—</span>
+        </div>
+        <div class="chart-canvas-wrap"><canvas id="daily-user-chart"></canvas></div>
       </div>
     </div>
   </section>
@@ -2604,7 +2723,7 @@ DASHBOARD_HTML = """<!doctype html>
   }
 
   /*  Chart factories  ---------------------------------------------------- */
-  let dailyChart = null, modelChart = null, userChart = null;
+  let dailyChart = null, modelChart = null, userChart = null, dailyUserChart = null;
   const PALETTE = ['#c084fc','#67e8f9','#fbbf24','#4ade80','#f87171','#60a5fa','#f472b6','#a78bfa'];
   const GRID_COLOR = '#22222e';
   const TICK_COLOR = '#7c7c8c';
@@ -2744,6 +2863,57 @@ DASHBOARD_HTML = """<!doctype html>
     }
   }
 
+  function buildDailyUserChart(days) {
+    // days = [{date, users: [{user_label, cost_usd}, ...]}]; build stacked bar.
+    const dateLabels = days.map(d => d.date.slice(5));   // MM-DD
+    const userSet = new Map();
+    for (const d of days) {
+      for (const u of (d.users || [])) {
+        if (!userSet.has(u.user_label)) userSet.set(u.user_label, userSet.size);
+      }
+    }
+    const datasets = [...userSet.keys()].map((label, i) => ({
+      label,
+      data: days.map(d => {
+        const u = (d.users || []).find(x => x.user_label === label);
+        return u ? Number(u.cost_usd) || 0 : 0;
+      }),
+      backgroundColor: PALETTE[i % PALETTE.length],
+      borderColor: '#111118',
+      borderWidth: 1,
+      stack: 'cost',
+    }));
+    const cfg = {
+      type: 'bar',
+      data: { labels: dateLabels, datasets },
+      options: {
+        ...COMMON_OPTS,
+        plugins: {
+          legend: { position: 'bottom', labels: { color: '#b8b8c4', boxWidth: 10, font: { size: 11 }, padding: 8 } },
+          tooltip: {
+            ...COMMON_OPTS.plugins.tooltip,
+            callbacks: {
+              label: ctx => ' ' + ctx.dataset.label + ': ' + fmtCostExact(ctx.parsed.y),
+              footer: items => {
+                const total = items.reduce((s, it) => s + (it.parsed.y || 0), 0);
+                return 'Total: ' + fmtCostExact(total);
+              },
+            },
+          },
+        },
+        scales: {
+          x: { stacked: true, grid: { color: GRID_COLOR }, ticks: { color: TICK_COLOR } },
+          y: { stacked: true, grid: { color: GRID_COLOR }, ticks: { color: TICK_COLOR, callback: v => '$' + v } },
+        },
+      },
+    };
+    if (!dailyUserChart) {
+      dailyUserChart = new Chart(document.getElementById('daily-user-chart'), cfg);
+    } else {
+      dailyUserChart.data = cfg.data; dailyUserChart.update();
+    }
+  }
+
   /*  Main refresh loop  --------------------------------------------------- */
   async function refresh() {
     let q;
@@ -2788,6 +2958,28 @@ DASHBOARD_HTML = """<!doctype html>
         ? 'No requests recorded yet'
         : `Across ${fmtCount.format(q.messages_requests)} requests on ${(q.by_model || []).length} model(s)`;
 
+    /* Derived totals cards */
+    const reqs = q.messages_requests || 0;
+    const avg = reqs > 0 ? (q.cost_usd_total || 0) / reqs : 0;
+    document.getElementById('avg-cost').textContent = fmtCostExact(avg);
+
+    const inT = t.input_tokens || 0;
+    const crT = t.cache_read_input_tokens || 0;
+    const denom = inT + crT;
+    const hitRate = denom > 0 ? (crT / denom) * 100 : 0;
+    document.getElementById('cache-hit-rate').textContent = hitRate.toFixed(1) + '%';
+
+    const topUser = ((q.user_quota || {}).users || [])[0];
+    const topSpenderEl = document.getElementById('top-spender');
+    const topSpenderCostEl = document.getElementById('top-spender-cost');
+    if (topUser) {
+      topSpenderEl.textContent = topUser.label;
+      topSpenderCostEl.textContent = fmtCostExact(topUser.cost_usd) + ' this period';
+    } else {
+      topSpenderEl.textContent = '—';
+      topSpenderCostEl.textContent = 'no user activity yet';
+    }
+
     /* Rate limits */
     const rl = q.rate_limits || {};
     const rlEl = document.getElementById('rate-limits');
@@ -2820,9 +3012,16 @@ DASHBOARD_HTML = """<!doctype html>
     document.getElementById('daily-empty').style.display = days.length ? 'none' : 'block';
     document.getElementById('daily-table').style.display = days.length ? '' : 'none';
     for (const d of days) {
+      const dayUsers = d.users || [];
+      const hasUsers = dayUsers.length > 0;
+      const groupCls = hasUsers ? 'group-head' : '';
+      const userCol = hasUsers
+        ? `<td><span class="num">${d.date}</span></td>`
+        : `<td><span class="num">${d.date}</span></td>`;
       const tr = document.createElement('tr');
+      tr.className = groupCls;
       tr.innerHTML = `
-        <td><span class="num">${d.date}</span></td>
+        ${userCol}
         <td class="num">${fmtCount.format(d.requests)}</td>
         <td class="num">${fmtNum(d.input_tokens)}</td>
         <td class="num">${fmtNum(d.output_tokens)}</td>
@@ -2830,6 +3029,20 @@ DASHBOARD_HTML = """<!doctype html>
         <td class="num">${fmtNum(d.cache_creation_input_tokens)}</td>
         <td class="num cost">${fmtCostExact(d.cost_usd)}</td>`;
       dailyTb.appendChild(tr);
+      // Per-user sub-rows (sorted by cost desc on the backend).
+      for (const u of dayUsers) {
+        const sub = document.createElement('tr');
+        sub.className = 'sub';
+        sub.innerHTML = `
+          <td>${u.user_label || '—'}</td>
+          <td class="num">${fmtCount.format(u.requests)}</td>
+          <td class="num">${fmtNum(u.input_tokens)}</td>
+          <td class="num">${fmtNum(u.output_tokens)}</td>
+          <td class="num">${fmtNum(u.cache_read_input_tokens)}</td>
+          <td class="num">${fmtNum(u.cache_creation_input_tokens)}</td>
+          <td class="num cost">${fmtCostExact(u.cost_usd)}</td>`;
+        dailyTb.appendChild(sub);
+      }
     }
 
     /* Per-model table + chart */
@@ -2840,7 +3053,9 @@ DASHBOARD_HTML = """<!doctype html>
     document.getElementById('model-empty').style.display = models.length ? 'none' : 'block';
     document.getElementById('model-table').style.display = models.length ? '' : 'none';
     for (const m of models) {
+      const modelUsers = m.users || [];
       const tr = document.createElement('tr');
+      tr.className = modelUsers.length ? 'group-head' : '';
       tr.innerHTML = `
         <td><strong>${m.model}</strong></td>
         <td class="num">${fmtCount.format(m.requests)}</td>
@@ -2850,6 +3065,19 @@ DASHBOARD_HTML = """<!doctype html>
         <td class="num">${fmtNum(m.cache_creation_input_tokens)}</td>
         <td class="num cost">${fmtCostExact(m.cost_usd)}</td>`;
       modelTb.appendChild(tr);
+      for (const u of modelUsers) {
+        const sub = document.createElement('tr');
+        sub.className = 'sub';
+        sub.innerHTML = `
+          <td>${u.user_label || '—'}</td>
+          <td class="num">${fmtCount.format(u.requests)}</td>
+          <td class="num">${fmtNum(u.input_tokens)}</td>
+          <td class="num">${fmtNum(u.output_tokens)}</td>
+          <td class="num">—</td>
+          <td class="num">—</td>
+          <td class="num cost">${fmtCostExact(u.cost_usd)}</td>`;
+        modelTb.appendChild(sub);
+      }
     }
 
     /* Per-user breakdown — always shown once at least one user has activity.
@@ -2927,6 +3155,19 @@ DASHBOARD_HTML = """<!doctype html>
       userChartPanel.style.display = 'none';
     }
 
+    /* Daily cost stacked by user */
+    const daysForUserChart = (q.by_day || []).slice().reverse(); // chronological for chart
+    const hasUserSplit = daysForUserChart.some(d => (d.users || []).length > 0);
+    const dailyUserPanel = document.getElementById('daily-user-chart-panel');
+    if (hasUserSplit && window.Chart) {
+      dailyUserPanel.style.display = '';
+      document.getElementById('daily-user-range').textContent =
+        daysForUserChart.length ? daysForUserChart[0].date + ' → ' + daysForUserChart[daysForUserChart.length - 1].date : '';
+      buildDailyUserChart(daysForUserChart);
+    } else {
+      dailyUserPanel.style.display = 'none';
+    }
+
     /* Per-session table */
     const sessions = q.by_session || [];
     const sessTb = document.querySelector('#session-table tbody');
@@ -3001,6 +3242,24 @@ async def quota():
                 "cache_read_input_tokens": v["cache_read_input_tokens"],
                 "cache_creation_input_tokens": v["cache_creation_input_tokens"],
                 "cost_usd": round(v["cost_usd"], 4),
+                # Users that touched this model (aggregated from by_user[*].models).
+                "users": sorted(
+                    (
+                        {
+                            "user_label": ub.get("label"),
+                            "requests": (ub.get("models", {}).get(v["model"], {}) or {}).get("requests", 0),
+                            "input_tokens": (ub.get("models", {}).get(v["model"], {}) or {}).get("input_tokens", 0),
+                            "output_tokens": (ub.get("models", {}).get(v["model"], {}) or {}).get("output_tokens", 0),
+                            "cost_usd": round(
+                                (ub.get("models", {}).get(v["model"], {}) or {}).get("cost_usd", 0.0), 4
+                            ),
+                        }
+                        for ub in quota_stats["by_user"].values()
+                        if isinstance(ub.get("models"), dict) and v["model"] in ub["models"]
+                    ),
+                    key=lambda x: x["cost_usd"],
+                    reverse=True,
+                ),
             }
             for v in quota_stats["by_model"].values()
         ],
@@ -3029,6 +3288,23 @@ async def quota():
                 "cache_read_input_tokens": d["cache_read_input_tokens"],
                 "cache_creation_input_tokens": d["cache_creation_input_tokens"],
                 "cost_usd": round(d["cost_usd"], 4),
+                # Top users contributing to this date (sorted by cost desc).
+                "users": sorted(
+                    (
+                        {
+                            "user_label": u["user_label"],
+                            "requests": u["requests"],
+                            "input_tokens": u["input_tokens"],
+                            "output_tokens": u["output_tokens"],
+                            "cache_read_input_tokens": u["cache_read_input_tokens"],
+                            "cache_creation_input_tokens": u["cache_creation_input_tokens"],
+                            "cost_usd": round(u["cost_usd"], 4),
+                        }
+                        for u in (quota_stats["by_day_user"].get(d["date"], {}) or {}).values()
+                    ),
+                    key=lambda x: x["cost_usd"],
+                    reverse=True,
+                ),
             }
             for d in days
         ],
@@ -3077,6 +3353,23 @@ def _user_bucket_view(b: dict) -> dict:
     cap = float(b.get("cap_usd") or 0.0)
     used = float(b.get("cost_usd") or 0.0)
     pct = round((used / cap) * 100, 2) if cap > 0 else None
+    raw_models = b.get("models") or {}
+    models_view = sorted(
+        (
+            {
+                "model": m.get("model", k),
+                "requests": m.get("requests", 0),
+                "input_tokens": m.get("input_tokens", 0),
+                "output_tokens": m.get("output_tokens", 0),
+                "cache_read_input_tokens": m.get("cache_read_input_tokens", 0),
+                "cache_creation_input_tokens": m.get("cache_creation_input_tokens", 0),
+                "cost_usd": round(float(m.get("cost_usd") or 0.0), 6),
+            }
+            for k, m in raw_models.items() if isinstance(m, dict)
+        ),
+        key=lambda x: x["cost_usd"],
+        reverse=True,
+    )
     return {
         "label": b.get("label"),
         "cap_usd": round(cap, 4),
@@ -3092,6 +3385,7 @@ def _user_bucket_view(b: dict) -> dict:
         "cache_read_input_tokens": b.get("cache_read_input_tokens", 0),
         "cache_creation_input_tokens": b.get("cache_creation_input_tokens", 0),
         "blocked_count": b.get("blocked_count", 0),
+        "models": models_view,
         "first_seen": b.get("first_seen"),
         "last_seen": b.get("last_seen"),
     }
