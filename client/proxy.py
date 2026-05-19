@@ -1892,86 +1892,108 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Claude Cloak", lifespan=lifespan)
 
 
-@app.middleware("http")
-async def access_control_middleware(request: Request, call_next):
+class AccessControlMiddleware:
     """Server-mode access gate: IP whitelist + per-user spend cap.
+
+    Implemented as a pure ASGI middleware (not @app.middleware("http"))
+    because Starlette's BaseHTTPMiddleware wraps streaming responses in a
+    TaskGroup and surfaces benign client disconnects as
+    "ExceptionGroup: unhandled errors in a TaskGroup" — noisy and confusing
+    when half our traffic is SSE-streamed /v1/messages responses.
 
     - In local mode this is a no-op (preserves the original single-machine UX).
     - In server mode every request must come from an IP inside ALLOWED_IPS.
     - When USER_QUOTA_ENABLED, /v1/ requests from a user that exceeded their
       cap are short-circuited with HTTP 429 (plus Retry-After).
     """
-    client_ip = request.client.host if request.client else ""
-    request.state.client_ip = client_ip
 
-    raw_path = request.url.path or "/"
+    def __init__(self, app):
+        self.app = app
 
-    # If the client embedded its username in the URL (/u/<label>/...), prefer
-    # that — it's the only way to distinguish multiple users behind the same
-    # NAT'd IP. Falls back to IP_LABELS otherwise.
-    url_label, stripped_path = parse_user_prefix(raw_path)
-    request.state.url_user_label = url_label
-    request.state.stripped_path = stripped_path
-    request.state.user_label = url_label or label_for_ip(client_ip)
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
 
-    # IP whitelist — applies to ALL paths in server mode (dashboard included).
-    if DEPLOY_MODE == "server":
-        if not is_ip_allowed(client_ip):
+        client = scope.get("client")
+        client_ip = client[0] if client else ""
+        raw_path = scope.get("path") or "/"
+        method = scope.get("method", "GET")
+
+        url_label, stripped_path = parse_user_prefix(raw_path)
+        user_label = url_label or label_for_ip(client_ip)
+
+        # Stash in scope.state so the downstream handler can read via
+        # request.state.<attr> — Starlette's Request.state is a thin wrapper
+        # around scope["state"] (a plain dict).
+        scope.setdefault("state", {})
+        state = scope["state"]
+        state["client_ip"] = client_ip
+        state["url_user_label"] = url_label
+        state["stripped_path"] = stripped_path
+        state["user_label"] = user_label
+
+        # IP whitelist — applies to ALL paths in server mode (dashboard included).
+        if DEPLOY_MODE == "server" and not is_ip_allowed(client_ip):
             log(
                 f"  {BG_RED}{BOLD} 403 {RESET} {RED}IP not allowed: "
-                f"{client_ip or '<unknown>'} → {request.method} {raw_path}{RESET}"
+                f"{client_ip or '<unknown>'} → {method} {raw_path}{RESET}"
             )
-            return JSONResponse({"error": "forbidden"}, status_code=403)
+            await JSONResponse({"error": "forbidden"}, status_code=403)(scope, receive, send)
+            return
 
-    # Admin endpoints additionally require the caller to come from ADMIN_IPS.
-    if raw_path.startswith("/admin/"):
-        if client_ip not in ADMIN_IPS:
-            return JSONResponse({"error": "forbidden"}, status_code=403)
+        # Admin endpoints additionally require the caller to come from ADMIN_IPS.
+        if raw_path.startswith("/admin/") and client_ip not in ADMIN_IPS:
+            await JSONResponse({"error": "forbidden"}, status_code=403)(scope, receive, send)
+            return
 
-    # Stats endpoints — gate to STATS_VIEW_IPS when STATS_PRIVATE is enabled.
-    # /u/{label}/whoami stays open so every client can self-check its setup.
-    if STATS_PRIVATE:
-        is_stats = (
-            raw_path in ("/health", "/quota", "/quota/users", "/dashboard")
-            or raw_path.startswith("/quota/users/")
-        )
-        if is_stats and client_ip not in STATS_VIEW_IPS:
-            return JSONResponse({"error": "forbidden"}, status_code=403)
-
-    # Per-user spend cap — only meaningful for upstream API calls. We use the
-    # URL-stripped path so /u/phong/v1/messages is correctly treated as /v1/messages.
-    if (
-        USER_QUOTA_ENABLED
-        and USER_QUOTA_HARD_LIMIT
-        and stripped_path.startswith("/v1/")
-        and not is_blocked_path(stripped_path.lstrip("/"))
-    ):
-        label = request.state.user_label
-        over, used, cap = is_user_over_cap(label)
-        if over:
-            bucket = get_or_create_user_bucket(label)
-            bucket["blocked_count"] += 1
-            retry = seconds_until_user_period_reset()
-            log(
-                f"  {BG_YELLOW}{BOLD} 429 {RESET} {YELLOW}user '{label}' over cap "
-                f"${used:.2f}/${cap:.2f} (period={USER_QUOTA_PERIOD}, reset in {retry}s){RESET}"
+        # Stats endpoints — gate to STATS_VIEW_IPS when STATS_PRIVATE is enabled.
+        if STATS_PRIVATE:
+            is_stats = (
+                raw_path in ("/health", "/quota", "/quota/users", "/dashboard")
+                or raw_path.startswith("/quota/users/")
             )
-            return JSONResponse(
-                {
-                    "type": "error",
-                    "error": {
-                        "type": "user_quota_exceeded",
-                        "message": (
-                            f"User '{label}' exceeded {USER_QUOTA_PERIOD} cap "
-                            f"${cap:.2f} (used ${used:.4f}). Resets at next period boundary."
-                        ),
+            if is_stats and client_ip not in STATS_VIEW_IPS:
+                await JSONResponse({"error": "forbidden"}, status_code=403)(scope, receive, send)
+                return
+
+        # Per-user spend cap — only meaningful for upstream API calls. Use the
+        # URL-stripped path so /u/phong/v1/messages is treated as /v1/messages.
+        if (
+            USER_QUOTA_ENABLED
+            and USER_QUOTA_HARD_LIMIT
+            and stripped_path.startswith("/v1/")
+            and not is_blocked_path(stripped_path.lstrip("/"))
+        ):
+            over, used, cap = is_user_over_cap(user_label)
+            if over:
+                bucket = get_or_create_user_bucket(user_label)
+                bucket["blocked_count"] += 1
+                retry = seconds_until_user_period_reset()
+                log(
+                    f"  {BG_YELLOW}{BOLD} 429 {RESET} {YELLOW}user '{user_label}' over cap "
+                    f"${used:.2f}/${cap:.2f} (period={USER_QUOTA_PERIOD}, reset in {retry}s){RESET}"
+                )
+                await JSONResponse(
+                    {
+                        "type": "error",
+                        "error": {
+                            "type": "user_quota_exceeded",
+                            "message": (
+                                f"User '{user_label}' exceeded {USER_QUOTA_PERIOD} cap "
+                                f"${cap:.2f} (used ${used:.4f}). Resets at next period boundary."
+                            ),
+                        },
                     },
-                },
-                status_code=429,
-                headers={"Retry-After": str(retry)},
-            )
+                    status_code=429,
+                    headers={"Retry-After": str(retry)},
+                )(scope, receive, send)
+                return
 
-    return await call_next(request)
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(AccessControlMiddleware)
 
 
 # Headers không forward từ client request
@@ -3629,19 +3651,29 @@ async def proxy(path: str, request: Request):
             )
 
         async def stream_response():
+            # Each cleanup step is guarded so a benign client disconnect or
+            # a hiccup in the usage tap doesn't escape as an unhandled
+            # exception (Starlette/uvicorn then surface it as an "ASGI
+            # application" error even though the response was fully sent).
             try:
                 async for chunk in response.aiter_bytes():
                     usage_tap.feed(chunk)
                     yield chunk
             finally:
-                await response.aclose()
-                total_ms = int((time.monotonic() - start_time) * 1000)
-                model, usage = usage_tap.finalize()
-                if usage:
-                    _record_usage(
-                        model, usage, usage_tap.session_id,
-                        duration_ms=total_ms, user_label=usage_tap.user_label,
-                    )
+                try:
+                    await response.aclose()
+                except Exception:
+                    pass
+                try:
+                    total_ms = int((time.monotonic() - start_time) * 1000)
+                    model, usage = usage_tap.finalize()
+                    if usage:
+                        _record_usage(
+                            model, usage, usage_tap.session_id,
+                            duration_ms=total_ms, user_label=usage_tap.user_label,
+                        )
+                except Exception as e:
+                    log(f"  {YELLOW}usage tap cleanup failed (non-fatal): {e}{RESET}")
 
         return StreamingResponse(
             stream_response(),
