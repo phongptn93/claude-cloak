@@ -1695,7 +1695,7 @@ class UsageTap:
         return self.model, dict(self.usage)
 
 
-def capture_identity_from_request(request: Request):
+def capture_identity_from_request(request: Request, path: str = "") -> None:
     global identity_captured, captured_identity
 
     if identity_captured:
@@ -1706,6 +1706,17 @@ def capture_identity_from_request(request: Request):
     # 403s everyone else before this runs), so the "first caller" is already
     # vetted. The captured fingerprint is then locked in .env for all
     # subsequent requests from every other whitelisted device.
+
+    # Only capture from genuine Claude Code traffic — never from a /dashboard
+    # browser hit, a health probe, a HEAD / scan, or an accidentally proxied
+    # tool. Two gates:
+    #   1. path must be /v1/messages (the real API surface Claude Code uses)
+    #   2. user-agent must start with `claude-cli` (the SDK's UA prefix)
+    if not path.lstrip("/").startswith("v1/messages"):
+        return
+    user_agent = request.headers.get("user-agent", "").lower()
+    if not user_agent.startswith("claude-cli"):
+        return
 
     # CAPTURE_LOCK_FROM_IP narrows the first-capturer to one specific IP —
     # useful when the admin wants to control which machine's fingerprint
@@ -3501,7 +3512,7 @@ async def proxy(path: str, request: Request):
         )
 
     # Auto-capture identity headers, cảnh báo header lạ
-    capture_identity_from_request(request)
+    capture_identity_from_request(request, path)
     warn_unknown_headers(request)
 
     # ── Request timing jitter ──
