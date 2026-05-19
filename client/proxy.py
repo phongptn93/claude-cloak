@@ -158,6 +158,19 @@ else:
 # whitelisted IP can be the first-capturer (original behaviour).
 CAPTURE_LOCK_FROM_IP = os.getenv("CAPTURE_LOCK_FROM_IP", "").strip()
 
+# Auto-refresh the locked identity every N days. After the captured fingerprint
+# ages past this threshold, the next legit /v1/messages request from
+# claude-cli will clear the lock and re-capture. Set 0 to disable (lock
+# indefinitely — original behaviour).
+try:
+    IDENTITY_REFRESH_DAYS = int(os.getenv("IDENTITY_REFRESH_DAYS", "14") or "14")
+except ValueError:
+    IDENTITY_REFRESH_DAYS = 14
+# ISO timestamp of the most recent capture. Auto-written to .env on every
+# capture; empty for legacy .env files (treated as "no age info" → won't
+# refresh until next capture writes a fresh timestamp).
+CAPTURED_AT = os.getenv("CAPTURED_AT", "").strip()
+
 # IP → human label mapping for the dashboard / per-user quota.
 # Format: IP_LABELS=203.0.113.5:phong,198.51.100.7:huy
 IP_LABEL_MAP: dict = {}
@@ -1695,37 +1708,63 @@ class UsageTap:
         return self.model, dict(self.usage)
 
 
+def _identity_age_days() -> float | None:
+    """Return days since CAPTURED_AT, or None if no timestamp recorded."""
+    if not CAPTURED_AT:
+        return None
+    try:
+        captured_dt = datetime.fromisoformat(CAPTURED_AT)
+    except (ValueError, TypeError):
+        return None
+    return (datetime.now() - captured_dt).total_seconds() / 86400.0
+
+
+def is_identity_stale() -> bool:
+    """True when captured fingerprint has aged past IDENTITY_REFRESH_DAYS."""
+    if IDENTITY_REFRESH_DAYS <= 0:
+        return False
+    age = _identity_age_days()
+    if age is None:
+        return False
+    return age >= IDENTITY_REFRESH_DAYS
+
+
 def capture_identity_from_request(request: Request, path: str = "") -> None:
-    global identity_captured, captured_identity
+    global identity_captured, captured_identity, CAPTURED_AT
 
-    if identity_captured:
-        return
-
-    # In server mode, identity is still captured from the first request — but
-    # only whitelisted IPs can reach this code (the access-control middleware
-    # 403s everyone else before this runs), so the "first caller" is already
-    # vetted. The captured fingerprint is then locked in .env for all
-    # subsequent requests from every other whitelisted device.
-
-    # Only capture from genuine Claude Code traffic — never from a /dashboard
-    # browser hit, a health probe, a HEAD / scan, or an accidentally proxied
-    # tool. Two gates:
-    #   1. path must be /v1/messages (the real API surface Claude Code uses)
-    #   2. user-agent must start with `claude-cli` (the SDK's UA prefix)
+    # Gate every capture (initial OR refresh) on the same two checks so a
+    # /dashboard or HEAD / can't ever set or re-set the fingerprint.
     if not path.lstrip("/").startswith("v1/messages"):
         return
     user_agent = request.headers.get("user-agent", "").lower()
     if not user_agent.startswith("claude-cli"):
         return
 
-    # CAPTURE_LOCK_FROM_IP narrows the first-capturer to one specific IP —
-    # useful when the admin wants to control which machine's fingerprint
-    # becomes the locked one for the entire pool. When empty (default), any
-    # whitelisted caller may be first.
+    # Already captured and still fresh — nothing to do.
+    if identity_captured and not is_identity_stale():
+        return
+
+    # CAPTURE_LOCK_FROM_IP narrows the (re-)capturer to one specific IP. We
+    # MUST check this BEFORE clearing the existing identity, otherwise a
+    # stray request from a non-locked IP arriving past the refresh threshold
+    # would wipe the fingerprint and then fail the IP gate, leaving the pool
+    # un-locked.
     if CAPTURE_LOCK_FROM_IP:
         client_ip = (request.client.host if request.client else "") or ""
         if client_ip != CAPTURE_LOCK_FROM_IP:
             return
+
+    if identity_captured and is_identity_stale():
+        age = _identity_age_days()
+        log("")
+        log(
+            f"  {BG_YELLOW}{BOLD} IDENTITY REFRESH {RESET} "
+            f"{YELLOW}captured {age:.1f}d ago (≥ {IDENTITY_REFRESH_DAYS}d threshold) "
+            f"— clearing and re-capturing from this request{RESET}"
+        )
+        captured_identity.clear()
+        identity_captured = False
+        # Fall through to the capture block below.
 
     req_headers = {k.lower(): v for k, v in request.headers.items()}
 
@@ -1737,6 +1776,11 @@ def capture_identity_from_request(request: Request, path: str = "") -> None:
 
     if captured_identity:
         identity_captured = True
+
+        # Stamp capture time so the age-based refresh has a reference point.
+        now_iso = datetime.now().isoformat(timespec="seconds")
+        save_to_env("CAPTURED_AT", now_iso)
+        CAPTURED_AT = now_iso
 
         # Save session secret for consistent ID generation across devices
         save_to_env("SESSION_SECRET", SESSION_SECRET)
@@ -1753,6 +1797,9 @@ def capture_identity_from_request(request: Request, path: str = "") -> None:
         for h, v in captured_identity.items():
             display = mask_value(v, 40) if len(v) > 50 else v
             log(f"    {MAGENTA}{h}{RESET}: {WHITE}{display}{RESET}")
+        if IDENTITY_REFRESH_DAYS > 0:
+            log(f"  {DIM}auto-refresh in {IDENTITY_REFRESH_DAYS} days "
+                f"(set IDENTITY_REFRESH_DAYS=0 to disable){RESET}")
         log(f"  {YELLOW}Da luu vao .env - Copy sang cac may khac!{RESET}")
         log("")
 
@@ -1797,7 +1844,18 @@ def mask_value(val: str, show=12) -> str:
 
 
 def print_status():
-    identity_status = f"{GREEN}{len(captured_identity)} headers locked{RESET}" if identity_captured else f"{YELLOW}Waiting for first request...{RESET}"
+    if identity_captured:
+        age = _identity_age_days()
+        if IDENTITY_REFRESH_DAYS > 0 and age is not None:
+            refresh_in = max(0.0, IDENTITY_REFRESH_DAYS - age)
+            age_str = f"{DIM}(captured {age:.1f}d ago, refresh in {refresh_in:.1f}d){RESET}"
+        elif IDENTITY_REFRESH_DAYS > 0:
+            age_str = f"{DIM}(no CAPTURED_AT — will stamp on next request){RESET}"
+        else:
+            age_str = f"{DIM}(auto-refresh disabled){RESET}"
+        identity_status = f"{GREEN}{len(captured_identity)} headers locked{RESET} {age_str}"
+    else:
+        identity_status = f"{YELLOW}Waiting for first request...{RESET}"
 
     jitter_status = f"{GREEN}ON ({TIMING_JITTER_MIN_MS}-{TIMING_JITTER_MAX_MS}ms){RESET}" if TIMING_JITTER_ENABLED else f"{YELLOW}OFF{RESET}"
     telemetry_status = f"{GREEN}{len(BLOCKED_PATH_PATTERNS)} patterns blocked{RESET}"
