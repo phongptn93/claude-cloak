@@ -1,9 +1,24 @@
 #!/usr/bin/env bash
-# Claude Cloak — launcher for macOS / Linux
-# Mirrors start.bat behaviour: creates .env, kills stale process, installs deps,
-# configures Claude Code, then runs the proxy.
+# Claude Cloak — LOCAL mode launcher for macOS / Linux.
+#
+# Runs a single-machine proxy at 127.0.0.1:9999 and auto-configures Claude
+# Code to use it. For a shared VM deployment use start-server.sh instead,
+# and on the clients use setup-remote.sh (no local proxy needed).
 set -euo pipefail
 cd "$(dirname "$0")"
+
+echo "============================================================"
+echo "  Claude Cloak — LOCAL MODE"
+echo "  Runs a per-device proxy on 127.0.0.1:9999."
+echo "  For a shared VM:"
+echo "    - on the VM:     ./start-server.sh"
+echo "    - on each user:  ./setup-remote.sh http://VM:9999 <username>"
+echo "============================================================"
+echo
+
+# Force local mode for this process so a leftover DEPLOY_MODE=server in
+# .env can't accidentally bind 0.0.0.0 from start.sh.
+export DEPLOY_MODE=local
 
 # ── Create .env if absent ──────────────────────────────────────────────────────
 if [ ! -f .env ]; then

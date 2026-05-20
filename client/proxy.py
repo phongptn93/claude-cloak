@@ -26,6 +26,7 @@ Token Saver (optional, TOKEN_SAVER=true):
 import asyncio
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import os
@@ -91,6 +92,200 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 LOCAL_PORT = int(os.getenv("LOCAL_PORT", "9999"))
 ANTHROPIC_BASE_URL = "https://api.anthropic.com"
+
+# ============================================================
+# DEPLOY MODE
+#   local  — bind 127.0.0.1, no IP whitelist, identity auto-captured.
+#            Each device runs its own proxy (original behaviour).
+#   server — bind LOCAL_HOST (default 0.0.0.0) so other machines can reach it,
+#            require ALLOWED_IPS, identity must be pre-populated in .env
+#            (auto-capture is disabled so random first caller can't lock it).
+# ============================================================
+DEPLOY_MODE = os.getenv("DEPLOY_MODE", "local").strip().lower()
+if DEPLOY_MODE not in ("local", "server"):
+    DEPLOY_MODE = "local"
+LOCAL_HOST = os.getenv(
+    "LOCAL_HOST",
+    "0.0.0.0" if DEPLOY_MODE == "server" else "127.0.0.1",
+).strip() or "127.0.0.1"
+
+
+def _parse_allowed_networks(raw: str) -> list:
+    """Parse a comma-separated list of IPs / CIDR blocks (v4 + v6)."""
+    nets = []
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            if "/" in token:
+                nets.append(ipaddress.ip_network(token, strict=False))
+            else:
+                addr = ipaddress.ip_address(token)
+                prefix = 32 if isinstance(addr, ipaddress.IPv4Address) else 128
+                nets.append(ipaddress.ip_network(f"{addr}/{prefix}", strict=False))
+        except ValueError:
+            print(f"  [WARN] Invalid ALLOWED_IPS entry ignored: {token!r}", file=sys.stderr)
+    return nets
+
+
+ALLOWED_IPS_RAW = os.getenv("ALLOWED_IPS", "").strip()
+ALLOWED_NETWORKS = _parse_allowed_networks(ALLOWED_IPS_RAW)
+
+# Admin-only endpoints (e.g. /admin/quota/reset/*) require the caller to come
+# from one of these IPs. Defaults to loopback so the VM operator can curl them
+# but no remote whitelisted client can reset other users' caps.
+ADMIN_IPS = {
+    ip.strip()
+    for ip in os.getenv("ADMIN_IPS", "127.0.0.1,::1").split(",")
+    if ip.strip()
+}
+
+# Stats endpoints (/health, /quota, /quota/users, /quota/users/{label},
+# /dashboard) can leak per-user spend info. STATS_PRIVATE=true gates them to
+# STATS_VIEW_IPS only — useful when not every whitelisted user should see
+# every other user's cost. Defaults to ADMIN_IPS when not explicitly set.
+STATS_PRIVATE = os.getenv("STATS_PRIVATE", "false").lower() == "true"
+_stats_ips_raw = os.getenv("STATS_VIEW_IPS", "").strip()
+if _stats_ips_raw:
+    STATS_VIEW_IPS = {ip.strip() for ip in _stats_ips_raw.split(",") if ip.strip()}
+else:
+    STATS_VIEW_IPS = set(ADMIN_IPS)
+
+# When set, only this exact IP is allowed to lock the device identity on the
+# first request (server mode only). Stops a stray whitelisted caller from
+# accidentally fingerprinting the entire pool as their machine. Empty = any
+# whitelisted IP can be the first-capturer (original behaviour).
+CAPTURE_LOCK_FROM_IP = os.getenv("CAPTURE_LOCK_FROM_IP", "").strip()
+
+# Auto-refresh the locked identity every N days. After the captured fingerprint
+# ages past this threshold, the next legit /v1/messages request from
+# claude-cli will clear the lock and re-capture. Set 0 to disable (lock
+# indefinitely — original behaviour).
+try:
+    IDENTITY_REFRESH_DAYS = int(os.getenv("IDENTITY_REFRESH_DAYS", "14") or "14")
+except ValueError:
+    IDENTITY_REFRESH_DAYS = 14
+# ISO timestamp of the most recent capture. Auto-written to .env on every
+# capture; empty for legacy .env files (treated as "no age info" → won't
+# refresh until next capture writes a fresh timestamp).
+CAPTURED_AT = os.getenv("CAPTURED_AT", "").strip()
+
+# IP → human label mapping for the dashboard / per-user quota.
+# Format: IP_LABELS=203.0.113.5:phong,198.51.100.7:huy
+IP_LABEL_MAP: dict = {}
+for _pair in os.getenv("IP_LABELS", "").split(","):
+    _pair = _pair.strip()
+    if ":" not in _pair:
+        continue
+    _ip, _label = _pair.split(":", 1)
+    _ip = _ip.strip()
+    _label = _label.strip()
+    if not _ip or not _label:
+        continue
+    try:
+        IP_LABEL_MAP[ipaddress.ip_address(_ip)] = _label
+    except ValueError:
+        print(f"  [WARN] Invalid IP_LABELS entry ignored: {_pair!r}", file=sys.stderr)
+
+# ============================================================
+# PER-USER QUOTA (per source IP, identified by IP_LABELS mapping)
+# Tracks $ usage per "user" and optionally hard-stops requests with 429
+# once the cap is reached. Resets at the start of each daily / monthly period.
+# ============================================================
+USER_QUOTA_ENABLED = os.getenv("USER_QUOTA_ENABLED", "false").lower() == "true"
+USER_QUOTA_PERIOD = os.getenv("USER_QUOTA_PERIOD", "monthly").strip().lower()
+if USER_QUOTA_PERIOD not in ("daily", "monthly"):
+    USER_QUOTA_PERIOD = "monthly"
+USER_QUOTA_DEFAULT_USD = float(os.getenv("USER_QUOTA_DEFAULT_USD", "0") or "0")
+USER_QUOTA_HARD_LIMIT = os.getenv("USER_QUOTA_HARD_LIMIT", "true").lower() == "true"
+
+USER_QUOTA_CAPS: dict[str, float] = {}
+for _pair in os.getenv("USER_QUOTA_CAPS", "").split(","):
+    _pair = _pair.strip()
+    if ":" not in _pair:
+        continue
+    _label, _cap = _pair.split(":", 1)
+    _label = _label.strip()
+    try:
+        USER_QUOTA_CAPS[_label] = float(_cap.strip())
+    except ValueError:
+        print(f"  [WARN] Invalid USER_QUOTA_CAPS entry ignored: {_pair!r}", file=sys.stderr)
+
+
+def is_ip_allowed(ip: str) -> bool:
+    """Return True when ip falls inside any configured CIDR in ALLOWED_NETWORKS."""
+    if not ALLOWED_NETWORKS:
+        return False
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(addr in net for net in ALLOWED_NETWORKS)
+
+
+def label_for_ip(ip: str) -> str:
+    """Return the human label for a source IP, falling back to the IP string."""
+    if not ip:
+        return "unknown"
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip
+    return IP_LABEL_MAP.get(addr, ip)
+
+
+def cap_for_label(label: str) -> float:
+    """Resolve the spend cap (USD) for a given user label."""
+    return USER_QUOTA_CAPS.get(label, USER_QUOTA_DEFAULT_USD)
+
+
+# Allowed character set for URL-prefix user labels. Restricted so labels can't
+# inject path traversal, query strings, or other surprises into the upstream URL.
+_USER_LABEL_RE = re.compile(r"^[A-Za-z0-9_\-.]{1,32}$")
+
+
+def parse_user_prefix(path: str) -> tuple[str | None, str]:
+    """Strip a leading `/u/<label>/...` from path.
+
+    Returns (label, remaining_path). If no prefix is present or the label
+    contains forbidden chars, returns (None, original_path).
+
+    Client config example:
+        ANTHROPIC_BASE_URL=http://vm:9999/u/phong
+    Claude Code then sends /u/phong/v1/messages, which we account to
+    user 'phong' and forward as /v1/messages.
+    """
+    stripped = path.lstrip("/")
+    parts = stripped.split("/", 2)
+    if len(parts) >= 2 and parts[0] == "u" and parts[1]:
+        candidate = parts[1]
+        if _USER_LABEL_RE.match(candidate):
+            rest = parts[2] if len(parts) > 2 else ""
+            return candidate, "/" + rest
+    return None, path
+
+
+def current_user_period_key() -> str:
+    """Period key used to detect roll-over: 'YYYY-MM' or 'YYYY-MM-DD'."""
+    if USER_QUOTA_PERIOD == "daily":
+        return datetime.now().strftime("%Y-%m-%d")
+    return datetime.now().strftime("%Y-%m")
+
+
+def seconds_until_user_period_reset() -> int:
+    """Approx seconds until the current daily/monthly cap resets — for Retry-After."""
+    now = datetime.now()
+    if USER_QUOTA_PERIOD == "daily":
+        tomorrow = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        from datetime import timedelta
+        target = tomorrow + timedelta(days=1)
+    else:
+        # First of next month at 00:00 local.
+        year = now.year + (1 if now.month == 12 else 0)
+        month = 1 if now.month == 12 else now.month + 1
+        target = now.replace(year=year, month=month, day=1, hour=0, minute=0, second=0, microsecond=0)
+    return max(1, int((target - now).total_seconds()))
 
 # ============================================================
 # CONSISTENT SESSION SECRET
@@ -352,6 +547,8 @@ quota_stats = {
     "by_model": {},  # model_key -> {usage..., cost_usd, requests}
     "by_session": {},  # session_id -> {requests, tokens, cost_usd, first_seen, last_seen}
     "by_day": {},  # YYYY-MM-DD -> {requests, tokens, cost_usd}
+    "by_day_user": {},  # YYYY-MM-DD -> {user_label -> {requests, tokens, cost_usd}}
+    "by_user": {},  # label -> {cap_usd, period_key, cost_usd, requests, tokens, blocked_count, models, ...}
     "messages_requests": 0,
     "last_request_at": None,
     "period_month": "",  # YYYY-MM of current tracking period; auto-reset on rollover
@@ -427,8 +624,8 @@ QUOTA_PERSIST_PATH = os.getenv(
     os.path.join(os.path.dirname(ENV_PATH), ".quota.json"),
 )
 QUOTA_PERSIST_INTERVAL_SECONDS = int(os.getenv("QUOTA_PERSIST_INTERVAL", "30"))
-QUOTA_SCHEMA_VERSION = 2  # v1 = totals + by_model. v2 adds by_session + by_day.
-QUOTA_SCHEMA_MIN_LOAD = 1  # accept v1 files for migration
+QUOTA_SCHEMA_VERSION = 4  # v1=base, v2 +by_session+by_day, v3 +by_user, v4 +by_day_user+user.models
+QUOTA_SCHEMA_MIN_LOAD = 1  # accept v1+ files for forward migration
 _last_quota_save_at = 0.0
 
 
@@ -850,6 +1047,29 @@ def _load_quota_stats() -> bool:
     if isinstance(data.get("period_month"), str):
         quota_stats["period_month"] = data["period_month"]
 
+    # v3 — per-user buckets (absent in v1/v2, default empty).
+    bu = data.get("by_user")
+    if isinstance(bu, dict):
+        for label, bucket in bu.items():
+            if isinstance(bucket, dict) and "label" in bucket:
+                # v4 backfill: older v3 buckets won't have the models sub-dict.
+                if "models" not in bucket or not isinstance(bucket.get("models"), dict):
+                    bucket["models"] = {}
+                quota_stats["by_user"][label] = bucket
+
+    # v4 — per-day per-user buckets.
+    bdu = data.get("by_day_user")
+    if isinstance(bdu, dict):
+        for date_str, by_label in bdu.items():
+            if not isinstance(by_label, dict):
+                continue
+            cleaned = {}
+            for label, entry in by_label.items():
+                if isinstance(entry, dict):
+                    cleaned[label] = entry
+            if cleaned:
+                quota_stats["by_day_user"][date_str] = cleaned
+
     _check_monthly_reset()
     return True
 
@@ -877,6 +1097,8 @@ def _save_quota_stats(force: bool = False) -> None:
         "by_model": quota_stats["by_model"],
         "by_session": quota_stats["by_session"],
         "by_day": quota_stats["by_day"],
+        "by_day_user": quota_stats["by_day_user"],
+        "by_user": quota_stats["by_user"],
         "period_month": quota_stats["period_month"],
     }
     tmp_path = QUOTA_PERSIST_PATH + ".tmp"
@@ -1096,6 +1318,7 @@ def _record_usage(
     usage: dict,
     session_id: str | None = None,
     duration_ms: int | None = None,
+    user_label: str | None = None,
 ) -> None:
     """Accumulate a single response's usage into quota_stats and log it.
 
@@ -1152,6 +1375,7 @@ def _record_usage(
     if session_id:
         sb = quota_stats["by_session"].setdefault(session_id, {
             "session_id": session_id,
+            "user_label": user_label or "",
             "requests": 0,
             "input_tokens": 0,
             "output_tokens": 0,
@@ -1162,6 +1386,10 @@ def _record_usage(
             "first_seen": now_iso,
             "last_seen": now_iso,
         })
+        # Always refresh user_label — a session may legitimately move between
+        # users (e.g. URL prefix changes), or older buckets predate this field.
+        if user_label:
+            sb["user_label"] = user_label
         sb["requests"] += 1
         sb["input_tokens"] += in_t
         sb["output_tokens"] += out_t
@@ -1190,6 +1418,31 @@ def _record_usage(
     db["cost_usd"] += cost
     _evict_oldest("by_day", "date", QUOTA_MAX_DAYS)
 
+    if user_label:
+        record_user_usage(user_label, usage, cost, model_key=model_key)
+
+    # by_day_user — same per-day aggregation as by_day but split per user.
+    if user_label:
+        day_users = quota_stats["by_day_user"].setdefault(today, {})
+        dub = day_users.setdefault(user_label, {
+            "date": today,
+            "user_label": user_label,
+            "requests": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cost_usd": 0.0,
+        })
+        dub["requests"] += 1
+        dub["input_tokens"] += in_t
+        dub["output_tokens"] += out_t
+        dub["cache_read_input_tokens"] += cr_t
+        dub["cache_creation_input_tokens"] += cw_t
+        dub["cost_usd"] += cost
+        # Cap dates the same way by_day is capped, so the two stay in lockstep.
+        _evict_by_day_user_to_match_by_day()
+
     log(
         f"           {DIM}usage: {RESET}{CYAN}{model_key}{RESET} "
         f"{DIM}in={in_t} out={out_t} cache_r={cr_t} cache_w={cw_t} "
@@ -1217,6 +1470,19 @@ def _record_usage(
     _save_quota_stats()
 
 
+def _evict_by_day_user_to_match_by_day() -> None:
+    """Keep by_day_user's date set ⊆ by_day's date set.
+
+    by_day is the canonical date list (eviction-capped via _evict_oldest);
+    by_day_user just adds the user dimension, so we drop any date that's
+    no longer present in by_day to avoid orphan stats.
+    """
+    valid = set(quota_stats["by_day"].keys())
+    for d in list(quota_stats["by_day_user"].keys()):
+        if d not in valid:
+            del quota_stats["by_day_user"][d]
+
+
 def _evict_oldest(field: str, sort_key: str, max_entries: int) -> None:
     """Drop oldest entries from quota_stats[field] when over max_entries.
 
@@ -1232,6 +1498,112 @@ def _evict_oldest(field: str, sort_key: str, max_entries: int) -> None:
         del bucket[key]
 
 
+def _new_user_bucket(label: str) -> dict:
+    return {
+        "label": label,
+        "cap_usd": cap_for_label(label),
+        "period": USER_QUOTA_PERIOD,
+        "period_key": current_user_period_key(),
+        "period_start": datetime.now().isoformat(timespec="seconds"),
+        "cost_usd": 0.0,
+        "requests": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "blocked_count": 0,
+        "models": {},  # model_key -> {requests, input_tokens, output_tokens, cache_*, cost_usd}
+        "first_seen": datetime.now().isoformat(timespec="seconds"),
+        "last_seen": None,
+    }
+
+
+def _reset_user_bucket(bucket: dict, period_key: str) -> None:
+    """Zero out a user's counters at the start of a new period."""
+    bucket["period_key"] = period_key
+    bucket["period_start"] = datetime.now().isoformat(timespec="seconds")
+    bucket["cost_usd"] = 0.0
+    bucket["requests"] = 0
+    bucket["input_tokens"] = 0
+    bucket["output_tokens"] = 0
+    bucket["cache_read_input_tokens"] = 0
+    bucket["cache_creation_input_tokens"] = 0
+    bucket["blocked_count"] = 0
+    bucket["models"] = {}
+
+
+def get_or_create_user_bucket(label: str) -> dict:
+    """Return the per-user bucket, refreshing cap + rolling over period if needed."""
+    cur_period = current_user_period_key()
+    b = quota_stats["by_user"].get(label)
+    if b is None:
+        b = _new_user_bucket(label)
+        quota_stats["by_user"][label] = b
+        return b
+    # Live-refresh cap from env so changes apply without restart.
+    b["cap_usd"] = cap_for_label(label)
+    b["period"] = USER_QUOTA_PERIOD
+    if b.get("period_key") != cur_period:
+        _reset_user_bucket(b, cur_period)
+    return b
+
+
+def is_user_over_cap(label: str) -> tuple[bool, float, float]:
+    """Return (over, used_usd, cap_usd). cap<=0 means unlimited (never over)."""
+    if not USER_QUOTA_ENABLED:
+        return False, 0.0, 0.0
+    b = get_or_create_user_bucket(label)
+    cap = b["cap_usd"]
+    used = b["cost_usd"]
+    if cap <= 0:
+        return False, used, 0.0
+    return used >= cap, used, cap
+
+
+def record_user_usage(label: str, usage: dict, cost: float, model_key: str | None = None) -> None:
+    """Accumulate one response's cost/usage into the per-user bucket.
+
+    Runs even when USER_QUOTA_ENABLED=false — we still want the dashboard
+    to attribute spend to a user. The cap is only ENFORCED when enabled.
+
+    `model_key` enables per-user × per-model breakdown for the dashboard.
+    """
+    if not label:
+        return
+    b = get_or_create_user_bucket(label)
+    in_t = usage.get("input_tokens", 0) or 0
+    out_t = usage.get("output_tokens", 0) or 0
+    cr_t = usage.get("cache_read_input_tokens", 0) or 0
+    cw_t = usage.get("cache_creation_input_tokens", 0) or 0
+    b["cost_usd"] += cost
+    b["requests"] += 1
+    b["input_tokens"] += in_t
+    b["output_tokens"] += out_t
+    b["cache_read_input_tokens"] += cr_t
+    b["cache_creation_input_tokens"] += cw_t
+    b["last_seen"] = datetime.now().isoformat(timespec="seconds")
+
+    if model_key:
+        # Older buckets loaded from v3 .quota.json don't have this dict yet.
+        if "models" not in b or not isinstance(b.get("models"), dict):
+            b["models"] = {}
+        mb = b["models"].setdefault(model_key, {
+            "model": model_key,
+            "requests": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cost_usd": 0.0,
+        })
+        mb["requests"] += 1
+        mb["input_tokens"] += in_t
+        mb["output_tokens"] += out_t
+        mb["cache_read_input_tokens"] += cr_t
+        mb["cache_creation_input_tokens"] += cw_t
+        mb["cost_usd"] += cost
+
+
 class UsageTap:
     """Tap a /v1/messages response stream to extract `usage` and `model`.
 
@@ -1245,9 +1617,10 @@ class UsageTap:
     untouched chunk to the client. A 5 MB safety cap prevents runaway buffers.
     """
 
-    def __init__(self, content_type: str | None, path: str, session_id: str | None = None):
+    def __init__(self, content_type: str | None, path: str, session_id: str | None = None, user_label: str | None = None):
         self.path = path
         self.session_id = session_id
+        self.user_label = user_label
         self.is_messages = "v1/messages" in path
         ct = (content_type or "").lower()
         self.is_sse = "event-stream" in ct
@@ -1335,11 +1708,63 @@ class UsageTap:
         return self.model, dict(self.usage)
 
 
-def capture_identity_from_request(request: Request):
-    global identity_captured, captured_identity
+def _identity_age_days() -> float | None:
+    """Return days since CAPTURED_AT, or None if no timestamp recorded."""
+    if not CAPTURED_AT:
+        return None
+    try:
+        captured_dt = datetime.fromisoformat(CAPTURED_AT)
+    except (ValueError, TypeError):
+        return None
+    return (datetime.now() - captured_dt).total_seconds() / 86400.0
 
-    if identity_captured:
+
+def is_identity_stale() -> bool:
+    """True when captured fingerprint has aged past IDENTITY_REFRESH_DAYS."""
+    if IDENTITY_REFRESH_DAYS <= 0:
+        return False
+    age = _identity_age_days()
+    if age is None:
+        return False
+    return age >= IDENTITY_REFRESH_DAYS
+
+
+def capture_identity_from_request(request: Request, path: str = "") -> None:
+    global identity_captured, captured_identity, CAPTURED_AT
+
+    # Gate every capture (initial OR refresh) on the same two checks so a
+    # /dashboard or HEAD / can't ever set or re-set the fingerprint.
+    if not path.lstrip("/").startswith("v1/messages"):
         return
+    user_agent = request.headers.get("user-agent", "").lower()
+    if not user_agent.startswith("claude-cli"):
+        return
+
+    # Already captured and still fresh — nothing to do.
+    if identity_captured and not is_identity_stale():
+        return
+
+    # CAPTURE_LOCK_FROM_IP narrows the (re-)capturer to one specific IP. We
+    # MUST check this BEFORE clearing the existing identity, otherwise a
+    # stray request from a non-locked IP arriving past the refresh threshold
+    # would wipe the fingerprint and then fail the IP gate, leaving the pool
+    # un-locked.
+    if CAPTURE_LOCK_FROM_IP:
+        client_ip = (request.client.host if request.client else "") or ""
+        if client_ip != CAPTURE_LOCK_FROM_IP:
+            return
+
+    if identity_captured and is_identity_stale():
+        age = _identity_age_days()
+        log("")
+        log(
+            f"  {BG_YELLOW}{BOLD} IDENTITY REFRESH {RESET} "
+            f"{YELLOW}captured {age:.1f}d ago (≥ {IDENTITY_REFRESH_DAYS}d threshold) "
+            f"— clearing and re-capturing from this request{RESET}"
+        )
+        captured_identity.clear()
+        identity_captured = False
+        # Fall through to the capture block below.
 
     req_headers = {k.lower(): v for k, v in request.headers.items()}
 
@@ -1351,6 +1776,11 @@ def capture_identity_from_request(request: Request):
 
     if captured_identity:
         identity_captured = True
+
+        # Stamp capture time so the age-based refresh has a reference point.
+        now_iso = datetime.now().isoformat(timespec="seconds")
+        save_to_env("CAPTURED_AT", now_iso)
+        CAPTURED_AT = now_iso
 
         # Save session secret for consistent ID generation across devices
         save_to_env("SESSION_SECRET", SESSION_SECRET)
@@ -1367,6 +1797,9 @@ def capture_identity_from_request(request: Request):
         for h, v in captured_identity.items():
             display = mask_value(v, 40) if len(v) > 50 else v
             log(f"    {MAGENTA}{h}{RESET}: {WHITE}{display}{RESET}")
+        if IDENTITY_REFRESH_DAYS > 0:
+            log(f"  {DIM}auto-refresh in {IDENTITY_REFRESH_DAYS} days "
+                f"(set IDENTITY_REFRESH_DAYS=0 to disable){RESET}")
         log(f"  {YELLOW}Da luu vao .env - Copy sang cac may khac!{RESET}")
         log("")
 
@@ -1411,13 +1844,38 @@ def mask_value(val: str, show=12) -> str:
 
 
 def print_status():
-    identity_status = f"{GREEN}{len(captured_identity)} headers locked{RESET}" if identity_captured else f"{YELLOW}Waiting for first request...{RESET}"
+    if identity_captured:
+        age = _identity_age_days()
+        if IDENTITY_REFRESH_DAYS > 0 and age is not None:
+            refresh_in = max(0.0, IDENTITY_REFRESH_DAYS - age)
+            age_str = f"{DIM}(captured {age:.1f}d ago, refresh in {refresh_in:.1f}d){RESET}"
+        elif IDENTITY_REFRESH_DAYS > 0:
+            age_str = f"{DIM}(no CAPTURED_AT — will stamp on next request){RESET}"
+        else:
+            age_str = f"{DIM}(auto-refresh disabled){RESET}"
+        identity_status = f"{GREEN}{len(captured_identity)} headers locked{RESET} {age_str}"
+    else:
+        identity_status = f"{YELLOW}Waiting for first request...{RESET}"
 
     jitter_status = f"{GREEN}ON ({TIMING_JITTER_MIN_MS}-{TIMING_JITTER_MAX_MS}ms){RESET}" if TIMING_JITTER_ENABLED else f"{YELLOW}OFF{RESET}"
     telemetry_status = f"{GREEN}{len(BLOCKED_PATH_PATTERNS)} patterns blocked{RESET}"
 
+    if DEPLOY_MODE == "server":
+        mode_status = f"{GREEN}server{RESET} {DIM}(bind {LOCAL_HOST}:{LOCAL_PORT}, {len(ALLOWED_NETWORKS)} CIDR whitelisted){RESET}"
+    else:
+        mode_status = f"{YELLOW}local{RESET} {DIM}(127.0.0.1:{LOCAL_PORT}, no whitelist){RESET}"
+
+    if USER_QUOTA_ENABLED:
+        uq_status = (
+            f"{GREEN}ON{RESET} {DIM}({USER_QUOTA_PERIOD}, default cap "
+            f"${USER_QUOTA_DEFAULT_USD:.2f}, hard={USER_QUOTA_HARD_LIMIT}){RESET}"
+        )
+    else:
+        uq_status = f"{YELLOW}OFF{RESET}"
+
     print(f"  {DIM}{'─' * 60}{RESET}")
-    print(f"  {CYAN} Server      {RESET}{WHITE}http://localhost:{LOCAL_PORT}{RESET}")
+    print(f"  {CYAN} Mode        {RESET}{mode_status}")
+    print(f"  {CYAN} Server      {RESET}{WHITE}http://{'localhost' if LOCAL_HOST in ('127.0.0.1', '0.0.0.0') else LOCAL_HOST}:{LOCAL_PORT}{RESET}")
     print(f"  {CYAN} Target      {RESET}{WHITE}{ANTHROPIC_BASE_URL}{RESET}")
     print(f"  {DIM}{'─' * 60}{RESET}")
     print(f"  {CYAN} Identity    {RESET}{identity_status}")
@@ -1448,6 +1906,7 @@ def print_status():
     else:
         quota_status = f"{YELLOW}OFF{RESET}"
     print(f"  {CYAN} Quota Track {RESET}{quota_status}")
+    print(f"  {CYAN} User Quota  {RESET}{uq_status}")
     if QUOTA_TRACKING_ENABLED:
         print(f"  {CYAN} Dashboard   {RESET}{WHITE}http://localhost:{LOCAL_PORT}/dashboard{RESET}")
     if LOKI_ENABLED:
@@ -1500,6 +1959,110 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Claude Cloak", lifespan=lifespan)
+
+
+class AccessControlMiddleware:
+    """Server-mode access gate: IP whitelist + per-user spend cap.
+
+    Implemented as a pure ASGI middleware (not @app.middleware("http"))
+    because Starlette's BaseHTTPMiddleware wraps streaming responses in a
+    TaskGroup and surfaces benign client disconnects as
+    "ExceptionGroup: unhandled errors in a TaskGroup" — noisy and confusing
+    when half our traffic is SSE-streamed /v1/messages responses.
+
+    - In local mode this is a no-op (preserves the original single-machine UX).
+    - In server mode every request must come from an IP inside ALLOWED_IPS.
+    - When USER_QUOTA_ENABLED, /v1/ requests from a user that exceeded their
+      cap are short-circuited with HTTP 429 (plus Retry-After).
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        client = scope.get("client")
+        client_ip = client[0] if client else ""
+        raw_path = scope.get("path") or "/"
+        method = scope.get("method", "GET")
+
+        url_label, stripped_path = parse_user_prefix(raw_path)
+        user_label = url_label or label_for_ip(client_ip)
+
+        # Stash in scope.state so the downstream handler can read via
+        # request.state.<attr> — Starlette's Request.state is a thin wrapper
+        # around scope["state"] (a plain dict).
+        scope.setdefault("state", {})
+        state = scope["state"]
+        state["client_ip"] = client_ip
+        state["url_user_label"] = url_label
+        state["stripped_path"] = stripped_path
+        state["user_label"] = user_label
+
+        # IP whitelist — applies to ALL paths in server mode (dashboard included).
+        if DEPLOY_MODE == "server" and not is_ip_allowed(client_ip):
+            log(
+                f"  {BG_RED}{BOLD} 403 {RESET} {RED}IP not allowed: "
+                f"{client_ip or '<unknown>'} → {method} {raw_path}{RESET}"
+            )
+            await JSONResponse({"error": "forbidden"}, status_code=403)(scope, receive, send)
+            return
+
+        # Admin endpoints additionally require the caller to come from ADMIN_IPS.
+        if raw_path.startswith("/admin/") and client_ip not in ADMIN_IPS:
+            await JSONResponse({"error": "forbidden"}, status_code=403)(scope, receive, send)
+            return
+
+        # Stats endpoints — gate to STATS_VIEW_IPS when STATS_PRIVATE is enabled.
+        if STATS_PRIVATE:
+            is_stats = (
+                raw_path in ("/health", "/quota", "/quota/users", "/dashboard")
+                or raw_path.startswith("/quota/users/")
+            )
+            if is_stats and client_ip not in STATS_VIEW_IPS:
+                await JSONResponse({"error": "forbidden"}, status_code=403)(scope, receive, send)
+                return
+
+        # Per-user spend cap — only meaningful for upstream API calls. Use the
+        # URL-stripped path so /u/phong/v1/messages is treated as /v1/messages.
+        if (
+            USER_QUOTA_ENABLED
+            and USER_QUOTA_HARD_LIMIT
+            and stripped_path.startswith("/v1/")
+            and not is_blocked_path(stripped_path.lstrip("/"))
+        ):
+            over, used, cap = is_user_over_cap(user_label)
+            if over:
+                bucket = get_or_create_user_bucket(user_label)
+                bucket["blocked_count"] += 1
+                retry = seconds_until_user_period_reset()
+                log(
+                    f"  {BG_YELLOW}{BOLD} 429 {RESET} {YELLOW}user '{user_label}' over cap "
+                    f"${used:.2f}/${cap:.2f} (period={USER_QUOTA_PERIOD}, reset in {retry}s){RESET}"
+                )
+                await JSONResponse(
+                    {
+                        "type": "error",
+                        "error": {
+                            "type": "user_quota_exceeded",
+                            "message": (
+                                f"User '{user_label}' exceeded {USER_QUOTA_PERIOD} cap "
+                                f"${cap:.2f} (used ${used:.4f}). Resets at next period boundary."
+                            ),
+                        },
+                    },
+                    status_code=429,
+                    headers={"Retry-After": str(retry)},
+                )(scope, receive, send)
+                return
+
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(AccessControlMiddleware)
 
 
 # Headers không forward từ client request
@@ -1593,6 +2156,15 @@ async def health():
             ],
             "by_session_count": len(quota_stats["by_session"]),
             "by_day_count": len(quota_stats["by_day"]),
+            "by_user_count": len(quota_stats["by_user"]),
+        },
+        "deploy": {
+            "mode": DEPLOY_MODE,
+            "bind_host": LOCAL_HOST,
+            "allowed_ips": [str(n) for n in ALLOWED_NETWORKS],
+            "labels_configured": len(IP_LABEL_MAP),
+            "user_quota_enabled": USER_QUOTA_ENABLED,
+            "user_quota_period": USER_QUOTA_PERIOD,
         },
     }
 
@@ -1878,6 +2450,25 @@ DASHBOARD_HTML = """<!doctype html>
     color: var(--text-soft);
     margin-right: 4px;
   }
+  td .badge.ok     { color: var(--ok); }
+  td .badge.warn   { color: var(--warn); }
+  td .badge.danger { color: var(--danger); }
+
+  /* Sub-rows under a group (e.g. user breakdown under a date row). */
+  tr.sub td {
+    background: var(--bg-1);
+    color: var(--text-soft);
+    font-size: 13px;
+    border-top: 1px dashed var(--border-soft);
+  }
+  tr.sub td:first-child {
+    padding-left: 36px;
+    color: var(--muted);
+  }
+  tr.group-head td {
+    background: var(--bg-2);
+    font-weight: 600;
+  }
   td .timestamp {
     font-family: var(--font-mono);
     font-size: 12px;
@@ -1956,6 +2547,11 @@ DASHBOARD_HTML = """<!doctype html>
         <div class="card-meta">on /v1/messages</div>
       </div>
       <div class="card">
+        <div class="card-label">Active users</div>
+        <div class="card-value num" id="user-count">0</div>
+        <div class="card-meta" id="user-count-meta">via /u/&lt;name&gt; or IP label</div>
+      </div>
+      <div class="card">
         <div class="card-label">Distinct sessions</div>
         <div class="card-value num" id="session-count">0</div>
         <div class="card-meta">x-claude-code-session-id</div>
@@ -1977,6 +2573,21 @@ DASHBOARD_HTML = """<!doctype html>
         <div class="card-label">Cache write</div>
         <div class="card-value num" id="cache-write">0</div>
         <div class="card-meta">125% (5m) / 200% (1h)</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Avg cost / request</div>
+        <div class="card-value num" id="avg-cost">$0.0000</div>
+        <div class="card-meta">across all /v1/messages</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Cache hit rate</div>
+        <div class="card-value num" id="cache-hit-rate">0%</div>
+        <div class="card-meta">cache_read / total input</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Top spender</div>
+        <div class="card-value" id="top-spender" style="font-size:22px">—</div>
+        <div class="card-meta" id="top-spender-cost"></div>
       </div>
     </div>
   </section>
@@ -2014,6 +2625,20 @@ DASHBOARD_HTML = """<!doctype html>
           <span class="sub">lifetime</span>
         </div>
         <div class="chart-canvas-wrap"><canvas id="model-chart"></canvas></div>
+      </div>
+      <div class="panel" id="user-chart-panel" style="display:none">
+        <div class="panel-title">
+          <h3>Cost by user</h3>
+          <span class="sub">current period</span>
+        </div>
+        <div class="chart-canvas-wrap"><canvas id="user-chart"></canvas></div>
+      </div>
+      <div class="panel" id="daily-user-chart-panel" style="display:none">
+        <div class="panel-title">
+          <h3>Daily cost stacked by user</h3>
+          <span class="sub" id="daily-user-range">—</span>
+        </div>
+        <div class="chart-canvas-wrap"><canvas id="daily-user-chart"></canvas></div>
       </div>
     </div>
   </section>
@@ -2070,6 +2695,32 @@ DASHBOARD_HTML = """<!doctype html>
     </div>
   </section>
 
+  <!-- Per-user (always shown once any user has activity) -->
+  <section id="user-section" style="display:none">
+    <div class="section-head">
+      <h2 id="user-section-title">Per-User Breakdown</h2>
+      <span class="hint" id="user-section-hint">Attribution by URL prefix <code>/u/&lt;name&gt;/</code> or by IP label.</span>
+    </div>
+    <div class="panel">
+      <table id="user-table">
+        <thead><tr>
+          <th>User</th>
+          <th>Cost / Cap</th>
+          <th class="num">% of cap</th>
+          <th class="num">Requests</th>
+          <th class="num">Tokens (in/out)</th>
+          <th class="num">Blocked</th>
+          <th>Last seen</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="empty-state" id="user-empty" style="display:none">
+        <strong>No users tracked yet</strong>
+        User buckets appear after the first <code>/v1/messages</code> response.
+      </div>
+    </div>
+  </section>
+
   <!-- Per-session -->
   <section>
     <div class="section-head">
@@ -2079,6 +2730,7 @@ DASHBOARD_HTML = """<!doctype html>
     <div class="panel">
       <table id="session-table">
         <thead><tr>
+          <th>User</th>
           <th>Session</th>
           <th>Models</th>
           <th class="num">Requests</th>
@@ -2162,7 +2814,7 @@ DASHBOARD_HTML = """<!doctype html>
   }
 
   /*  Chart factories  ---------------------------------------------------- */
-  let dailyChart = null, modelChart = null;
+  let dailyChart = null, modelChart = null, userChart = null, dailyUserChart = null;
   const PALETTE = ['#c084fc','#67e8f9','#fbbf24','#4ade80','#f87171','#60a5fa','#f472b6','#a78bfa'];
   const GRID_COLOR = '#22222e';
   const TICK_COLOR = '#7c7c8c';
@@ -2273,6 +2925,86 @@ DASHBOARD_HTML = """<!doctype html>
     }
   }
 
+  function buildUserChart(users) {
+    const labels = users.map(u => u.label);
+    const data = users.map(u => Number(u.cost_usd) || 0);
+    const colors = labels.map((_, i) => PALETTE[i % PALETTE.length]);
+    const cfg = {
+      type: 'doughnut',
+      data: {
+        labels,
+        datasets: [{ data, backgroundColor: colors, borderColor: '#111118', borderWidth: 2, hoverOffset: 4 }],
+      },
+      options: {
+        ...COMMON_OPTS,
+        cutout: '62%',
+        plugins: {
+          legend: { position: 'bottom', labels: { color: '#b8b8c4', boxWidth: 10, font: { size: 11 }, padding: 10 } },
+          tooltip: {
+            ...COMMON_OPTS.plugins.tooltip,
+            callbacks: { label: ctx => ' ' + ctx.label + ': ' + fmtCostExact(ctx.parsed) },
+          },
+        },
+      },
+    };
+    if (!userChart) {
+      userChart = new Chart(document.getElementById('user-chart'), cfg);
+    } else {
+      userChart.data = cfg.data; userChart.update();
+    }
+  }
+
+  function buildDailyUserChart(days) {
+    // days = [{date, users: [{user_label, cost_usd}, ...]}]; build stacked bar.
+    const dateLabels = days.map(d => d.date.slice(5));   // MM-DD
+    const userSet = new Map();
+    for (const d of days) {
+      for (const u of (d.users || [])) {
+        if (!userSet.has(u.user_label)) userSet.set(u.user_label, userSet.size);
+      }
+    }
+    const datasets = [...userSet.keys()].map((label, i) => ({
+      label,
+      data: days.map(d => {
+        const u = (d.users || []).find(x => x.user_label === label);
+        return u ? Number(u.cost_usd) || 0 : 0;
+      }),
+      backgroundColor: PALETTE[i % PALETTE.length],
+      borderColor: '#111118',
+      borderWidth: 1,
+      stack: 'cost',
+    }));
+    const cfg = {
+      type: 'bar',
+      data: { labels: dateLabels, datasets },
+      options: {
+        ...COMMON_OPTS,
+        plugins: {
+          legend: { position: 'bottom', labels: { color: '#b8b8c4', boxWidth: 10, font: { size: 11 }, padding: 8 } },
+          tooltip: {
+            ...COMMON_OPTS.plugins.tooltip,
+            callbacks: {
+              label: ctx => ' ' + ctx.dataset.label + ': ' + fmtCostExact(ctx.parsed.y),
+              footer: items => {
+                const total = items.reduce((s, it) => s + (it.parsed.y || 0), 0);
+                return 'Total: ' + fmtCostExact(total);
+              },
+            },
+          },
+        },
+        scales: {
+          x: { stacked: true, grid: { color: GRID_COLOR }, ticks: { color: TICK_COLOR } },
+          y: { stacked: true, grid: { color: GRID_COLOR }, ticks: { color: TICK_COLOR, callback: v => '$' + v } },
+        },
+      },
+    };
+    if (!dailyUserChart) {
+      dailyUserChart = new Chart(document.getElementById('daily-user-chart'), cfg);
+    } else {
+      dailyUserChart.data = cfg.data; dailyUserChart.update();
+    }
+  }
+
   /*  Main refresh loop  --------------------------------------------------- */
   async function refresh() {
     let q;
@@ -2317,6 +3049,28 @@ DASHBOARD_HTML = """<!doctype html>
         ? 'No requests recorded yet'
         : `Across ${fmtCount.format(q.messages_requests)} requests on ${(q.by_model || []).length} model(s)`;
 
+    /* Derived totals cards */
+    const reqs = q.messages_requests || 0;
+    const avg = reqs > 0 ? (q.cost_usd_total || 0) / reqs : 0;
+    document.getElementById('avg-cost').textContent = fmtCostExact(avg);
+
+    const inT = t.input_tokens || 0;
+    const crT = t.cache_read_input_tokens || 0;
+    const denom = inT + crT;
+    const hitRate = denom > 0 ? (crT / denom) * 100 : 0;
+    document.getElementById('cache-hit-rate').textContent = hitRate.toFixed(1) + '%';
+
+    const topUser = ((q.user_quota || {}).users || [])[0];
+    const topSpenderEl = document.getElementById('top-spender');
+    const topSpenderCostEl = document.getElementById('top-spender-cost');
+    if (topUser) {
+      topSpenderEl.textContent = topUser.label;
+      topSpenderCostEl.textContent = fmtCostExact(topUser.cost_usd) + ' this period';
+    } else {
+      topSpenderEl.textContent = '—';
+      topSpenderCostEl.textContent = 'no user activity yet';
+    }
+
     /* Rate limits */
     const rl = q.rate_limits || {};
     const rlEl = document.getElementById('rate-limits');
@@ -2349,9 +3103,16 @@ DASHBOARD_HTML = """<!doctype html>
     document.getElementById('daily-empty').style.display = days.length ? 'none' : 'block';
     document.getElementById('daily-table').style.display = days.length ? '' : 'none';
     for (const d of days) {
+      const dayUsers = d.users || [];
+      const hasUsers = dayUsers.length > 0;
+      const groupCls = hasUsers ? 'group-head' : '';
+      const userCol = hasUsers
+        ? `<td><span class="num">${d.date}</span></td>`
+        : `<td><span class="num">${d.date}</span></td>`;
       const tr = document.createElement('tr');
+      tr.className = groupCls;
       tr.innerHTML = `
-        <td><span class="num">${d.date}</span></td>
+        ${userCol}
         <td class="num">${fmtCount.format(d.requests)}</td>
         <td class="num">${fmtNum(d.input_tokens)}</td>
         <td class="num">${fmtNum(d.output_tokens)}</td>
@@ -2359,6 +3120,20 @@ DASHBOARD_HTML = """<!doctype html>
         <td class="num">${fmtNum(d.cache_creation_input_tokens)}</td>
         <td class="num cost">${fmtCostExact(d.cost_usd)}</td>`;
       dailyTb.appendChild(tr);
+      // Per-user sub-rows (sorted by cost desc on the backend).
+      for (const u of dayUsers) {
+        const sub = document.createElement('tr');
+        sub.className = 'sub';
+        sub.innerHTML = `
+          <td>${u.user_label || '—'}</td>
+          <td class="num">${fmtCount.format(u.requests)}</td>
+          <td class="num">${fmtNum(u.input_tokens)}</td>
+          <td class="num">${fmtNum(u.output_tokens)}</td>
+          <td class="num">${fmtNum(u.cache_read_input_tokens)}</td>
+          <td class="num">${fmtNum(u.cache_creation_input_tokens)}</td>
+          <td class="num cost">${fmtCostExact(u.cost_usd)}</td>`;
+        dailyTb.appendChild(sub);
+      }
     }
 
     /* Per-model table + chart */
@@ -2369,7 +3144,9 @@ DASHBOARD_HTML = """<!doctype html>
     document.getElementById('model-empty').style.display = models.length ? 'none' : 'block';
     document.getElementById('model-table').style.display = models.length ? '' : 'none';
     for (const m of models) {
+      const modelUsers = m.users || [];
       const tr = document.createElement('tr');
+      tr.className = modelUsers.length ? 'group-head' : '';
       tr.innerHTML = `
         <td><strong>${m.model}</strong></td>
         <td class="num">${fmtCount.format(m.requests)}</td>
@@ -2379,6 +3156,107 @@ DASHBOARD_HTML = """<!doctype html>
         <td class="num">${fmtNum(m.cache_creation_input_tokens)}</td>
         <td class="num cost">${fmtCostExact(m.cost_usd)}</td>`;
       modelTb.appendChild(tr);
+      for (const u of modelUsers) {
+        const sub = document.createElement('tr');
+        sub.className = 'sub';
+        sub.innerHTML = `
+          <td>${u.user_label || '—'}</td>
+          <td class="num">${fmtCount.format(u.requests)}</td>
+          <td class="num">${fmtNum(u.input_tokens)}</td>
+          <td class="num">${fmtNum(u.output_tokens)}</td>
+          <td class="num">—</td>
+          <td class="num">—</td>
+          <td class="num cost">${fmtCostExact(u.cost_usd)}</td>`;
+        modelTb.appendChild(sub);
+      }
+    }
+
+    /* Per-user breakdown — always shown once at least one user has activity.
+       The cap columns only carry meaning when USER_QUOTA_ENABLED is true. */
+    const uq = q.user_quota || {};
+    const users = uq.users || [];
+    const userSection = document.getElementById('user-section');
+    const userTitle = document.getElementById('user-section-title');
+    const userHint = document.getElementById('user-section-hint');
+    document.getElementById('user-count').textContent = fmtCount.format(users.length);
+
+    if (uq.enabled) {
+      userTitle.textContent = 'Per-User Quota';
+      userHint.innerHTML = `Cap enforced per <code>${uq.period || 'monthly'}</code> period. Resets in ${
+        uq.reset_in_seconds != null ? Math.ceil(uq.reset_in_seconds / 86400) + 'd' : '—'
+      }.`;
+    } else {
+      userTitle.textContent = 'Per-User Breakdown';
+      userHint.innerHTML = 'Attribution by URL prefix <code>/u/&lt;name&gt;/</code> or by IP label. Enable <code>USER_QUOTA_ENABLED</code> to add caps.';
+    }
+
+    if (users.length) {
+      userSection.style.display = '';
+      const userTb = document.querySelector('#user-table tbody');
+      userTb.innerHTML = '';
+      document.getElementById('user-empty').style.display = 'none';
+      document.getElementById('user-table').style.display = '';
+      for (const u of users) {
+        const tr = document.createElement('tr');
+        const cap = Number(u.cap_usd) || 0;
+        const used = Number(u.cost_usd) || 0;
+        const pct = u.cost_pct == null ? null : Number(u.cost_pct);
+        let pctCell = '<span class="badge">—</span>';
+        if (uq.enabled && pct != null) {
+          const cls = pct >= 100 ? 'danger' : pct >= 80 ? 'warn' : 'ok';
+          pctCell = `<span class="badge ${cls}">${pct.toFixed(1)}%</span>`;
+        }
+        let capCell;
+        if (!uq.enabled) {
+          capCell = fmtCostExact(used);
+        } else if (cap > 0) {
+          capCell = `${fmtCostExact(used)} / ${fmtCostExact(cap)}`;
+        } else {
+          capCell = `${fmtCostExact(used)} <span class="badge">unlimited</span>`;
+        }
+        const lastSeen = u.last_seen
+          ? `<span class="timestamp">${fmtRelativeTime(u.last_seen)}<small>${u.last_seen.replace('T',' ')}</small></span>`
+          : '—';
+        tr.innerHTML = `
+          <td><strong>${u.label}</strong></td>
+          <td class="num cost">${capCell}</td>
+          <td class="num">${pctCell}</td>
+          <td class="num">${fmtCount.format(u.requests || 0)}</td>
+          <td class="num">${fmtNum(u.input_tokens)} / ${fmtNum(u.output_tokens)}</td>
+          <td class="num">${uq.enabled ? fmtCount.format(u.blocked_count || 0) : '—'}</td>
+          <td>${lastSeen}</td>`;
+        userTb.appendChild(tr);
+      }
+    } else {
+      // No users yet — only show the section in server mode so local users
+      // aren't shown an empty per-user widget that doesn't apply to them.
+      userSection.style.display = (q.deploy_mode === 'server') ? '' : 'none';
+      if (q.deploy_mode === 'server') {
+        document.getElementById('user-empty').style.display = 'block';
+        document.getElementById('user-table').style.display = 'none';
+      }
+    }
+
+    /* Cost-by-user doughnut */
+    const userChartPanel = document.getElementById('user-chart-panel');
+    if (users.length >= 1 && window.Chart) {
+      userChartPanel.style.display = '';
+      buildUserChart(users);
+    } else {
+      userChartPanel.style.display = 'none';
+    }
+
+    /* Daily cost stacked by user */
+    const daysForUserChart = (q.by_day || []).slice().reverse(); // chronological for chart
+    const hasUserSplit = daysForUserChart.some(d => (d.users || []).length > 0);
+    const dailyUserPanel = document.getElementById('daily-user-chart-panel');
+    if (hasUserSplit && window.Chart) {
+      dailyUserPanel.style.display = '';
+      document.getElementById('daily-user-range').textContent =
+        daysForUserChart.length ? daysForUserChart[0].date + ' → ' + daysForUserChart[daysForUserChart.length - 1].date : '';
+      buildDailyUserChart(daysForUserChart);
+    } else {
+      dailyUserPanel.style.display = 'none';
     }
 
     /* Per-session table */
@@ -2397,7 +3275,11 @@ DASHBOARD_HTML = """<!doctype html>
       const lastSeen = s.last_seen
         ? `<span class="timestamp">${fmtRelativeTime(s.last_seen)}<small>${s.last_seen.replace('T',' ')}</small></span>`
         : '—';
+      const userCell = s.user_label
+        ? `<strong>${s.user_label}</strong>`
+        : '<span class="badge">—</span>';
       tr.innerHTML = `
+        <td>${userCell}</td>
         <td class="session-id" title="${id}">${idHead}<span class="session-tail">${idTail}</span></td>
         <td>${modelBadges || '<span class="badge">—</span>'}</td>
         <td class="num">${fmtCount.format(s.requests)}</td>
@@ -2451,12 +3333,31 @@ async def quota():
                 "cache_read_input_tokens": v["cache_read_input_tokens"],
                 "cache_creation_input_tokens": v["cache_creation_input_tokens"],
                 "cost_usd": round(v["cost_usd"], 4),
+                # Users that touched this model (aggregated from by_user[*].models).
+                "users": sorted(
+                    (
+                        {
+                            "user_label": ub.get("label"),
+                            "requests": (ub.get("models", {}).get(v["model"], {}) or {}).get("requests", 0),
+                            "input_tokens": (ub.get("models", {}).get(v["model"], {}) or {}).get("input_tokens", 0),
+                            "output_tokens": (ub.get("models", {}).get(v["model"], {}) or {}).get("output_tokens", 0),
+                            "cost_usd": round(
+                                (ub.get("models", {}).get(v["model"], {}) or {}).get("cost_usd", 0.0), 4
+                            ),
+                        }
+                        for ub in quota_stats["by_user"].values()
+                        if isinstance(ub.get("models"), dict) and v["model"] in ub["models"]
+                    ),
+                    key=lambda x: x["cost_usd"],
+                    reverse=True,
+                ),
             }
             for v in quota_stats["by_model"].values()
         ],
         "by_session": [
             {
                 "session_id": s["session_id"],
+                "user_label": s.get("user_label", ""),
                 "requests": s["requests"],
                 "input_tokens": s["input_tokens"],
                 "output_tokens": s["output_tokens"],
@@ -2478,11 +3379,46 @@ async def quota():
                 "cache_read_input_tokens": d["cache_read_input_tokens"],
                 "cache_creation_input_tokens": d["cache_creation_input_tokens"],
                 "cost_usd": round(d["cost_usd"], 4),
+                # Top users contributing to this date (sorted by cost desc).
+                "users": sorted(
+                    (
+                        {
+                            "user_label": u["user_label"],
+                            "requests": u["requests"],
+                            "input_tokens": u["input_tokens"],
+                            "output_tokens": u["output_tokens"],
+                            "cache_read_input_tokens": u["cache_read_input_tokens"],
+                            "cache_creation_input_tokens": u["cache_creation_input_tokens"],
+                            "cost_usd": round(u["cost_usd"], 4),
+                        }
+                        for u in (quota_stats["by_day_user"].get(d["date"], {}) or {}).values()
+                    ),
+                    key=lambda x: x["cost_usd"],
+                    reverse=True,
+                ),
             }
             for d in days
         ],
         "period_month": quota_stats["period_month"],
         "monthly_reset_enabled": QUOTA_MONTHLY_RESET,
+        "deploy_mode": DEPLOY_MODE,
+        # `users` is always populated when at least one labelled request has
+        # been recorded, even with USER_QUOTA_ENABLED=false — that way the
+        # dashboard can attribute spend to users regardless of cap config.
+        # `cap_enforced` lets the UI decide whether to show cap progress bars.
+        "user_quota": {
+            "enabled": USER_QUOTA_ENABLED,
+            "cap_enforced": USER_QUOTA_ENABLED and USER_QUOTA_HARD_LIMIT,
+            "period": USER_QUOTA_PERIOD,
+            "hard_limit": USER_QUOTA_HARD_LIMIT,
+            "default_cap_usd": USER_QUOTA_DEFAULT_USD,
+            "reset_in_seconds": seconds_until_user_period_reset() if USER_QUOTA_ENABLED else None,
+            "users": sorted(
+                (_user_bucket_view(b) for b in quota_stats["by_user"].values()),
+                key=lambda u: u.get("cost_usd") or 0.0,
+                reverse=True,
+            ),
+        },
         "rate_limits": {
             "requests_remaining": rl.get("requests-remaining"),
             "requests_limit": rl.get("requests-limit"),
@@ -2503,6 +3439,109 @@ async def quota():
     return summary
 
 
+def _user_bucket_view(b: dict) -> dict:
+    """Public-facing shape of a per-user bucket (rounded cost, derived %)."""
+    cap = float(b.get("cap_usd") or 0.0)
+    used = float(b.get("cost_usd") or 0.0)
+    pct = round((used / cap) * 100, 2) if cap > 0 else None
+    raw_models = b.get("models") or {}
+    models_view = sorted(
+        (
+            {
+                "model": m.get("model", k),
+                "requests": m.get("requests", 0),
+                "input_tokens": m.get("input_tokens", 0),
+                "output_tokens": m.get("output_tokens", 0),
+                "cache_read_input_tokens": m.get("cache_read_input_tokens", 0),
+                "cache_creation_input_tokens": m.get("cache_creation_input_tokens", 0),
+                "cost_usd": round(float(m.get("cost_usd") or 0.0), 6),
+            }
+            for k, m in raw_models.items() if isinstance(m, dict)
+        ),
+        key=lambda x: x["cost_usd"],
+        reverse=True,
+    )
+    return {
+        "label": b.get("label"),
+        "cap_usd": round(cap, 4),
+        "cost_usd": round(used, 6),
+        "cost_pct": pct,
+        "over_cap": (cap > 0 and used >= cap),
+        "period": b.get("period", USER_QUOTA_PERIOD),
+        "period_key": b.get("period_key"),
+        "period_start": b.get("period_start"),
+        "requests": b.get("requests", 0),
+        "input_tokens": b.get("input_tokens", 0),
+        "output_tokens": b.get("output_tokens", 0),
+        "cache_read_input_tokens": b.get("cache_read_input_tokens", 0),
+        "cache_creation_input_tokens": b.get("cache_creation_input_tokens", 0),
+        "blocked_count": b.get("blocked_count", 0),
+        "models": models_view,
+        "first_seen": b.get("first_seen"),
+        "last_seen": b.get("last_seen"),
+    }
+
+
+@app.get("/quota/users")
+async def quota_users():
+    """List every per-user bucket with cap usage."""
+    # Refresh period roll-over on labels we already know about.
+    for label in list(quota_stats["by_user"].keys()):
+        get_or_create_user_bucket(label)
+    users = sorted(
+        (_user_bucket_view(b) for b in quota_stats["by_user"].values()),
+        key=lambda u: u.get("cost_usd") or 0.0,
+        reverse=True,
+    )
+    return {
+        "enabled": USER_QUOTA_ENABLED,
+        "period": USER_QUOTA_PERIOD,
+        "hard_limit": USER_QUOTA_HARD_LIMIT,
+        "default_cap_usd": USER_QUOTA_DEFAULT_USD,
+        "reset_in_seconds": seconds_until_user_period_reset() if USER_QUOTA_ENABLED else None,
+        "users": users,
+    }
+
+
+@app.get("/quota/users/{label}")
+async def quota_user(label: str):
+    b = quota_stats["by_user"].get(label)
+    if b is None:
+        raise HTTPException(status_code=404, detail="user not found")
+    get_or_create_user_bucket(label)  # period roll-over check
+    return _user_bucket_view(b)
+
+
+@app.get("/u/{label}/whoami")
+async def whoami(label: str):
+    """Client setup verification: returns the bucket for the URL-prefix label.
+
+    Hitting GET http://vm:9999/u/phong/whoami from a whitelisted client
+    confirms (a) the IP is allowed, (b) the label is parsed correctly,
+    (c) the cap is what the operator configured.
+    """
+    if not _USER_LABEL_RE.match(label):
+        raise HTTPException(status_code=400, detail="invalid label")
+    b = get_or_create_user_bucket(label) if USER_QUOTA_ENABLED else None
+    return {
+        "label": label,
+        "user_quota_enabled": USER_QUOTA_ENABLED,
+        "bucket": _user_bucket_view(b) if b else None,
+    }
+
+
+@app.post("/admin/quota/reset/{label}")
+async def admin_reset_user(label: str):
+    """Manually zero out one user's cap counters (auth via ADMIN_IPS middleware)."""
+    b = quota_stats["by_user"].get(label)
+    if b is None:
+        raise HTTPException(status_code=404, detail="user not found")
+    _reset_user_bucket(b, current_user_period_key())
+    _save_quota_stats(force=True)
+    log(f"  {BG_GREEN}{BOLD} RESET {RESET} {GREEN}per-user quota reset for '{label}'{RESET}")
+    return _user_bucket_view(b)
+
+
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"])
 async def proxy(path: str, request: Request):
     global request_count, blocked_requests_count
@@ -2510,6 +3549,13 @@ async def proxy(path: str, request: Request):
     req_id = request_count
 
     now = datetime.now().strftime("%H:%M:%S")
+
+    # Honour URL user-prefix (/u/<label>/<real-path>): drop the prefix so the
+    # rest of this function works on the real upstream path. The middleware
+    # already stored the parsed label in request.state.user_label.
+    stripped = getattr(request.state, "stripped_path", None)
+    if stripped is not None and stripped != "/" + path:
+        path = stripped.lstrip("/")
 
     # ── Telemetry blocking ──
     if is_blocked_path(path):
@@ -2524,7 +3570,7 @@ async def proxy(path: str, request: Request):
         )
 
     # Auto-capture identity headers, cảnh báo header lạ
-    capture_identity_from_request(request)
+    capture_identity_from_request(request, path)
     warn_unknown_headers(request)
 
     # ── Request timing jitter ──
@@ -2589,6 +3635,7 @@ async def proxy(path: str, request: Request):
             response.headers.get("content-type"),
             path,
             session_id=client_session_id,
+            user_label=getattr(request.state, "user_label", None),
         )
 
         # Buffer 400 bodies so we can detect Anthropic beta-header rejection
@@ -2661,7 +3708,10 @@ async def proxy(path: str, request: Request):
             model, usage = usage_tap.finalize()
             total_ms = int((time.monotonic() - start_time) * 1000)
             if usage:
-                _record_usage(model, usage, usage_tap.session_id, duration_ms=total_ms)
+                _record_usage(
+                    model, usage, usage_tap.session_id,
+                    duration_ms=total_ms, user_label=usage_tap.user_label,
+                )
             return Response(
                 content=buffered_body,
                 status_code=response.status_code,
@@ -2670,16 +3720,29 @@ async def proxy(path: str, request: Request):
             )
 
         async def stream_response():
+            # Each cleanup step is guarded so a benign client disconnect or
+            # a hiccup in the usage tap doesn't escape as an unhandled
+            # exception (Starlette/uvicorn then surface it as an "ASGI
+            # application" error even though the response was fully sent).
             try:
                 async for chunk in response.aiter_bytes():
                     usage_tap.feed(chunk)
                     yield chunk
             finally:
-                await response.aclose()
-                total_ms = int((time.monotonic() - start_time) * 1000)
-                model, usage = usage_tap.finalize()
-                if usage:
-                    _record_usage(model, usage, usage_tap.session_id, duration_ms=total_ms)
+                try:
+                    await response.aclose()
+                except Exception:
+                    pass
+                try:
+                    total_ms = int((time.monotonic() - start_time) * 1000)
+                    model, usage = usage_tap.finalize()
+                    if usage:
+                        _record_usage(
+                            model, usage, usage_tap.session_id,
+                            duration_ms=total_ms, user_label=usage_tap.user_label,
+                        )
+                except Exception as e:
+                    log(f"  {YELLOW}usage tap cleanup failed (non-fatal): {e}{RESET}")
 
         return StreamingResponse(
             stream_response(),
@@ -2733,9 +3796,36 @@ async def _async_sleep(seconds: float):
 
 
 if __name__ == "__main__":
+    # In server mode the proxy is reachable from the network, so the operator
+    # MUST configure ALLOWED_IPS. We refuse to start with an empty whitelist
+    # to prevent accidentally exposing the upstream Anthropic billing surface.
+    if DEPLOY_MODE == "server" and not ALLOWED_NETWORKS:
+        print()
+        print(f"  {BG_RED}{BOLD} BOOT ABORTED {RESET}")
+        print(
+            f"  {RED}DEPLOY_MODE=server but ALLOWED_IPS is empty.{RESET}\n"
+            f"  {YELLOW}Set ALLOWED_IPS in .env, e.g.:{RESET}\n"
+            f"    {CYAN}ALLOWED_IPS=203.0.113.5,198.51.100.0/24{RESET}\n"
+            f"  {YELLOW}Refusing to bind {LOCAL_HOST}:{LOCAL_PORT} with no whitelist.{RESET}"
+        )
+        print()
+        sys.exit(1)
+
+    if DEPLOY_MODE == "server" and not identity_captured:
+        print()
+        if CAPTURE_LOCK_FROM_IP:
+            print(f"  {YELLOW}server mode: identity will be locked from the first "
+                  f"request whose source IP = {BOLD}{CAPTURE_LOCK_FROM_IP}{RESET}{YELLOW}.{RESET}")
+        else:
+            print(f"  {YELLOW}server mode: the next request from ANY whitelisted IP "
+                  f"will lock the device identity for the whole pool.{RESET}")
+            print(f"  {DIM}set CAPTURE_LOCK_FROM_IP=<ip> in .env if you want to restrict "
+                  f"who can be the first-capturer.{RESET}")
+        print()
+
     uvicorn.run(
         app,
-        host="127.0.0.1",
+        host=LOCAL_HOST,
         port=LOCAL_PORT,
         log_level="warning",
         # Don't expose server header

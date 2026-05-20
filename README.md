@@ -401,6 +401,149 @@ The dashboard expects the `Loki` datasource to exist in Grafana; rename via the 
 - Requests served from the telemetry-block layer never touch Anthropic, so they're not counted.
 - The dashboard loads Chart.js from `cdn.jsdelivr.net`. If you're air-gapped or block third-party CDNs, the cards / table / progress bars still render — only the two charts will be blank.
 
+## Server Mode (shared VM)
+
+Instead of running one proxy per device, deploy a single proxy on a VM and point every client at it. Identity-spoofing + token-saving + quota tracking all keep working; access is gated by source-IP whitelist and (optionally) per-user spend caps.
+
+### Why server mode
+
+- One `.env` to maintain (the VM's). New devices just point `ANTHROPIC_BASE_URL` at the VM — no need to copy the captured fingerprint around.
+- Centralised dashboard + per-user cost cap.
+- Same anonymity layers as local mode — only the deployment topology changes.
+
+### VM-side setup
+
+1. Open the proxy's port on the VM firewall / cloud security group (default 9999).
+2. Run the launcher for your VM's OS:
+   ```bash
+   cd client
+   ./start-server.sh                 # macOS / Linux
+   start-server.bat                  # Windows
+   ./start-server.sh --reconfigure   # re-run the wizard to change settings
+   ```
+3. **First run only** — the launcher prompts interactively for:
+   - `ALLOWED_IPS` (required) — comma-separated IPs / CIDRs that may use the proxy
+   - `IP_LABELS` (optional) — `<ip>:<label>` map, used as a fallback when a client doesn't supply a `/u/<name>/` URL prefix
+   - Per-user spend cap (optional) — period (monthly / daily), default cap, and per-label overrides
+   - `CAPTURE_LOCK_FROM_IP` (optional) — restrict the first-request fingerprint capture to one specific source IP. Use this when you want a specific machine to provide the locked device identity, instead of "whoever happens to hit the proxy first"
+   - `STATS_PRIVATE` (optional) — when on, gate `/health`, `/quota`, `/quota/users`, and `/dashboard` behind `STATS_VIEW_IPS` (defaults to loopback) so whitelisted users can't see each other's spending
+   All get saved to `.env`. Re-runs skip the wizard unless `ALLOWED_IPS` is empty or you pass `--reconfigure`.
+4. **First request from a whitelisted device** auto-captures that device's identity headers (user-agent, `x-stainless-*`, etc.) and locks them in `.env`. Every subsequent request — from any device — has those headers injected, so Anthropic sees one device.
+
+> **Safety guard:** if `DEPLOY_MODE=server` and `ALLOWED_IPS` is empty, the proxy aborts at startup. Since identity auto-capture only fires from inside the access-control middleware, only whitelisted callers can ever set the fingerprint.
+
+Want to bypass the wizard? Edit `.env` directly:
+
+```env
+DEPLOY_MODE=server
+# LOCAL_HOST=0.0.0.0           # default in server mode
+ALLOWED_IPS=203.0.113.5,198.51.100.0/24,2001:db8::/32
+IP_LABELS=203.0.113.5:phong,198.51.100.7:huy
+USER_QUOTA_ENABLED=true
+USER_QUOTA_PERIOD=monthly      # monthly | daily
+USER_QUOTA_DEFAULT_USD=20.0
+USER_QUOTA_HARD_LIMIT=true     # 429 when over cap (false = warn only)
+USER_QUOTA_CAPS=phong:50.0,huy:30.0
+```
+
+### Client-side setup
+
+Each device points Claude Code at the VM with a **per-user URL prefix** so the dashboard can attribute every request to the right person. No local proxy is started on the client.
+
+```bash
+# Recommended — one-shot launcher
+setup-remote.bat http://VM_IP:9999 phong         # Windows
+./setup-remote.sh http://VM_IP:9999 phong        # macOS / Linux
+# Run with no args to be prompted for both URL and username.
+
+# Equivalent: call the Python script directly
+python client/setup_claude.py --remote http://VM_IP:9999/u/phong
+
+# Equivalent: per-shell env var (no settings.json change)
+export ANTHROPIC_BASE_URL=http://VM_IP:9999/u/phong
+claude
+```
+
+Claude Code then sends `/u/phong/v1/messages`. The VM strips the `/u/phong/` prefix, attributes the request to user `phong`, then forwards `/v1/messages` to Anthropic with the locked fingerprint.
+
+#### Why the URL prefix beats IP-based attribution
+
+A single source IP can be 20 people behind one office NAT, or one person whose 4G IP changes every hour. `IP_LABELS` is brittle in both cases. The `/u/<name>/` prefix means each user identifies themselves to the proxy — independent of network topology — so the dashboard / quota cap always lands on the right person.
+
+Trust model: this is **identification, not authentication**. Anyone whose source IP is in `ALLOWED_IPS` can claim any username. That's fine inside a trusted team (`ALLOWED_IPS` is already the network-level gate); if you need cryptographic guarantees, layer a reverse proxy with mTLS in front.
+
+Verify your client setup at any time:
+```bash
+curl http://VM_IP:9999/u/phong/whoami
+# → { "label": "phong", "user_quota_enabled": true, "bucket": { "cap_usd": 50.0, "cost_usd": 12.34, ... } }
+```
+
+The original `start.bat` / `start.sh` workflow still works unchanged for anyone who wants the **local** per-device proxy instead — server mode is purely additive.
+
+### Per-User Quota
+
+When `USER_QUOTA_ENABLED=true`, every `/v1/*` request is attributed to the source IP, mapped to a label via `IP_LABELS` (unmapped IPs use the raw IP string). The proxy tracks USD cost per user and either soft-warns or hard-blocks once the cap is hit.
+
+| Behaviour | `USER_QUOTA_HARD_LIMIT=true` (default) | `USER_QUOTA_HARD_LIMIT=false` |
+|---|---|---|
+| Over cap | Returns 429 with `Retry-After: <secs until period reset>` | Still proxies the request; only `blocked_count` increments |
+| Tracking | Always on (visible in dashboard + `/quota/users`) | Always on |
+
+Period rolls over automatically at the start of each `daily` / `monthly` boundary (local time). Cap overrides per-label live in `USER_QUOTA_CAPS`; unmapped users fall back to `USER_QUOTA_DEFAULT_USD` (set to `0` for unlimited).
+
+### Endpoints (server mode additions)
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /quota/users` | All users + cap usage |
+| `GET /quota/users/{label}` | Detail for one user |
+| `POST /admin/quota/reset/{label}` | Manually zero a user's counters. Caller must come from `ADMIN_IPS` (default loopback only) |
+
+The dashboard at `/dashboard` auto-renders a **Per-User Quota** table when the feature is on, with colour-coded cap-usage badges (green / amber / red).
+
+### Auto-start on Windows (survives reboot + crashes)
+
+On a VM you usually want the proxy to come back up automatically after a Windows update / reboot, and to recover if `proxy.py` ever exits unexpectedly. Two one-shot scripts ship for this:
+
+```cmd
+:: First-time setup of the auto-start service (right-click → Run as administrator)
+install-service.bat
+
+:: Stop and remove the auto-start service (right-click → Run as administrator)
+uninstall-service.bat
+```
+
+What `install-service.bat` does:
+
+1. Verifies you already ran `start-server.bat` once (needs `.env` with `ALLOWED_IPS`)
+2. Registers a Scheduled Task **`ClaudeCloakServer`**:
+   - Trigger: **At system startup** — runs without anyone logged in
+   - Account: **SYSTEM** — survives logoff and RDP disconnect
+   - Action: launches `service-run.bat`, which loops `python proxy.py` forever and restarts 5 s after any exit
+3. Starts the task immediately so you don't need to reboot to test
+
+After install:
+
+| Command | What it does |
+|---|---|
+| `schtasks /query /tn ClaudeCloakServer` | Show task status |
+| `schtasks /end /tn ClaudeCloakServer` | Stop the proxy now |
+| `schtasks /run /tn ClaudeCloakServer` | Start the proxy now |
+| `type service.log` | View proxy stdout / stderr |
+| `powershell Get-Content service.log -Wait -Tail 50` | Live tail logs |
+
+If `service.log` shows `'python' is not recognized` or `'py' is not recognized`, the SYSTEM account can't find your Python install. Reinstall Python with the official installer and tick **"Install launcher for all users"** — this puts `py.exe` in `C:\Windows` which is on the SYSTEM PATH.
+
+### Security notes
+
+- The whitelist matches the raw TCP source (`request.client.host`), not any `X-Forwarded-For` header — there's no reverse proxy in this setup, so spoofing isn't possible.
+- All identity sanitization layers still apply, so even though many clients now share one VM, Anthropic still sees a single device.
+- The `.env` on the VM contains the captured fingerprint + `SESSION_SECRET`. Treat it like a credential — anyone who reads it can impersonate that device pool. Same goes for `.quota.json` if you care about hiding spend history.
+- Defence in depth: pair `ALLOWED_IPS` with an OS firewall rule (ufw / iptables / cloud security group) for the same CIDR. If a code bug ever opens up the app-level whitelist, the firewall still holds.
+- **Stats visibility**: by default any whitelisted client can `GET /quota` or open `/dashboard` and see the whole team's spend, including per-user breakdowns. Set `STATS_PRIVATE=true` (and optionally `STATS_VIEW_IPS`) to restrict those endpoints. `/u/<label>/whoami` stays open so each client can still self-check.
+- **First-capture race**: whoever sends the first `/v1/messages` after a fresh boot locks the device fingerprint for the whole pool. If you care which machine that is, set `CAPTURE_LOCK_FROM_IP` to that machine's source IP — every other request that arrives before will be allowed through but won't trigger capture.
+- **Trust model for `/u/<label>/`**: the URL prefix is *identification*, not *authentication*. Any whitelisted user can claim any username. Inside a trusted team that's fine (the IP whitelist is the actual gate); if you need cryptographic guarantees, put nginx + mTLS in front.
+
 ## What It Does NOT Do
 
 | | Description |
@@ -417,8 +560,15 @@ client/
 ├── proxy.py               # Main proxy server (FastAPI) — anonymity layers, token saver, quota tracking, dashboard, Loki shipping
 ├── setup_claude.py        # Auto-config Claude Code → proxy URL (reads LOCAL_PORT from .env)
 ├── tray_app.py            # Optional Windows system tray app
-├── start.bat              # Windows launcher
-├── start.sh               # macOS / Linux launcher
+├── start.bat              # Windows: LOCAL mode (per-device proxy on 127.0.0.1)
+├── start.sh               # macOS / Linux: LOCAL mode (per-device proxy)
+├── start-server.bat       # Windows: SERVER mode (shared VM, IP whitelist + wizard)
+├── start-server.sh        # macOS / Linux: SERVER mode (shared VM)
+├── setup-remote.bat       # Windows client: point Claude Code at VM with /u/<username>
+├── setup-remote.sh        # macOS / Linux client: same
+├── service-run.bat        # Windows: restart-loop wrapper invoked by Task Scheduler
+├── install-service.bat    # Windows: register auto-start service (run as Administrator)
+├── uninstall-service.bat  # Windows: remove the auto-start service
 ├── install.bat            # Windows dependency installer
 ├── grafana-dashboard.json # Importable Grafana dashboard for Loki-shipped events
 ├── .env.example           # Config template with all captured header fields
@@ -433,6 +583,11 @@ client/
 |----------|-------------|
 | `GET /health` | Returns proxy status: identity captured, headers locked, telemetry blocked count, bodies sanitized count, unknown headers seen, full quota/cost stats |
 | `GET /quota` | Compact quota + cost summary (see Quota & Cost Tracking section) |
+| `GET /quota/users` | All per-user buckets + cap usage (server mode) |
+| `GET /quota/users/{label}` | Detail for one user |
+| `GET /u/{label}/whoami` | Client self-check: confirms IP is whitelisted + label is parsed + cap is what the operator set |
+| `POST /admin/quota/reset/{label}` | Reset a user's counters (loopback / `ADMIN_IPS` only) |
+| `* /u/{label}/{path}` | Same as `* /{path}` but accounts the request to `<label>` regardless of source IP |
 | `GET /dashboard` | Web UI rendering `/quota` as charts (Chart.js, dark theme, auto-refresh 5s) |
 | `* /{path}` | Proxy catch-all — applies all 8 layers then forwards to `api.anthropic.com/{path}` |
 
