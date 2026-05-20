@@ -501,6 +501,39 @@ Period rolls over automatically at the start of each `daily` / `monthly` boundar
 
 The dashboard at `/dashboard` auto-renders a **Per-User Quota** table when the feature is on, with colour-coded cap-usage badges (green / amber / red).
 
+### Auto-start on Windows (survives reboot + crashes)
+
+On a VM you usually want the proxy to come back up automatically after a Windows update / reboot, and to recover if `proxy.py` ever exits unexpectedly. Two one-shot scripts ship for this:
+
+```cmd
+:: First-time setup of the auto-start service (right-click → Run as administrator)
+install-service.bat
+
+:: Stop and remove the auto-start service (right-click → Run as administrator)
+uninstall-service.bat
+```
+
+What `install-service.bat` does:
+
+1. Verifies you already ran `start-server.bat` once (needs `.env` with `ALLOWED_IPS`)
+2. Registers a Scheduled Task **`ClaudeCloakServer`**:
+   - Trigger: **At system startup** — runs without anyone logged in
+   - Account: **SYSTEM** — survives logoff and RDP disconnect
+   - Action: launches `service-run.bat`, which loops `python proxy.py` forever and restarts 5 s after any exit
+3. Starts the task immediately so you don't need to reboot to test
+
+After install:
+
+| Command | What it does |
+|---|---|
+| `schtasks /query /tn ClaudeCloakServer` | Show task status |
+| `schtasks /end /tn ClaudeCloakServer` | Stop the proxy now |
+| `schtasks /run /tn ClaudeCloakServer` | Start the proxy now |
+| `type service.log` | View proxy stdout / stderr |
+| `powershell Get-Content service.log -Wait -Tail 50` | Live tail logs |
+
+If `service.log` shows `'python' is not recognized` or `'py' is not recognized`, the SYSTEM account can't find your Python install. Reinstall Python with the official installer and tick **"Install launcher for all users"** — this puts `py.exe` in `C:\Windows` which is on the SYSTEM PATH.
+
 ### Security notes
 
 - The whitelist matches the raw TCP source (`request.client.host`), not any `X-Forwarded-For` header — there's no reverse proxy in this setup, so spoofing isn't possible.
@@ -533,6 +566,9 @@ client/
 ├── start-server.sh        # macOS / Linux: SERVER mode (shared VM)
 ├── setup-remote.bat       # Windows client: point Claude Code at VM with /u/<username>
 ├── setup-remote.sh        # macOS / Linux client: same
+├── service-run.bat        # Windows: restart-loop wrapper invoked by Task Scheduler
+├── install-service.bat    # Windows: register auto-start service (run as Administrator)
+├── uninstall-service.bat  # Windows: remove the auto-start service
 ├── install.bat            # Windows dependency installer
 ├── grafana-dashboard.json # Importable Grafana dashboard for Loki-shipped events
 ├── .env.example           # Config template with all captured header fields
