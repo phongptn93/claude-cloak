@@ -172,13 +172,15 @@ except ValueError:
 CAPTURED_AT = os.getenv("CAPTURED_AT", "").strip()
 
 # IP → human label mapping for the dashboard / per-user quota.
-# Format: IP_LABELS=203.0.113.5:phong,198.51.100.7:huy
+# Format: IP_LABELS=203.0.113.5:phong,2001:db8::1:huy
+# We rsplit on the last colon so IPv6 addresses (which contain colons) parse
+# correctly — splitting on the first colon would break every IPv6 entry.
 IP_LABEL_MAP: dict = {}
 for _pair in os.getenv("IP_LABELS", "").split(","):
     _pair = _pair.strip()
     if ":" not in _pair:
         continue
-    _ip, _label = _pair.split(":", 1)
+    _ip, _label = _pair.rsplit(":", 1)
     _ip = _ip.strip()
     _label = _label.strip()
     if not _ip or not _label:
@@ -2002,19 +2004,24 @@ class AccessControlMiddleware:
         state["stripped_path"] = stripped_path
         state["user_label"] = user_label
 
-        # IP whitelist — applies to ALL paths in server mode (dashboard included).
-        if DEPLOY_MODE == "server" and not is_ip_allowed(client_ip):
-            log(
-                f"  {BG_RED}{BOLD} 403 {RESET} {RED}IP not allowed: "
-                f"{client_ip or '<unknown>'} → {method} {raw_path}{RESET}"
-            )
-            await JSONResponse({"error": "forbidden"}, status_code=403)(scope, receive, send)
-            return
-
-        # Admin endpoints additionally require the caller to come from ADMIN_IPS.
-        if raw_path.startswith("/admin/") and client_ip not in ADMIN_IPS:
-            await JSONResponse({"error": "forbidden"}, status_code=403)(scope, receive, send)
-            return
+        # Admin endpoints are gated SOLELY by ADMIN_IPS (default loopback). We
+        # check before the general whitelist so the VM operator can curl
+        # /admin/* from 127.0.0.1 / ::1 without also having to add loopback
+        # to ALLOWED_IPS — those two lists are meant to be independent.
+        if raw_path.startswith("/admin/"):
+            if client_ip not in ADMIN_IPS:
+                await JSONResponse({"error": "forbidden"}, status_code=403)(scope, receive, send)
+                return
+        else:
+            # IP whitelist — applies to every non-admin path in server mode
+            # (dashboard, /quota, /v1/*, /u/<label>/* and so on).
+            if DEPLOY_MODE == "server" and not is_ip_allowed(client_ip):
+                log(
+                    f"  {BG_RED}{BOLD} 403 {RESET} {RED}IP not allowed: "
+                    f"{client_ip or '<unknown>'} → {method} {raw_path}{RESET}"
+                )
+                await JSONResponse({"error": "forbidden"}, status_code=403)(scope, receive, send)
+                return
 
         # Stats endpoints — gate to STATS_VIEW_IPS when STATS_PRIVATE is enabled.
         if STATS_PRIVATE:
