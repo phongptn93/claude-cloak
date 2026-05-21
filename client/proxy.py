@@ -44,9 +44,15 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 
-# Enable ANSI colors on Windows
+# Enable ANSI colors + force UTF-8 stdout/stderr on Windows so the banner
+# (which contains box-drawing/block glyphs) doesn't crash under cp1252.
 if sys.platform == "win32":
     os.system("")
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError):
+            pass
 
 ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 load_dotenv(ENV_PATH)
@@ -1836,7 +1842,11 @@ def print_banner():
               ╚██████╗███████╗╚██████╔╝██║  ██║██║  ██╗
                ╚═════╝╚══════╝ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝{RESET}
 """
-    print(banner)
+    try:
+        print(banner)
+    except UnicodeEncodeError:
+        enc = (getattr(sys.stdout, "encoding", None) or "ascii")
+        sys.stdout.write(banner.encode(enc, errors="replace").decode(enc) + "\n")
 
 
 def mask_value(val: str, show=12) -> str:
