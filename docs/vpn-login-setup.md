@@ -45,7 +45,110 @@ Dùng chung một VM cho cả WireGuard và proxy là hợp lý nhất.
 
 ---
 
-## Phần 1 — Dựng WireGuard server trên VM (Ubuntu/Debian)
+> **Chọn theo OS của VM:**
+> - VM **Windows** (trường hợp của bạn) → đọc **Phần 1‑W** ngay bên dưới.
+> - VM **Linux** (Ubuntu/Debian) → đọc **Phần 1‑L**.
+
+---
+
+## Phần 1‑W — Dựng WireGuard server trên VM **Windows**
+
+> Yêu cầu: VM Windows có IP công cộng tĩnh, quyền **Administrator**. Mở **UDP 51820**
+> trên Windows Firewall **và** cloud security group.
+>
+> Trên Windows không có `iptables`/`PostUp`. NAT phải làm bằng `New-NetNat`
+> (PowerShell) và phải bật IP routing qua registry. Đây là chỗ hay sai nhất khi dùng
+> VM Windows làm server, nên làm đúng từng bước.
+
+### 1W.1. Cài WireGuard
+
+Tải bộ cài chính chủ tại **wireguard.com/install** và cài như app bình thường.
+
+### 1W.2. Sinh khóa cho server
+
+Mở **PowerShell (Administrator)** trong thư mục cài WireGuard (thường
+`C:\Program Files\WireGuard`):
+
+```powershell
+cd "C:\Program Files\WireGuard"
+.\wg.exe genkey | Out-File -Encoding ascii server_private.key
+Get-Content server_private.key | .\wg.exe pubkey | Out-File -Encoding ascii server_public.key
+Get-Content server_private.key   # copy nội dung này cho bước 1W.3
+Get-Content server_public.key    # client sẽ cần key này
+```
+
+### 1W.3. Tạo tunnel config trên server
+
+Mở app **WireGuard** → **Add Tunnel ▾** → **Add empty tunnel…**. Xóa nội dung mặc
+định và dán (thay key vào):
+
+```ini
+[Interface]
+Address = 10.8.0.1/24
+ListenPort = 51820
+PrivateKey = <NỘI_DUNG server_private.key>
+
+# === Mỗi máy client là một [Peer] — thêm bên dưới ===
+# [Peer]
+# PublicKey = <public key của client>
+# AllowedIPs = 10.8.0.2/32
+```
+
+> Lưu ý: trên Windows **không** thêm dòng `PostUp/PostDown` — NAT làm riêng ở bước
+> 1W.5. Bấm **Save** rồi **Activate** để interface `10.8.0.1` xuất hiện.
+
+### 1W.4. Bật IP routing (registry) + cho qua firewall
+
+Trong **PowerShell (Administrator)**:
+
+```powershell
+# Bật định tuyến IP của Windows
+Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" `
+  -Name IPEnableRouter -Value 1
+Set-Service -Name RemoteAccess -StartupType Automatic
+Start-Service RemoteAccess
+
+# Mở UDP 51820 trên Windows Firewall
+New-NetFirewallRule -DisplayName "WireGuard" -Direction Inbound `
+  -Protocol UDP -LocalPort 51820 -Action Allow
+```
+
+### 1W.5. Tạo NAT để client ra được Internet qua IP của VM
+
+Đây là phần thay cho `MASQUERADE` của Linux. Trong **PowerShell (Administrator)**:
+
+```powershell
+# Tên interface WireGuard thường là tên tunnel bạn đặt (vd "wg0"); kiểm tra bằng:
+Get-NetAdapter | Format-Table Name, InterfaceDescription, Status
+
+# Tạo NAT cho dải VPN 10.8.0.0/24
+New-NetNat -Name ClaudeCloakNAT -InternalIPInterfaceAddressPrefix 10.8.0.0/24
+```
+
+> Nếu `New-NetNat` báo lỗi "not recognized": VM thiếu module NAT. Cài bằng
+> `Enable-WindowsOptionalFeature -Online -FeatureName RasRoutingProtocols` hoặc bật vai
+> trò **Remote Access / Routing** (Windows Server). Sau khi reboot, chạy lại lệnh.
+
+Kiểm tra NAT đã tạo:
+
+```powershell
+Get-NetNat                 # phải thấy ClaudeCloakNAT với prefix 10.8.0.0/24
+```
+
+> **Reboot VM một lần** sau khi đặt `IPEnableRouter` để chắc chắn routing có hiệu lực.
+> Tunnel WireGuard tự Activate lại nếu bạn đã bật; nếu không, mở app bấm Activate.
+
+### 1W.6. Thêm client (peer)
+
+Mỗi khi có máy client mới: mở app WireGuard trên VM → chọn tunnel → **Edit** → thêm
+khối `[Peer]` (lấy `PublicKey` từ client ở Phần 2) → **Save**. WireGuard Windows tự áp
+dụng cấu hình mới.
+
+➡️ Làm xong Phần 1‑W thì **bỏ qua Phần 1‑L**, sang thẳng **Phần 2**.
+
+---
+
+## Phần 1‑L — Dựng WireGuard server trên VM **Linux** (Ubuntu/Debian)
 
 > Yêu cầu: VM có IP công cộng tĩnh, quyền `sudo`. Mở **UDP 51820** trên firewall /
 > cloud security group.
