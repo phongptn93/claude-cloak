@@ -552,6 +552,7 @@ If `service.log` shows `'python' is not recognized` or `'py' is not recognized`,
 | ❌ No encryption | Identity data in `.env` is stored in plaintext — protect the file yourself |
 | ❌ No account sharing | Each device must log in to Claude Code independently — the proxy only unifies the device fingerprint |
 | ❌ No internet exposure | Proxy binds to `127.0.0.1` only — never accessible from the network |
+| ❌ No login-IP masking | The proxy only routes `api.anthropic.com` traffic. The **OAuth login flow** (browser → `claude.ai` / `console.anthropic.com` + token exchange) bypasses the proxy and **leaks the real client IP at login time** — even in server mode. To hide the IP during login too, mask it at the network layer: see [docs/vpn-login-setup.md](docs/vpn-login-setup.md) (WireGuard full-tunnel). |
 
 ## Project Structure
 
