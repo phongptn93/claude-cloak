@@ -630,6 +630,45 @@ QUOTA_SCHEMA_VERSION = 4  # v1=base, v2 +by_session+by_day, v3 +by_user, v4 +by_
 QUOTA_SCHEMA_MIN_LOAD = 1  # accept v1+ files for forward migration
 _last_quota_save_at = 0.0
 
+# ============================================================
+# CODING COACH (optional, on by default)
+# Derives privacy-safe "how you code" insights from the traffic that already
+# flows through the proxy: tool-usage mix, read-before-edit discipline,
+# tool-error rate, conversation depth/cadence and model fit.
+#
+# Privacy by design — fully in line with the project's anonymity goals:
+#   • Counts ONLY. Never stores prompt text, code, file paths or any body.
+#   • Prompt-content evaluation is deliberately NOT done (no LLM grading,
+#     no heuristics on prompt text) — it would be intrusive and/or costly.
+# Surfaced in /dashboard (Coaching section) and the /coach JSON endpoint.
+# ============================================================
+COACH_ENABLED = os.getenv("COACH_ENABLED", "true").lower() == "true"
+COACH_PERSIST_PATH = os.getenv(
+    "COACH_PERSIST_PATH",
+    os.path.join(os.path.dirname(ENV_PATH), ".coach.json"),
+)
+COACH_SCHEMA_VERSION = 1
+_last_coach_save_at = 0.0
+
+# Tool-name buckets for the read-before-edit discipline metric. Names cover
+# Claude Code's built-ins plus a few common aliases from other harnesses.
+COACH_EDIT_TOOLS = {
+    "Edit", "Write", "MultiEdit", "NotebookEdit",
+    "str_replace_editor", "create_file", "apply_patch",
+}
+COACH_READ_TOOLS = {"Read", "NotebookRead", "view"}
+
+coach_stats = {
+    "tools": {},             # tool_name -> count (assistant tool_use blocks)
+    "tool_results_seen": 0,  # tool_result blocks observed in user turns
+    "tool_errors": 0,        # of those, is_error == true
+    "assistant_turns": 0,    # /v1/messages responses processed
+    "stop_reasons": {},      # stop_reason -> count
+    "by_hour": {},           # "0".."23" -> assistant_turns (local time)
+    "first_seen": None,
+    "last_seen": None,
+}
+
 
 def env_key(header: str) -> str:
     return "CAPTURED_" + header.upper().replace("-", "_")
@@ -1112,6 +1151,226 @@ def _save_quota_stats(force: bool = False) -> None:
     except OSError:
         # Disk full / permission issue — skip silently, try again next time.
         pass
+
+
+def _coach_record_request(body: bytes, content_type: str | None, path: str) -> None:
+    """Extract privacy-safe coaching signals from a /v1/messages request.
+
+    Inspects ONLY tool_result blocks in the last message (messages[-1]) —
+    the outcomes of the previous assistant turn — to measure tool
+    reliability / error rate. Prompt content is never read or evaluated.
+    Counts only; no text, code or file paths are ever stored. Never raises.
+    """
+    if not COACH_ENABLED or "v1/messages" not in path:
+        return
+    if not content_type or "json" not in content_type.lower():
+        return
+    try:
+        data = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError):
+        return
+    if not isinstance(data, dict):
+        return
+    messages = data.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return
+    last = messages[-1]
+    if not isinstance(last, dict) or last.get("role") != "user":
+        return
+    content = last.get("content")
+    if not isinstance(content, list):
+        return
+
+    n_results = 0
+    n_errors = 0
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "tool_result":
+            continue
+        n_results += 1
+        if block.get("is_error") is True:
+            n_errors += 1
+
+    coach_stats["tool_results_seen"] += n_results
+    coach_stats["tool_errors"] += n_errors
+
+
+def _coach_record_response(tools_used: dict, stop_reason: str | None) -> None:
+    """Record one assistant turn's tool calls + stop reason. Never raises."""
+    if not COACH_ENABLED:
+        return
+    now = datetime.now()
+    iso = now.isoformat(timespec="seconds")
+    coach_stats["assistant_turns"] += 1
+    if coach_stats["first_seen"] is None:
+        coach_stats["first_seen"] = iso
+    coach_stats["last_seen"] = iso
+    hour = str(now.hour)
+    coach_stats["by_hour"][hour] = coach_stats["by_hour"].get(hour, 0) + 1
+    if tools_used:
+        for name, n in tools_used.items():
+            coach_stats["tools"][name] = coach_stats["tools"].get(name, 0) + (n or 0)
+    if stop_reason:
+        coach_stats["stop_reasons"][stop_reason] = (
+            coach_stats["stop_reasons"].get(stop_reason, 0) + 1
+        )
+    _save_coach_stats()
+
+
+def _load_coach_stats() -> bool:
+    """Load persisted coaching counters from .coach.json. Bad files skipped."""
+    if not COACH_ENABLED or not os.path.exists(COACH_PERSIST_PATH):
+        return False
+    try:
+        with open(COACH_PERSIST_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    version = data.get("version")
+    if not isinstance(version, int) or version < 1 or version > COACH_SCHEMA_VERSION:
+        return False
+
+    for key in ("tools", "stop_reasons", "by_hour"):
+        v = data.get(key)
+        if isinstance(v, dict):
+            coach_stats[key] = {
+                str(k): int(x) for k, x in v.items() if isinstance(x, (int, float))
+            }
+    for key in ("tool_results_seen", "tool_errors", "assistant_turns"):
+        v = data.get(key)
+        if isinstance(v, int):
+            coach_stats[key] = v
+    for key in ("first_seen", "last_seen"):
+        v = data.get(key)
+        if isinstance(v, str):
+            coach_stats[key] = v
+    return True
+
+
+def _save_coach_stats(force: bool = False) -> None:
+    """Atomically persist coaching counters. Debounced like quota stats."""
+    global _last_coach_save_at
+    if not COACH_ENABLED:
+        return
+    now = time.monotonic()
+    if not force and now - _last_coach_save_at < QUOTA_PERSIST_INTERVAL_SECONDS:
+        return
+    payload = {
+        "version": COACH_SCHEMA_VERSION,
+        "saved_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    payload.update(coach_stats)
+    tmp_path = COACH_PERSIST_PATH + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, COACH_PERSIST_PATH)
+        _last_coach_save_at = now
+    except OSError:
+        pass
+
+
+def _compute_coach_view() -> dict:
+    """Derive the dashboard-facing coaching metrics, score and tips.
+
+    Reuses quota_stats for cache/model/session signals so nothing extra is
+    collected. Returns plain JSON-able data; all scores are 0-100 where
+    higher is better. Components with no data are omitted from the average.
+    """
+    tools = coach_stats["tools"]
+    reads = sum(n for t, n in tools.items() if t in COACH_READ_TOOLS)
+    edits = sum(n for t, n in tools.items() if t in COACH_EDIT_TOOLS)
+    tool_total = sum(tools.values())
+
+    results_seen = coach_stats["tool_results_seen"]
+    errors = coach_stats["tool_errors"]
+    error_rate = (errors / results_seen) if results_seen else 0.0
+
+    # Cache hit rate from the existing quota totals (input that was served
+    # from cache instead of paid fresh).
+    ut = quota_stats["usage_total"]
+    paid_in = ut.get("input_tokens", 0) or 0
+    cache_read = ut.get("cache_read_input_tokens", 0) or 0
+    cache_denom = paid_in + cache_read
+    cache_hit_rate = (cache_read / cache_denom) if cache_denom else 0.0
+
+    # Conversation depth: requests per distinct session (≈ turns / session).
+    sessions = quota_stats["by_session"]
+    total_reqs = sum(s.get("requests", 0) for s in sessions.values())
+    avg_turns = (total_reqs / len(sessions)) if sessions else 0.0
+
+    # Model fit: share of spend on the priciest "opus" tier.
+    by_model = quota_stats["by_model"]
+    total_cost = sum(m.get("cost_usd", 0.0) for m in by_model.values()) or 0.0
+    opus_cost = sum(
+        m.get("cost_usd", 0.0) for k, m in by_model.items() if "opus" in k.lower()
+    )
+    opus_share = (opus_cost / total_cost) if total_cost else 0.0
+
+    # ---- component scores (0-100, higher = better) ----
+    components: dict[str, float] = {}
+    if edits > 0:
+        # One read per edit == full marks; fewer reads scales down.
+        components["discipline"] = max(0.0, min(100.0, (reads / edits) * 100.0))
+    if results_seen > 0:
+        components["reliability"] = max(0.0, (1.0 - error_rate) * 100.0)
+    if cache_denom > 0:
+        # CC keeps a high hit rate; treat ~85% as full marks.
+        components["cache"] = max(0.0, min(100.0, (cache_hit_rate / 0.85) * 100.0))
+
+    weights = {"discipline": 0.40, "reliability": 0.35, "cache": 0.25}
+    wsum = sum(weights[k] for k in components)
+    score = round(sum(components[k] * weights[k] for k in components) / wsum) if wsum else None
+
+    # ---- actionable tips (Vietnamese, local, no content) ----
+    tips: list[str] = []
+    if edits > 0 and reads < edits:
+        tips.append(
+            f"Bạn sửa file nhiều hơn đọc ({reads} Read / {edits} Edit-Write). "
+            "Đọc trước khi sửa để tránh ghi đè nhầm."
+        )
+    if results_seen > 0 and error_rate > 0.15:
+        tips.append(
+            f"{int(error_rate*100)}% tool call bị lỗi. "
+            "Kiểm tra lệnh/đường dẫn trước khi chạy để đỡ tốn lượt."
+        )
+    if cache_denom > 0 and cache_hit_rate < 0.5:
+        tips.append(
+            f"Cache hit thấp ({int(cache_hit_rate*100)}%). "
+            "Tránh đổi context liên tục để tận dụng cache — tiết kiệm tiền."
+        )
+    if total_cost > 0 and opus_share > 0.8:
+        tips.append(
+            f"{int(opus_share*100)}% chi phí nằm trên Opus. "
+            "Cân nhắc Sonnet/Haiku cho việc đơn giản để giảm chi phí."
+        )
+    if score is not None and not tips:
+        tips.append("Phong độ tốt — không có cảnh báo nào. Giữ vững!")
+    if score is None:
+        tips.append("Chưa đủ dữ liệu. Dùng Claude Code qua proxy một lúc để có insight.")
+
+    return {
+        "enabled": COACH_ENABLED,
+        "score": score,
+        "components": {k: round(v) for k, v in components.items()},
+        "assistant_turns": coach_stats["assistant_turns"],
+        "tools": dict(sorted(tools.items(), key=lambda kv: kv[1], reverse=True)),
+        "tool_total": tool_total,
+        "reads": reads,
+        "edits": edits,
+        "tool_results_seen": results_seen,
+        "tool_errors": errors,
+        "error_rate": round(error_rate, 4),
+        "cache_hit_rate": round(cache_hit_rate, 4),
+        "avg_turns_per_session": round(avg_turns, 1),
+        "opus_cost_share": round(opus_share, 4),
+        "stop_reasons": dict(coach_stats["stop_reasons"]),
+        "by_hour": [coach_stats["by_hour"].get(str(h), 0) for h in range(24)],
+        "first_seen": coach_stats["first_seen"],
+        "last_seen": coach_stats["last_seen"],
+        "tips": tips,
+    }
 
 
 def _check_monthly_reset() -> None:
@@ -1632,6 +1891,9 @@ class UsageTap:
         self.model: str | None = None
         self.cache_creation: dict | None = None
         self._overflow = False
+        # Coaching signals (counts only — see coach_stats).
+        self.tools_used: dict[str, int] = {}
+        self.stop_reason: str | None = None
 
     def feed(self, chunk: bytes) -> None:
         if not self.is_messages or not chunk or self._overflow:
@@ -1676,6 +1938,14 @@ class UsageTap:
             u = event.get("usage")
             if isinstance(u, dict):
                 self._merge_usage(u)
+            delta = event.get("delta")
+            if isinstance(delta, dict) and delta.get("stop_reason"):
+                self.stop_reason = delta["stop_reason"]
+        elif t == "content_block_start":
+            cb = event.get("content_block")
+            if isinstance(cb, dict) and cb.get("type") == "tool_use":
+                name = cb.get("name") or "unknown"
+                self.tools_used[name] = self.tools_used.get(name, 0) + 1
 
     def _merge_usage(self, u: dict) -> None:
         for k in (
@@ -1703,11 +1973,23 @@ class UsageTap:
                 u = data.get("usage")
                 if isinstance(u, dict):
                     self._merge_usage(u)
+                if data.get("stop_reason"):
+                    self.stop_reason = data["stop_reason"]
+                blocks = data.get("content")
+                if isinstance(blocks, list):
+                    for cb in blocks:
+                        if isinstance(cb, dict) and cb.get("type") == "tool_use":
+                            name = cb.get("name") or "unknown"
+                            self.tools_used[name] = self.tools_used.get(name, 0) + 1
         if self.cache_creation is not None:
             self.usage["cache_creation"] = self.cache_creation
         # Free the buffer; we're done with it.
         self.buffer.clear()
         return self.model, dict(self.usage)
+
+    def coach_signals(self) -> tuple[dict, str | None]:
+        """Return (tool_use counts, stop_reason) gathered from this response."""
+        return dict(self.tools_used), self.stop_reason
 
 
 def _identity_age_days() -> float | None:
@@ -1937,6 +2219,7 @@ async def lifespan(app: FastAPI):
         ),
     )
     _load_quota_stats()
+    _load_coach_stats()
     print_banner()
     print_status()
     if LOKI_ENABLED:
@@ -1957,6 +2240,7 @@ async def lifespan(app: FastAPI):
                 if not await _loki_flush_once():
                     break
         _save_quota_stats(force=True)
+        _save_coach_stats(force=True)
         await http_client.aclose()
 
 
@@ -2026,7 +2310,7 @@ class AccessControlMiddleware:
         # Stats endpoints — gate to STATS_VIEW_IPS when STATS_PRIVATE is enabled.
         if STATS_PRIVATE:
             is_stats = (
-                raw_path in ("/health", "/quota", "/quota/users", "/dashboard")
+                raw_path in ("/health", "/quota", "/quota/users", "/dashboard", "/coach")
                 or raw_path.startswith("/quota/users/")
             )
             if is_stats and client_ip not in STATS_VIEW_IPS:
@@ -2595,6 +2879,69 @@ DASHBOARD_HTML = """<!doctype html>
         <div class="card-label">Top spender</div>
         <div class="card-value" id="top-spender" style="font-size:22px">—</div>
         <div class="card-meta" id="top-spender-cost"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Coaching -->
+  <section>
+    <div class="section-head">
+      <h2>Coaching</h2>
+      <span class="hint">Privacy-safe — derived from traffic, no prompt text or code is stored</span>
+    </div>
+    <div class="grid-cards">
+      <div class="card hero">
+        <div class="card-label">Practice score</div>
+        <div class="card-value num" id="coach-score">—</div>
+        <div class="card-meta" id="coach-score-meta">no activity yet</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Tool reliability</div>
+        <div class="card-value num" id="coach-reliability">—</div>
+        <div class="card-meta" id="coach-reliability-meta">tool-call errors</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Read / edit discipline</div>
+        <div class="card-value num" id="coach-discipline">—</div>
+        <div class="card-meta" id="coach-discipline-meta">reads vs edits</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Cache efficiency</div>
+        <div class="card-value num" id="coach-cache">—</div>
+        <div class="card-meta">cache hit rate</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Avg turns / session</div>
+        <div class="card-value num" id="coach-depth">—</div>
+        <div class="card-meta">conversation depth</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Opus cost share</div>
+        <div class="card-value num" id="coach-opus">—</div>
+        <div class="card-meta">model fit</div>
+      </div>
+    </div>
+    <div class="charts-grid" style="margin-top:16px">
+      <div class="panel">
+        <div class="panel-title">
+          <h3>Tool usage</h3>
+          <span class="sub" id="coach-tools-sub">—</span>
+        </div>
+        <div class="panel-body"><div id="coach-tools"></div></div>
+      </div>
+      <div class="panel">
+        <div class="panel-title">
+          <h3>Tips</h3>
+          <span class="sub">actionable · local</span>
+        </div>
+        <div class="panel-body"><div id="coach-tips"></div></div>
+      </div>
+      <div class="panel">
+        <div class="panel-title">
+          <h3>Activity by hour</h3>
+          <span class="sub">local time · assistant turns</span>
+        </div>
+        <div class="panel-body"><div id="coach-hours"></div></div>
       </div>
     </div>
   </section>
@@ -3297,8 +3644,109 @@ DASHBOARD_HTML = """<!doctype html>
     }
   }
 
+  /*  Coaching panel  ------------------------------------------------------ */
+  function coachBar(label, value, max, suffix) {
+    const pct = max > 0 ? Math.min(100, (value / max) * 100) : 0;
+    return `<div style="margin:6px 0">
+      <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:3px">
+        <span>${label}</span><span class="num">${suffix}</span>
+      </div>
+      <div style="background:rgba(255,255,255,.07);border-radius:4px;height:8px;overflow:hidden">
+        <div style="height:100%;width:${pct}%;background:linear-gradient(90deg,#7c3aed,#a855f7)"></div>
+      </div></div>`;
+  }
+
+  function scoreColor(s) {
+    if (s == null) return '';
+    if (s >= 80) return '#34d399';
+    if (s >= 60) return '#fbbf24';
+    return '#f87171';
+  }
+
+  async function refreshCoach() {
+    let c;
+    try {
+      const r = await fetch('/coach', { cache: 'no-store' });
+      c = await r.json();
+    } catch (e) { return; }
+
+    const scoreEl = document.getElementById('coach-score');
+    if (c.score == null) {
+      scoreEl.textContent = '—';
+      scoreEl.style.color = '';
+      document.getElementById('coach-score-meta').textContent =
+        c.assistant_turns ? 'gathering signal…' : 'no activity yet';
+    } else {
+      scoreEl.textContent = c.score + '/100';
+      scoreEl.style.color = scoreColor(c.score);
+      document.getElementById('coach-score-meta').textContent =
+        `over ${fmtCount.format(c.assistant_turns)} assistant turns`;
+    }
+
+    const comp = c.components || {};
+    const rel = comp.reliability;
+    document.getElementById('coach-reliability').textContent =
+      rel == null ? '—' : rel + '/100';
+    document.getElementById('coach-reliability-meta').textContent =
+      c.tool_results_seen ? `${(c.error_rate*100).toFixed(1)}% errors · ${fmtCount.format(c.tool_errors)}/${fmtCount.format(c.tool_results_seen)}` : 'no tool results yet';
+
+    document.getElementById('coach-discipline').textContent =
+      comp.discipline == null ? '—' : comp.discipline + '/100';
+    document.getElementById('coach-discipline-meta').textContent =
+      c.edits ? `${fmtCount.format(c.reads)} reads / ${fmtCount.format(c.edits)} edits` : 'no edits yet';
+
+    document.getElementById('coach-cache').textContent =
+      comp.cache == null ? '—' : (c.cache_hit_rate*100).toFixed(1) + '%';
+
+    document.getElementById('coach-depth').textContent =
+      c.avg_turns_per_session ? c.avg_turns_per_session : '—';
+
+    document.getElementById('coach-opus').textContent =
+      c.opus_cost_share != null ? (c.opus_cost_share*100).toFixed(0) + '%' : '—';
+
+    /* Tool usage bars */
+    const toolsEl = document.getElementById('coach-tools');
+    const tools = Object.entries(c.tools || {});
+    document.getElementById('coach-tools-sub').textContent =
+      c.tool_total ? fmtCount.format(c.tool_total) + ' calls' : '—';
+    if (!tools.length) {
+      toolsEl.innerHTML = '<div class="empty-bars">No tool calls observed yet.</div>';
+    } else {
+      const maxN = Math.max(...tools.map(([,n]) => n));
+      toolsEl.innerHTML = tools.slice(0, 12)
+        .map(([name, n]) => coachBar(name, n, maxN, fmtCount.format(n))).join('');
+    }
+
+    /* Tips */
+    const tipsEl = document.getElementById('coach-tips');
+    const tips = c.tips || [];
+    tipsEl.innerHTML = tips.length
+      ? tips.map(t => `<div style="margin:6px 0;padding:8px 10px;background:rgba(255,255,255,.04);border-left:3px solid #7c3aed;border-radius:4px;font-size:13px;line-height:1.5">${t}</div>`).join('')
+      : '<div class="empty-bars">—</div>';
+
+    /* Activity by hour */
+    const hoursEl = document.getElementById('coach-hours');
+    const hours = c.by_hour || [];
+    const maxH = hours.length ? Math.max(...hours) : 0;
+    if (!maxH) {
+      hoursEl.innerHTML = '<div class="empty-bars">No activity recorded yet.</div>';
+    } else {
+      hoursEl.innerHTML =
+        '<div style="display:flex;align-items:flex-end;gap:2px;height:90px">' +
+        hours.map((n, h) => {
+          const pct = maxH > 0 ? (n / maxH) * 100 : 0;
+          return `<div title="${h}:00 — ${n} turns" style="flex:1;display:flex;flex-direction:column;justify-content:flex-end;height:100%">
+            <div style="background:${n?'linear-gradient(180deg,#a855f7,#7c3aed)':'rgba(255,255,255,.05)'};height:${Math.max(2,pct)}%;border-radius:2px 2px 0 0"></div>
+          </div>`;
+        }).join('') +
+        '</div><div style="display:flex;justify-content:space-between;font-size:10px;color:#888;margin-top:4px"><span>0h</span><span>6h</span><span>12h</span><span>18h</span><span>23h</span></div>';
+    }
+  }
+
   refresh();
+  refreshCoach();
   setInterval(refresh, 5000);
+  setInterval(refreshCoach, 5000);
 </script>
 </body>
 </html>
@@ -3308,6 +3756,16 @@ DASHBOARD_HTML = """<!doctype html>
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard():
     return HTMLResponse(content=DASHBOARD_HTML)
+
+
+@app.get("/coach")
+async def coach():
+    """Privacy-safe coaching insights derived from proxied traffic.
+
+    Counts only — no prompt text, code or file paths are ever stored or
+    returned. Powers the Coaching section of /dashboard.
+    """
+    return JSONResponse(_compute_coach_view())
 
 
 @app.get("/quota")
@@ -3593,6 +4051,13 @@ async def proxy(path: str, request: Request):
     content_type = request.headers.get("content-type", "")
     body = sanitize_body(body, content_type)
 
+    # ── Coaching: tool-result signals (counts only, never content) ──
+    if COACH_ENABLED:
+        try:
+            _coach_record_request(body, content_type, path)
+        except Exception:
+            pass
+
     # ── Token saver ──
     if TOKEN_SAVER_ENABLED:
         body = optimize_tokens(body, content_type, path)
@@ -3719,6 +4184,11 @@ async def proxy(path: str, request: Request):
                     model, usage, usage_tap.session_id,
                     duration_ms=total_ms, user_label=usage_tap.user_label,
                 )
+            if COACH_ENABLED and usage_tap.is_messages:
+                try:
+                    _coach_record_response(*usage_tap.coach_signals())
+                except Exception:
+                    pass
             return Response(
                 content=buffered_body,
                 status_code=response.status_code,
@@ -3748,6 +4218,8 @@ async def proxy(path: str, request: Request):
                             model, usage, usage_tap.session_id,
                             duration_ms=total_ms, user_label=usage_tap.user_label,
                         )
+                    if COACH_ENABLED and usage_tap.is_messages:
+                        _coach_record_response(*usage_tap.coach_signals())
                 except Exception as e:
                     log(f"  {YELLOW}usage tap cleanup failed (non-fatal): {e}{RESET}")
 
