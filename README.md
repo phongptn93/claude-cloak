@@ -42,6 +42,7 @@ The proxy captures the device fingerprint (23 headers) from the first request, s
 | **Error Masking** | Internal errors never leak proxy details upstream |
 | **Auto-Config** | Automatically sets `ANTHROPIC_BASE_URL` in Claude Code settings |
 | **System Tray** | Optional Windows system tray app for background operation |
+| **Coding Coach** | Privacy-safe "how you code" insights (tool mix, anti-patterns, reliability, cache/model fit, practice score) — counts only, no content stored |
 | **Zero Config** | Just run `start.bat` — everything else is automatic |
 
 ## Quick Start
@@ -354,6 +355,40 @@ QUOTA_MAX_DAYS=30              # Cap on per-day buckets
 
 Set `QUOTA_MONTHLY_RESET=true` (default) to automatically clear `cost_usd_total`, `usage_total`, `by_model`, and `by_session` at the start of each calendar month. `by_day` history is preserved so the trend chart spans multiple months. The dashboard topbar shows a `YYYY-MM · resets in Nd` pill so you can see when the next reset happens.
 
+## Coding Coach (optional, on by default)
+
+Because every Claude Code request already flows through the proxy, it's the perfect vantage point to derive **coaching insights about *how* you code** — not just how much you spend. Inspired by tools like Microsoft's *AI Engineering Coach*, but rebuilt to fit this project's anonymity ethos.
+
+**Privacy by design** — the coach **counts only**. It never reads, stores, or transmits prompt text, code, or file paths, and it makes **no extra API calls** (no LLM grading of prompts). Prompt-content evaluation was deliberately left out: doing it well needs either reading sensitive content or spending tokens, and a heuristic on prompt text misses too many cases.
+
+### What it measures
+
+| Dimension | Signal | Source (already proxied) |
+|-----------|--------|--------------------------|
+| **Tool usage** | Count of each `tool_use` the assistant emits (Read, Edit, Bash, Grep, …) | Response stream |
+| **Read/edit discipline** | Reads vs. edits — editing far more than reading is an anti-pattern | `tool_use` counts |
+| **Tool reliability** | Share of `tool_result` blocks flagged `is_error` | Request bodies (last turn only) |
+| **Cache efficiency** | Cache hit rate `cache_read / (input + cache_read)` | Existing usage totals |
+| **Session depth** | Avg turns per distinct session | Existing per-session stats |
+| **Cadence** | Assistant turns by hour of day (local) | Response timing |
+| **Model fit** | Share of spend on the priciest Opus tier | Existing per-model stats |
+
+These roll up into a **practice score (0–100)** — a weighted blend of discipline, reliability, and cache efficiency — plus a list of **actionable tips** (e.g. *"50% tool calls failed — check paths before running"*, *"90% of cost is on Opus — consider Sonnet/Haiku for simple work"*).
+
+### Where to see it
+
+- **Dashboard**: a new **Coaching** section in `http://localhost:9999/dashboard` (score + metric cards, tool-usage bars, tips, activity-by-hour).
+- **JSON**: `GET /coach` returns the full computed view.
+
+### Config & persistence
+
+```bash
+COACH_ENABLED=true            # set false to disable entirely
+# COACH_PERSIST_PATH=         # default: .coach.json next to .env
+```
+
+Counters persist to `.coach.json` (gitignored), debounced on the same interval as quota stats and force-flushed on shutdown.
+
 ## Loki Log Shipping (optional)
 
 The proxy can forward structured events to a [Grafana Loki](https://grafana.com/oss/loki/) push endpoint, so you can visualise multi-device cost/usage in Grafana alongside whatever else you observe.
@@ -426,7 +461,7 @@ Instead of running one proxy per device, deploy a single proxy on a VM and point
    - `IP_LABELS` (optional) — `<ip>:<label>` map, used as a fallback when a client doesn't supply a `/u/<name>/` URL prefix
    - Per-user spend cap (optional) — period (monthly / daily), default cap, and per-label overrides
    - `CAPTURE_LOCK_FROM_IP` (optional) — restrict the first-request fingerprint capture to one specific source IP. Use this when you want a specific machine to provide the locked device identity, instead of "whoever happens to hit the proxy first"
-   - `STATS_PRIVATE` (optional) — when on, gate `/health`, `/quota`, `/quota/users`, and `/dashboard` behind `STATS_VIEW_IPS` (defaults to loopback) so whitelisted users can't see each other's spending
+   - `STATS_PRIVATE` (optional) — when on, gate `/health`, `/quota`, `/quota/users`, `/dashboard`, and `/coach` behind `STATS_VIEW_IPS` (defaults to loopback) so whitelisted users can't see each other's spending
    All get saved to `.env`. Re-runs skip the wizard unless `ALLOWED_IPS` is empty or you pass `--reconfigure`.
 4. **First request from a whitelisted device** auto-captures that device's identity headers (user-agent, `x-stainless-*`, etc.) and locks them in `.env`. Every subsequent request — from any device — has those headers injected, so Anthropic sees one device.
 
@@ -588,7 +623,8 @@ client/
 | `GET /u/{label}/whoami` | Client self-check: confirms IP is whitelisted + label is parsed + cap is what the operator set |
 | `POST /admin/quota/reset/{label}` | Reset a user's counters (loopback / `ADMIN_IPS` only) |
 | `* /u/{label}/{path}` | Same as `* /{path}` but accounts the request to `<label>` regardless of source IP |
-| `GET /dashboard` | Web UI rendering `/quota` as charts (Chart.js, dark theme, auto-refresh 5s) |
+| `GET /dashboard` | Web UI rendering `/quota` as charts (Chart.js, dark theme, auto-refresh 5s) + Coaching section |
+| `GET /coach` | Privacy-safe coaching insights JSON (see Coding Coach section) |
 | `* /{path}` | Proxy catch-all — applies all 8 layers then forwards to `api.anthropic.com/{path}` |
 
 ## Requirements

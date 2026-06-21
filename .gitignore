@@ -3,6 +3,8 @@ __pycache__/
 .env
 .quota.json
 .quota.json.tmp
+.coach.json
+.coach.json.tmp
 service.log
 *.egg-info/
 dist/
