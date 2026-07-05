@@ -30,9 +30,14 @@ if [ ! -f .env ]; then
     fi
 fi
 
-# ── Read LOCAL_PORT ────────────────────────────────────────────────────────────
+# ── Read config from .env ──────────────────────────────────────────────────────
+TRANSPARENT_MODE=$(grep -E '^TRANSPARENT_MODE=' .env 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
 LOCAL_PORT=$(grep -E '^LOCAL_PORT=' .env 2>/dev/null | cut -d= -f2 | tr -d '[:space:]')
-LOCAL_PORT=${LOCAL_PORT:-9999}
+if [ "$TRANSPARENT_MODE" = "true" ]; then
+    LOCAL_PORT=${LOCAL_PORT:-443}
+else
+    LOCAL_PORT=${LOCAL_PORT:-9999}
+fi
 
 # ── Kill any existing process on the port ─────────────────────────────────────
 if command -v lsof &>/dev/null; then
@@ -52,7 +57,27 @@ if ! python3 -c "import httpx" 2>/dev/null; then
 fi
 
 # ── Configure Claude Code ─────────────────────────────────────────────────────
-python3 setup_claude.py
+if [ "$TRANSPARENT_MODE" = "true" ]; then
+    echo
+    echo "TRANSPARENT MODE (keeps Claude Code's Remote Control working)"
+    # Ensure transparent-mode deps are present (existing installs may predate them).
+    if ! python3 -c "import wsproto, websockets, cryptography" 2>/dev/null; then
+        echo "Installing transparent-mode dependencies…"
+        python3 -m pip install -r requirements.txt
+    fi
+    # Mint local TLS certs for api.anthropic.com if they're not there yet.
+    if [ ! -f certs/api.anthropic.com.crt ] || [ ! -f certs/ca.crt ]; then
+        echo "Generating local TLS certificate chain…"
+        python3 gen_cert.py
+    fi
+    # Leave ANTHROPIC_BASE_URL unset; trust our CA via NODE_EXTRA_CA_CERTS.
+    python3 setup_claude.py --transparent
+    echo "Reminder: add '127.0.0.1  api.anthropic.com' to your hosts file,"
+    echo "and note that binding port $LOCAL_PORT may require sudo."
+    echo
+else
+    python3 setup_claude.py
+fi
 
 # ── Launch proxy ──────────────────────────────────────────────────────────────
 python3 proxy.py

@@ -33,6 +33,7 @@ import os
 import random
 import re
 import secrets
+import ssl
 import sys
 import time
 from contextlib import asynccontextmanager
@@ -41,7 +42,7 @@ from datetime import datetime
 import httpx
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 
 # Enable ANSI colors + force UTF-8 stdout/stderr on Windows so the banner
@@ -96,8 +97,62 @@ logger.addHandler(handler)
 logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-LOCAL_PORT = int(os.getenv("LOCAL_PORT", "9999"))
 ANTHROPIC_BASE_URL = "https://api.anthropic.com"
+
+# ============================================================
+# TRANSPARENT MODE  (keeps Claude Code's "Remote Control" working)
+#
+# Claude Code v2.1.196+ disables Remote Control whenever ANTHROPIC_BASE_URL
+# points at a host other than api.anthropic.com — which is exactly what the
+# normal Claude Cloak setup does (ANTHROPIC_BASE_URL=http://127.0.0.1:9999).
+# The check is a client-side hostname comparison, so no amount of response
+# rewriting re-enables it: Claude Code simply has to still believe it is
+# talking to api.anthropic.com.
+#
+# Transparent mode makes that true. Instead of pointing ANTHROPIC_BASE_URL at
+# the proxy, you:
+#   1. leave ANTHROPIC_BASE_URL UNSET (so Remote Control stays enabled),
+#   2. add a hosts entry  `127.0.0.1  api.anthropic.com`  so the client's
+#      traffic for api.anthropic.com lands on this proxy, and
+#   3. trust our local TLS cert for api.anthropic.com via NODE_EXTRA_CA_CERTS.
+#
+# The proxy then terminates TLS as api.anthropic.com, applies all anonymity
+# layers, and forwards upstream to the REAL api.anthropic.com. Because the
+# hosts entry would otherwise make us resolve api.anthropic.com back to
+# ourselves (127.0.0.1 → infinite loop), we connect upstream by IP while
+# still presenting SNI + Host = api.anthropic.com so TLS verification passes.
+# ============================================================
+TRANSPARENT_MODE = os.getenv("TRANSPARENT_MODE", "false").strip().lower() == "true"
+
+# In transparent mode we must own port 443 (that's where the client sends
+# https://api.anthropic.com). Honour an explicit LOCAL_PORT if the user set
+# one, otherwise default to 443 in transparent mode and 9999 otherwise.
+if "LOCAL_PORT" in os.environ and os.environ["LOCAL_PORT"].strip():
+    LOCAL_PORT = int(os.environ["LOCAL_PORT"])
+else:
+    LOCAL_PORT = 443 if TRANSPARENT_MODE else 9999
+
+_CERT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "certs")
+TLS_CERT = os.getenv("TLS_CERT", "").strip() or os.path.join(_CERT_DIR, "api.anthropic.com.crt")
+TLS_KEY = os.getenv("TLS_KEY", "").strip() or os.path.join(_CERT_DIR, "api.anthropic.com.key")
+
+# Real upstream we forward to. UPSTREAM_HOST is what we present (SNI + Host +
+# cert verification); UPSTREAM_IP/UPSTREAM_PORT are where we actually connect.
+UPSTREAM_HOST = os.getenv("UPSTREAM_HOST", "api.anthropic.com").strip() or "api.anthropic.com"
+UPSTREAM_IP = os.getenv("UPSTREAM_IP", "").strip()
+try:
+    UPSTREAM_PORT = int(os.getenv("UPSTREAM_PORT", "443") or "443")
+except ValueError:
+    UPSTREAM_PORT = 443
+# DNS-over-HTTPS resolver used to find the real api.anthropic.com IP without
+# consulting the hosts file (which now points back at us). JSON API format.
+DOH_URL = os.getenv("DOH_URL", "https://1.1.1.1/dns-query").strip()
+# CA bundle to verify the REAL upstream against. Empty = default public CAs
+# (correct for the real api.anthropic.com). Set this only if your network does
+# TLS inspection and presents its own CA on the way to Anthropic.
+UPSTREAM_CA = os.getenv("UPSTREAM_CA", "").strip()
+# Filled in at startup by _resolve_upstream_ip(); the IP we open TCP/TLS to.
+UPSTREAM_CONNECT_IP = UPSTREAM_IP
 
 # ============================================================
 # DEPLOY MODE
@@ -2167,10 +2222,21 @@ def print_status():
     else:
         uq_status = f"{YELLOW}OFF{RESET}"
 
+    scheme = "https" if TRANSPARENT_MODE else "http"
+    host_disp = 'localhost' if LOCAL_HOST in ('127.0.0.1', '0.0.0.0') else LOCAL_HOST
+
     print(f"  {DIM}{'─' * 60}{RESET}")
     print(f"  {CYAN} Mode        {RESET}{mode_status}")
-    print(f"  {CYAN} Server      {RESET}{WHITE}http://{'localhost' if LOCAL_HOST in ('127.0.0.1', '0.0.0.0') else LOCAL_HOST}:{LOCAL_PORT}{RESET}")
-    print(f"  {CYAN} Target      {RESET}{WHITE}{ANTHROPIC_BASE_URL}{RESET}")
+    print(f"  {CYAN} Server      {RESET}{WHITE}{scheme}://{host_disp}:{LOCAL_PORT}{RESET}")
+    if TRANSPARENT_MODE:
+        upstream_disp = (
+            f"{UPSTREAM_HOST} → {UPSTREAM_CONNECT_IP or '?'}:{UPSTREAM_PORT}"
+        )
+        print(f"  {CYAN} Transparent {RESET}{GREEN}ON{RESET} "
+              f"{DIM}(Remote Control compatible; TLS as {UPSTREAM_HOST}){RESET}")
+        print(f"  {CYAN} Target      {RESET}{WHITE}{upstream_disp}{RESET}")
+    else:
+        print(f"  {CYAN} Target      {RESET}{WHITE}{ANTHROPIC_BASE_URL}{RESET}")
     print(f"  {DIM}{'─' * 60}{RESET}")
     print(f"  {CYAN} Identity    {RESET}{identity_status}")
     print(f"  {CYAN} Telemetry   {RESET}{telemetry_status}")
@@ -2217,9 +2283,63 @@ def print_status():
     print()
 
 
+async def _resolve_via_doh(host: str) -> str | None:
+    """Resolve `host` via DNS-over-HTTPS so we bypass /etc/hosts (which, in
+    transparent mode, points api.anthropic.com back at us). Returns the first
+    non-loopback A record, or None on any failure."""
+    if not DOH_URL:
+        return None
+    try:
+        resp = await http_client.get(
+            DOH_URL,
+            params={"name": host, "type": "A"},
+            headers={"accept": "application/dns-json"},
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        answers = resp.json().get("Answer", [])
+        for ans in answers:
+            # type 1 == A record
+            if ans.get("type") == 1:
+                ip = str(ans.get("data", "")).strip()
+                try:
+                    if ip and not ipaddress.ip_address(ip).is_loopback:
+                        return ip
+                except ValueError:
+                    continue
+    except Exception as e:
+        log(f"  {YELLOW}DoH resolve failed ({e}); will fall back{RESET}")
+    return None
+
+
+async def _resolve_upstream_ip() -> str | None:
+    """Find the real IP for UPSTREAM_HOST, never returning a loopback address
+    (that would mean the hosts override looped back onto us)."""
+    if UPSTREAM_IP:
+        return UPSTREAM_IP
+    ip = await _resolve_via_doh(UPSTREAM_HOST)
+    if ip:
+        return ip
+    # Last resort: the system resolver. Reject loopback so we never self-loop.
+    try:
+        infos = _socket.getaddrinfo(
+            UPSTREAM_HOST, UPSTREAM_PORT, proto=_socket.IPPROTO_TCP
+        )
+        for info in infos:
+            cand = info[4][0]
+            try:
+                if not ipaddress.ip_address(cand).is_loopback:
+                    return cand
+            except ValueError:
+                continue
+    except OSError:
+        pass
+    return None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global http_client, _loki_flusher_task
+    global http_client, _loki_flusher_task, UPSTREAM_CONNECT_IP
     http_client = httpx.AsyncClient(
         timeout=httpx.Timeout(300.0, connect=10.0),
         limits=httpx.Limits(
@@ -2227,7 +2347,17 @@ async def lifespan(app: FastAPI):
             max_keepalive_connections=5,
             keepalive_expiry=30.0,
         ),
+        verify=UPSTREAM_CA if UPSTREAM_CA else True,
     )
+    if TRANSPARENT_MODE:
+        UPSTREAM_CONNECT_IP = await _resolve_upstream_ip()
+        if UPSTREAM_CONNECT_IP:
+            log(f"  {GREEN}Transparent mode: upstream {UPSTREAM_HOST} "
+                f"→ {UPSTREAM_CONNECT_IP}:{UPSTREAM_PORT}{RESET}")
+        else:
+            log(f"  {BG_RED}{BOLD} WARN {RESET} {RED}Transparent mode could not resolve "
+                f"a non-loopback IP for {UPSTREAM_HOST}. Set UPSTREAM_IP in .env "
+                f"or requests will loop back to the proxy.{RESET}")
     _load_quota_stats()
     _load_coach_stats()
     print_banner()
@@ -2462,10 +2592,20 @@ async def health():
         "deploy": {
             "mode": DEPLOY_MODE,
             "bind_host": LOCAL_HOST,
+            "bind_port": LOCAL_PORT,
             "allowed_ips": [str(n) for n in ALLOWED_NETWORKS],
             "labels_configured": len(IP_LABEL_MAP),
             "user_quota_enabled": USER_QUOTA_ENABLED,
             "user_quota_period": USER_QUOTA_PERIOD,
+        },
+        "transparent_mode": {
+            "enabled": TRANSPARENT_MODE,
+            # When on, Claude Code keeps ANTHROPIC_BASE_URL=api.anthropic.com,
+            # so Remote Control (v2.1.196+) stays available.
+            "remote_control_compatible": TRANSPARENT_MODE,
+            "upstream_host": UPSTREAM_HOST,
+            "upstream_ip": UPSTREAM_CONNECT_IP,
+            "upstream_port": UPSTREAM_PORT,
         },
     }
 
@@ -4017,6 +4157,129 @@ async def admin_reset_user(label: str):
     return _user_bucket_view(b)
 
 
+# Hop-by-hop / handshake headers we must not forward onto the upstream WS.
+_WS_SKIP_HEADERS = {
+    "host", "connection", "upgrade", "content-length",
+    "sec-websocket-key", "sec-websocket-version",
+    "sec-websocket-extensions", "sec-websocket-accept",
+    "sec-websocket-protocol",
+}
+
+
+@app.websocket("/{path:path}")
+async def proxy_ws(websocket: WebSocket, path: str):
+    """Transparent-mode WebSocket passthrough.
+
+    Claude Code's Remote Control opens a `wss://api.anthropic.com/...` control
+    channel. In transparent mode the hosts entry lands that on us, so we bridge
+    it to the real upstream — connecting by IP with SNI = api.anthropic.com so
+    TLS still verifies, and forwarding the client's auth/identity headers."""
+    try:
+        import websockets  # lazy: only needed for transparent mode
+    except ImportError:
+        await websocket.close(code=1011)
+        return
+
+    # Build the upstream URI with the PRESENTED hostname (api.anthropic.com), so
+    # the auto-generated Host header is correct and singular. The actual TCP
+    # target is overridden to UPSTREAM_CONNECT_IP via host=/port= kwargs — that
+    # is what breaks the hosts-file loop while keeping Host/SNI = the hostname.
+    query = websocket.url.query
+    if UPSTREAM_PORT == 443:
+        upstream_uri = f"wss://{UPSTREAM_HOST}/{path}"
+    else:
+        upstream_uri = f"wss://{UPSTREAM_HOST}:{UPSTREAM_PORT}/{path}"
+    if query:
+        upstream_uri += f"?{query}"
+
+    # Forward auth + locked identity headers; drop hop-by-hop / IP-leaking ones.
+    # NOTE: never set Host here — websockets derives it from the URI. Setting it
+    # too would send a duplicate Host header, which strict servers reject.
+    fwd_headers: dict[str, str] = {}
+    for k, v in websocket.headers.items():
+        kl = k.lower()
+        if kl in _WS_SKIP_HEADERS or kl in STRIP_REQUEST_HEADERS or kl == "cookie":
+            continue
+        fwd_headers[k] = v
+    if captured_identity:
+        for h, val in captured_identity.items():
+            fwd_headers[h] = val
+
+    offered = websocket.headers.get("sec-websocket-protocol")
+    subprotocols = [p.strip() for p in offered.split(",")] if offered else None
+
+    ssl_ctx = ssl.create_default_context(cafile=UPSTREAM_CA or None)
+
+    # ssl / server_hostname / host / port are forwarded to create_connection.
+    # websockets>=14 uses additional_headers; older releases use extra_headers.
+    connect_kwargs = dict(
+        ssl=ssl_ctx,
+        server_hostname=UPSTREAM_HOST,
+        subprotocols=subprotocols,
+        open_timeout=15,
+        max_size=None,
+    )
+    if TRANSPARENT_MODE and UPSTREAM_CONNECT_IP:
+        connect_kwargs["host"] = UPSTREAM_CONNECT_IP
+        connect_kwargs["port"] = UPSTREAM_PORT
+    try:
+        try:
+            upstream = await websockets.connect(
+                upstream_uri, additional_headers=fwd_headers, **connect_kwargs
+            )
+        except TypeError:
+            # Older websockets releases call it extra_headers, not additional_headers.
+            upstream = await websockets.connect(
+                upstream_uri, extra_headers=fwd_headers, **connect_kwargs
+            )
+    except Exception as e:
+        log(f"  {RED}WS upstream connect failed: {e}{RESET}")
+        await websocket.close(code=1011)
+        return
+
+    negotiated = getattr(upstream, "subprotocol", None)
+    await websocket.accept(subprotocol=negotiated)
+    log(f"  {GREEN}WS bridged{RESET} {DIM}/{path}{RESET}")
+
+    async def client_to_upstream():
+        try:
+            while True:
+                msg = await websocket.receive()
+                if msg.get("type") == "websocket.disconnect":
+                    break
+                if msg.get("text") is not None:
+                    await upstream.send(msg["text"])
+                elif msg.get("bytes") is not None:
+                    await upstream.send(msg["bytes"])
+        except (WebSocketDisconnect, Exception):
+            pass
+
+    async def upstream_to_client():
+        try:
+            async for msg in upstream:
+                if isinstance(msg, (bytes, bytearray)):
+                    await websocket.send_bytes(bytes(msg))
+                else:
+                    await websocket.send_text(msg)
+        except Exception:
+            pass
+
+    t1 = asyncio.ensure_future(client_to_upstream())
+    t2 = asyncio.ensure_future(upstream_to_client())
+    try:
+        done, pending = await asyncio.wait(
+            {t1, t2}, return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in pending:
+            task.cancel()
+    finally:
+        await upstream.close()
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"])
 async def proxy(path: str, request: Request):
     global request_count, blocked_requests_count
@@ -4053,8 +4316,20 @@ async def proxy(path: str, request: Request):
         jitter_ms = random.randint(TIMING_JITTER_MIN_MS, TIMING_JITTER_MAX_MS)
         await _async_sleep(jitter_ms / 1000.0)
 
-    target_url = f"{ANTHROPIC_BASE_URL}/{path}"
     headers = build_request_headers(request)
+
+    # ── Upstream target ──
+    # Normal mode: forward straight to api.anthropic.com via DNS.
+    # Transparent mode: the hosts file points api.anthropic.com back at us, so
+    # we connect to the real upstream BY IP while presenting SNI + Host =
+    # api.anthropic.com (send_extensions) — otherwise we'd loop into ourselves.
+    send_extensions: dict = {}
+    if TRANSPARENT_MODE and UPSTREAM_CONNECT_IP:
+        target_url = f"https://{UPSTREAM_CONNECT_IP}:{UPSTREAM_PORT}/{path}"
+        headers["host"] = UPSTREAM_HOST
+        send_extensions = {"sni_hostname": UPSTREAM_HOST}
+    else:
+        target_url = f"{ANTHROPIC_BASE_URL}/{path}"
     body = await request.body()
 
     # ── Body sanitization ──
@@ -4097,6 +4372,7 @@ async def proxy(path: str, request: Request):
             headers=headers,
             content=body,
             params=dict(request.query_params),
+            extensions=send_extensions,
         )
         response = await http_client.send(req, stream=True)
 
@@ -4312,6 +4588,27 @@ if __name__ == "__main__":
                   f"who can be the first-capturer.{RESET}")
         print()
 
+    ssl_kwargs = {}
+    if TRANSPARENT_MODE:
+        if not (os.path.isfile(TLS_CERT) and os.path.isfile(TLS_KEY)):
+            print()
+            print(f"  {BG_RED}{BOLD} BOOT ABORTED {RESET}")
+            print(
+                f"  {RED}TRANSPARENT_MODE=true but the TLS cert/key are missing.{RESET}\n"
+                f"  {YELLOW}Expected:{RESET}\n"
+                f"    {CYAN}TLS_CERT={TLS_CERT}{RESET}\n"
+                f"    {CYAN}TLS_KEY={TLS_KEY}{RESET}\n"
+                f"  {YELLOW}Generate them with:{RESET}\n"
+                f"    {CYAN}python gen_cert.py{RESET}"
+            )
+            print()
+            sys.exit(1)
+        ssl_kwargs = {"ssl_certfile": TLS_CERT, "ssl_keyfile": TLS_KEY}
+        # Remote Control opens a WebSocket. Use wsproto for the server side so
+        # WS support doesn't depend on the installed `websockets` version
+        # (uvicorn's bundled websockets impl breaks across major bumps).
+        ssl_kwargs["ws"] = "wsproto"
+
     uvicorn.run(
         app,
         host=LOCAL_HOST,
@@ -4320,4 +4617,5 @@ if __name__ == "__main__":
         # Don't expose server header
         server_header=False,
         date_header=False,
+        **ssl_kwargs,
     )

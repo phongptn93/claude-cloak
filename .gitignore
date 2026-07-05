@@ -6,6 +6,14 @@ __pycache__/
 .coach.json
 .coach.json.tmp
 service.log
+
+# Local TLS certs generated for transparent (Remote-Control) mode.
+# These are machine-local and must never be committed.
+client/certs/
+*.crt
+*.key
+*.pem
+
 *.egg-info/
 dist/
 build/

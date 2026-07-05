@@ -41,6 +41,7 @@ The proxy captures the device fingerprint (23 headers) from the first request, s
 | **Consistent IDs** | HMAC-SHA256 based IDs — all devices produce identical derived values |
 | **Error Masking** | Internal errors never leak proxy details upstream |
 | **Auto-Config** | Automatically sets `ANTHROPIC_BASE_URL` in Claude Code settings |
+| **Remote Control** | Optional transparent mode keeps Claude Code's Remote Control working through the proxy (see below) |
 | **System Tray** | Optional Windows system tray app for background operation |
 | **Coding Coach** | Privacy-safe "how you code" insights (tool mix, anti-patterns, reliability, cache/model fit, practice score) — counts only, no content stored |
 | **Zero Config** | Just run `start.bat` — everything else is automatic |
@@ -71,6 +72,54 @@ start.bat         # Start proxy + auto-config Claude Code
 ```
 
 Log in to the same Claude Code account. The proxy replaces your device's fingerprint with the one captured from the first device.
+
+## Remote Control (Transparent Mode)
+
+Claude Code's **Remote Control** feature is gated on the base URL:
+
+> Remote Control is only available when using Claude via api.anthropic.com.
+
+As of Claude Code **v2.1.196**, Remote Control is disabled whenever `ANTHROPIC_BASE_URL` points at any host other than `api.anthropic.com`. The normal Claude Cloak setup sets `ANTHROPIC_BASE_URL=http://127.0.0.1:9999`, which trips that check. Because the check is a **client-side hostname comparison**, no response rewriting can re-enable it — Claude Code simply has to keep believing it is talking to `api.anthropic.com`.
+
+**Transparent mode** makes that true while still routing every request through the proxy:
+
+| Normal mode | Transparent mode |
+|-------------|------------------|
+| `ANTHROPIC_BASE_URL=http://127.0.0.1:9999` | `ANTHROPIC_BASE_URL` **unset** |
+| Traffic routed by env var | Traffic routed by a hosts entry (`127.0.0.1 api.anthropic.com`) |
+| Plain HTTP proxy | Local HTTPS listener presenting a cert for `api.anthropic.com` |
+| Remote Control **disabled** | Remote Control **works** |
+
+How it works: the proxy terminates TLS as `api.anthropic.com` (using a locally-minted cert your Claude Code trusts via `NODE_EXTRA_CA_CERTS`), applies all anonymity layers, then forwards to the **real** `api.anthropic.com`. Since the hosts entry would otherwise make the proxy resolve `api.anthropic.com` back to itself, upstream connections are made **by IP** while still presenting SNI + `Host: api.anthropic.com` so TLS verification passes. Remote Control's WebSocket control channel is proxied the same way.
+
+### Enabling it
+
+```bash
+cd client
+# 1. turn on transparent mode
+echo "TRANSPARENT_MODE=true" >> .env
+# 2. start.sh mints the cert, configures Claude Code, and prints the hosts line
+sudo ./start.sh            # sudo: binding port 443 needs privileges
+```
+
+`start.sh` / `start.bat` automatically:
+
+1. run `python gen_cert.py` to mint `certs/ca.crt` + `certs/api.anthropic.com.{crt,key}`,
+2. run `python setup_claude.py --transparent` — which **removes** any `ANTHROPIC_BASE_URL` override and sets `NODE_EXTRA_CA_CERTS` to the local CA,
+3. remind you to add the hosts entry.
+
+The one manual step is the hosts file (needs admin rights):
+
+```
+127.0.0.1  api.anthropic.com
+```
+
+- **Linux / macOS:** `/etc/hosts` (edit with `sudo`)
+- **Windows:** `C:\Windows\System32\drivers\etc\hosts` (edit as Administrator)
+
+To undo, remove the hosts line, set `TRANSPARENT_MODE=false`, and run `python setup_claude.py` (or `--remote URL`) to go back to the plain proxy.
+
+> The generated CA is local-only and git-ignored. It lets **your** Claude Code trust **your** proxy; it does not let anyone impersonate Anthropic to anyone else.
 
 ## Security Layers
 
@@ -593,7 +642,9 @@ If `service.log` shows `'python' is not recognized` or `'py' is not recognized`,
 ```
 client/
 ├── proxy.py               # Main proxy server (FastAPI) — anonymity layers, token saver, quota tracking, dashboard, Loki shipping
-├── setup_claude.py        # Auto-config Claude Code → proxy URL (reads LOCAL_PORT from .env)
+├── setup_claude.py        # Auto-config Claude Code → proxy URL (or --transparent for Remote Control mode)
+├── gen_cert.py            # Mint a local CA + api.anthropic.com cert for transparent (Remote Control) mode
+├── certs/                 # Generated TLS certs for transparent mode (git-ignored)
 ├── tray_app.py            # Optional Windows system tray app
 ├── start.bat              # Windows: LOCAL mode (per-device proxy on 127.0.0.1)
 ├── start.sh               # macOS / Linux: LOCAL mode (per-device proxy)
@@ -626,6 +677,7 @@ client/
 | `GET /dashboard` | Web UI rendering `/quota` as charts (Chart.js, dark theme, auto-refresh 5s) + Coaching section |
 | `GET /coach` | Privacy-safe coaching insights JSON (see Coding Coach section) |
 | `* /{path}` | Proxy catch-all — applies all 8 layers then forwards to `api.anthropic.com/{path}` |
+| `WS /{path}` | WebSocket passthrough (transparent mode) — bridges Remote Control's `wss://api.anthropic.com/...` control channel to the real upstream |
 
 ## Requirements
 
@@ -643,6 +695,9 @@ client/
 | Unknown header warning | Proxy detected a new header not in its known list. Check console and decide if it should be captured |
 | Timing jitter too slow | Reduce `TIMING_JITTER_MAX_MS` in `.env` or set `TIMING_JITTER=false` |
 | Empty response from API | Check proxy console for error status codes |
+| "Remote Control is only available when using Claude via api.anthropic.com" | You're in normal proxy mode (`ANTHROPIC_BASE_URL` is set). Switch to transparent mode — see [Remote Control (Transparent Mode)](#remote-control-transparent-mode) |
+| Transparent mode: `SELF_SIGNED_CERT_IN_CHAIN` / TLS errors in Claude Code | `NODE_EXTRA_CA_CERTS` isn't pointing at `certs/ca.crt`. Re-run `python setup_claude.py --transparent` and restart Claude Code |
+| Transparent mode: requests hang or loop | The proxy couldn't find a non-loopback upstream IP (DoH blocked). Pin it with `UPSTREAM_IP=<real api.anthropic.com IP>` in `.env` |
 
 ---
 
