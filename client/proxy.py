@@ -115,6 +115,27 @@ LOCAL_HOST = os.getenv(
     "0.0.0.0" if DEPLOY_MODE == "server" else "127.0.0.1",
 ).strip() or "127.0.0.1"
 
+# ============================================================
+# MITM TEST MODE (opt-in, additive — does not touch the flow above)
+#   Runs a SECOND uvicorn listener, on its own port, that terminates TLS
+#   using a forged cert for api.anthropic.com (see generate_mitm_cert.py).
+#   Purpose: let a client that has NOT set ANTHROPIC_BASE_URL (so Claude
+#   Code's Remote Control feature stays enabled) still route through this
+#   same cloak app, via hosts-file redirect of api.anthropic.com to this
+#   server + a locally-trusted root CA installed on that client.
+#   Requires the client machine to install certs/rootCA.crt as a trusted
+#   root AND to add a hosts-file entry pointing api.anthropic.com here.
+#   UNVERIFIED: whether Claude Code pins the api.anthropic.com certificate
+#   (which would reject the forged leaf regardless of CA trust) is not
+#   documented — this mode exists to test that assumption.
+# ============================================================
+MITM_ENABLED = os.getenv("MITM_ENABLED", "false").strip().lower() == "true"
+MITM_HOST = os.getenv("MITM_HOST", LOCAL_HOST).strip() or LOCAL_HOST
+MITM_PORT = int(os.getenv("MITM_PORT", "8443"))
+_CERTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "certs")
+MITM_CERT_FILE = os.getenv("MITM_CERT_FILE", os.path.join(_CERTS_DIR, "api.anthropic.com.crt"))
+MITM_KEY_FILE = os.getenv("MITM_KEY_FILE", os.path.join(_CERTS_DIR, "api.anthropic.com.key"))
+
 
 def _parse_allowed_networks(raw: str) -> list:
     """Parse a comma-separated list of IPs / CIDR blocks (v4 + v6)."""
@@ -2217,26 +2238,39 @@ def print_status():
     print()
 
 
+# When MITM_ENABLED spins up a second uvicorn.Server sharing this same app,
+# each Server independently drives the ASGI lifespan — a refcount makes the
+# one-time setup/teardown run exactly once regardless of how many listeners
+# are attached (1 in the normal, non-MITM case — behaviour unchanged there).
+_lifespan_refcount = 0
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global http_client, _loki_flusher_task
-    http_client = httpx.AsyncClient(
-        timeout=httpx.Timeout(300.0, connect=10.0),
-        limits=httpx.Limits(
-            max_connections=10,
-            max_keepalive_connections=5,
-            keepalive_expiry=30.0,
-        ),
-    )
-    _load_quota_stats()
-    _load_coach_stats()
-    print_banner()
-    print_status()
-    if LOKI_ENABLED:
-        _loki_flusher_task = asyncio.create_task(_loki_flusher_loop())
+    global http_client, _loki_flusher_task, _lifespan_refcount
+    _lifespan_refcount += 1
+    is_first = _lifespan_refcount == 1
+    if is_first:
+        http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(300.0, connect=10.0),
+            limits=httpx.Limits(
+                max_connections=10,
+                max_keepalive_connections=5,
+                keepalive_expiry=30.0,
+            ),
+        )
+        _load_quota_stats()
+        _load_coach_stats()
+        print_banner()
+        print_status()
+        if LOKI_ENABLED:
+            _loki_flusher_task = asyncio.create_task(_loki_flusher_loop())
     try:
         yield
     finally:
+        _lifespan_refcount -= 1
+        if _lifespan_refcount > 0:
+            return
         if _loki_flusher_task is not None:
             _loki_flusher_task.cancel()
             try:
@@ -4312,12 +4346,48 @@ if __name__ == "__main__":
                   f"who can be the first-capturer.{RESET}")
         print()
 
-    uvicorn.run(
-        app,
-        host=LOCAL_HOST,
-        port=LOCAL_PORT,
-        log_level="warning",
-        # Don't expose server header
-        server_header=False,
-        date_header=False,
-    )
+    async def _run_servers():
+        configs = [
+            uvicorn.Config(
+                app,
+                host=LOCAL_HOST,
+                port=LOCAL_PORT,
+                log_level="warning",
+                # Don't expose server header
+                server_header=False,
+                date_header=False,
+            )
+        ]
+
+        if MITM_ENABLED:
+            if os.path.isfile(MITM_CERT_FILE) and os.path.isfile(MITM_KEY_FILE):
+                configs.append(
+                    uvicorn.Config(
+                        app,
+                        host=MITM_HOST,
+                        port=MITM_PORT,
+                        log_level="warning",
+                        server_header=False,
+                        date_header=False,
+                        ssl_certfile=MITM_CERT_FILE,
+                        ssl_keyfile=MITM_KEY_FILE,
+                    )
+                )
+                print(
+                    f"  {BG_YELLOW}{BOLD} MITM TEST MODE {RESET} "
+                    f"{YELLOW}listening on {MITM_HOST}:{MITM_PORT}, impersonating "
+                    f"api.anthropic.com — only for clients with the forged root CA "
+                    f"trusted + hosts-file override.{RESET}"
+                )
+            else:
+                print(
+                    f"  {RED}MITM_ENABLED=true but cert/key not found:{RESET}\n"
+                    f"    {MITM_CERT_FILE}\n    {MITM_KEY_FILE}\n"
+                    f"  {YELLOW}Run: python generate_mitm_cert.py — then restart. "
+                    f"Continuing with the normal HTTP flow only.{RESET}"
+                )
+
+        servers = [uvicorn.Server(cfg) for cfg in configs]
+        await asyncio.gather(*(s.serve() for s in servers))
+
+    asyncio.run(_run_servers())

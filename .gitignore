@@ -9,3 +9,4 @@ service.log
 *.egg-info/
 dist/
 build/
+client/certs/
