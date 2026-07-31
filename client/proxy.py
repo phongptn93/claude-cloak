@@ -506,9 +506,29 @@ QUOTA_TRACKING_ENABLED = os.getenv("QUOTA_TRACKING", "true").lower() == "true"
 # Anthropic changes them or you want plan-specific rates.
 #
 # Tiers: input, output, cache_write_5m, cache_write_1h, cache_read.
-# Model key is matched by substring against the response `model` field.
+# Cache tiers follow Anthropic's standard multipliers on the input price:
+#   5m write = 1.25x, 1h write = 2x, read = 0.1x.
+# Model key is matched by substring against the response `model` field;
+# longer keys win, so `opus-4.8` is picked over the legacy `opus-4` entry.
+#
+# IMPORTANT: Opus 4.5 and newer are $5/$25 — only Opus 4.0/4.1 and Opus 3
+# carry the old $15/$75 rate. Keep those rows separate or 4.x traffic gets
+# billed at 3x its real cost.
 PRICING_DEFAULTS: dict[str, dict[str, float]] = {
+    # ---- Claude 5 family ----
+    "fable-5":   {"input": 10.00, "output": 50.00, "cache_write_5m": 12.50, "cache_write_1h": 20.00, "cache_read": 1.00},
+    "mythos-5":  {"input": 10.00, "output": 50.00, "cache_write_5m": 12.50, "cache_write_1h": 20.00, "cache_read": 1.00},
+    "opus-5":    {"input":  5.00, "output": 25.00, "cache_write_5m":  6.25, "cache_write_1h": 10.00, "cache_read": 0.50},
+    "sonnet-5":  {"input":  3.00, "output": 15.00, "cache_write_5m":  3.75, "cache_write_1h":  6.00, "cache_read": 0.30},
+    # ---- Opus 4.x (4.5+ moved to the $5/$25 tier) ----
+    "opus-4.8":  {"input":  5.00, "output": 25.00, "cache_write_5m":  6.25, "cache_write_1h": 10.00, "cache_read": 0.50},
+    "opus-4.7":  {"input":  5.00, "output": 25.00, "cache_write_5m":  6.25, "cache_write_1h": 10.00, "cache_read": 0.50},
+    "opus-4.6":  {"input":  5.00, "output": 25.00, "cache_write_5m":  6.25, "cache_write_1h": 10.00, "cache_read": 0.50},
+    "opus-4.5":  {"input":  5.00, "output": 25.00, "cache_write_5m":  6.25, "cache_write_1h": 10.00, "cache_read": 0.50},
+    "opus-4.1":  {"input": 15.00, "output": 75.00, "cache_write_5m": 18.75, "cache_write_1h": 30.00, "cache_read": 1.50},
     "opus-4":    {"input": 15.00, "output": 75.00, "cache_write_5m": 18.75, "cache_write_1h": 30.00, "cache_read": 1.50},
+    # ---- Sonnet / Haiku ----
+    "sonnet-4.6":{"input":  3.00, "output": 15.00, "cache_write_5m":  3.75, "cache_write_1h":  6.00, "cache_read": 0.30},
     "sonnet-4":  {"input":  3.00, "output": 15.00, "cache_write_5m":  3.75, "cache_write_1h":  6.00, "cache_read": 0.30},
     "haiku-4":   {"input":  1.00, "output":  5.00, "cache_write_5m":  1.25, "cache_write_1h":  2.00, "cache_read": 0.10},
     "opus-3":    {"input": 15.00, "output": 75.00, "cache_write_5m": 18.75, "cache_write_1h": 30.00, "cache_read": 1.50},
@@ -517,6 +537,21 @@ PRICING_DEFAULTS: dict[str, dict[str, float]] = {
     "haiku-3.5": {"input":  0.80, "output":  4.00, "cache_write_5m":  1.00, "cache_write_1h":  1.60, "cache_read": 0.08},
     "haiku-3":   {"input":  0.25, "output":  1.25, "cache_write_5m":  0.30, "cache_write_1h":  0.50, "cache_read": 0.03},
 }
+
+# Fallback rate for a model id that matches no key above (e.g. a model that
+# shipped after this build). Without it such traffic is silently costed at
+# $0 and the dashboard under-reports spend. Defaults to the Opus-tier rate so
+# the estimate errs high rather than invisible; set PRICING_FALLBACK_INPUT=0
+# to restore the old "unknown = free" behaviour.
+PRICING_FALLBACK = {
+    "input": float(os.getenv("PRICING_FALLBACK_INPUT", "5.00")),
+    "output": float(os.getenv("PRICING_FALLBACK_OUTPUT", "25.00")),
+}
+PRICING_FALLBACK.update({
+    "cache_write_5m": PRICING_FALLBACK["input"] * 1.25,
+    "cache_write_1h": PRICING_FALLBACK["input"] * 2.0,
+    "cache_read": PRICING_FALLBACK["input"] * 0.1,
+})
 
 
 def _load_pricing() -> dict[str, dict[str, float]]:
@@ -560,7 +595,53 @@ quota_stats = {
     "messages_requests": 0,
     "last_request_at": None,
     "period_month": "",  # YYYY-MM of current tracking period; auto-reset on rollover
+    "unpriced_models": {},  # raw model id -> count (costed at PRICING_FALLBACK)
 }
+
+# ============================================================
+# STREAM HEALTH
+# In-memory counters for the failure mode that shows up client-side as
+# "Response stalled mid-stream": the proxy holds the connection open but no
+# bytes reach Claude Code. Tracked here so a stall is diagnosable after the
+# fact instead of being invisible. Surfaced in /health, /quota and the
+# dashboard; never persisted (a restart resets the picture on purpose).
+# ============================================================
+stream_stats = {
+    "streams_started": 0,
+    "streams_completed": 0,
+    "stalls": 0,             # upstream went silent past UPSTREAM_STALL_SECONDS
+    "client_disconnects": 0,  # client went away mid-stream (usually benign)
+    "connect_retries": 0,     # transport retried before any byte was forwarded
+    "pool_waits": 0,          # request waited on a free upstream connection
+    "pool_wait_ms_total": 0,
+    "ttfb_ms_total": 0,       # time-to-first-byte, summed over streams
+    "ttfb_ms_max": 0,
+    "ttfb_samples": 0,
+    "last_stall_at": None,
+}
+
+# ============================================================
+# UPSTREAM CONNECTION TUNING
+# The defaults below are sized for a shared proxy: Claude Code alone opens
+# several concurrent requests per turn (main loop, subagents, title/quota
+# calls), and every SSE response holds its connection for the whole turn.
+# With a small pool the (N+1)-th request blocks in the connection queue with
+# zero bytes flowing, which the client reports as a stalled response — so the
+# pool is generous and the pool timeout is short and loud rather than silent.
+# ============================================================
+UPSTREAM_MAX_CONNECTIONS = int(os.getenv("UPSTREAM_MAX_CONNECTIONS", "100"))
+UPSTREAM_MAX_KEEPALIVE = int(os.getenv("UPSTREAM_MAX_KEEPALIVE", "20"))
+UPSTREAM_KEEPALIVE_EXPIRY = float(os.getenv("UPSTREAM_KEEPALIVE_EXPIRY", "30"))
+UPSTREAM_CONNECT_TIMEOUT = float(os.getenv("UPSTREAM_CONNECT_TIMEOUT", "10"))
+UPSTREAM_READ_TIMEOUT = float(os.getenv("UPSTREAM_READ_TIMEOUT", "300"))
+UPSTREAM_POOL_TIMEOUT = float(os.getenv("UPSTREAM_POOL_TIMEOUT", "30"))
+# Fail a stream that receives no bytes for this long. Anthropic sends SSE
+# keepalive pings during long thinking, so real silence this long means a
+# dead connection. 0 disables the watchdog.
+UPSTREAM_STALL_SECONDS = float(os.getenv("UPSTREAM_STALL_SECONDS", "120"))
+# Retry a transport failure only while no byte has been forwarded yet — once
+# the client has seen part of the response, replaying would duplicate output.
+UPSTREAM_CONNECT_RETRIES = int(os.getenv("UPSTREAM_CONNECT_RETRIES", "2"))
 
 # Caps to prevent unbounded growth of per-session / per-day buckets.
 # When a cap is exceeded, oldest entries (by last_seen / date) are evicted.
@@ -702,6 +783,7 @@ token_saver_stats = {
 }
 
 http_client: httpx.AsyncClient | None = None
+telemetry_client: httpx.AsyncClient | None = None
 request_count = 0
 
 
@@ -1457,7 +1539,7 @@ def _loki_enqueue(event: str, fields: dict | None = None, model: str | None = No
 async def _loki_flush_once() -> bool:
     """Push up to LOKI_BATCH_SIZE entries to Loki. Returns True on success."""
     global _loki_last_warn_at
-    if not _loki_buffer or http_client is None:
+    if not _loki_buffer or telemetry_client is None:
         return True
     batch_size = min(len(_loki_buffer), LOKI_BATCH_SIZE)
     batch = _loki_buffer[:batch_size]
@@ -1476,7 +1558,7 @@ async def _loki_flush_once() -> bool:
         ]
     }
     try:
-        r = await http_client.post(LOKI_URL, json=payload, timeout=LOKI_TIMEOUT_SECONDS)
+        r = await telemetry_client.post(LOKI_URL, json=payload, timeout=LOKI_TIMEOUT_SECONDS)
         if r.status_code >= 400:
             raise RuntimeError(f"Loki returned {r.status_code}: {r.text[:200]}")
         del _loki_buffer[:batch_size]
@@ -1551,8 +1633,10 @@ def _record_rate_limits(headers) -> None:
 
 def _compute_cost(model_key: str, usage: dict) -> float:
     """Compute USD cost for a single /v1/messages response usage block."""
-    p = PRICING.get(model_key)
-    if not p:
+    # Unknown model ids fall back to a configurable rate instead of $0 so a
+    # newly released model never silently disappears from the cost total.
+    p = PRICING.get(model_key) or PRICING_FALLBACK
+    if not p["input"] and not p["output"]:
         return 0.0
 
     input_t = usage.get("input_tokens", 0) or 0
@@ -1600,6 +1684,14 @@ def _record_usage(
     _check_monthly_reset()
     model_key = _normalize_model_key(model)
     cost = _compute_cost(model_key, usage)
+
+    # Surface models we have no published price for — they are costed at the
+    # PRICING_FALLBACK rate, which is an estimate, not the real invoice.
+    if model_key == "unknown" and model:
+        um = quota_stats["unpriced_models"]
+        um[model] = um.get(model, 0) + 1
+        if len(um) > 20:  # keep the map bounded; drop the least-seen entry
+            um.pop(min(um, key=um.get), None)
 
     cc = usage.get("cache_creation") if isinstance(usage.get("cache_creation"), dict) else {}
     cw5 = cc.get("ephemeral_5m_input_tokens", 0) or 0
@@ -2219,14 +2311,24 @@ def print_status():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global http_client, _loki_flusher_task
+    global http_client, telemetry_client, _loki_flusher_task
     http_client = httpx.AsyncClient(
-        timeout=httpx.Timeout(300.0, connect=10.0),
-        limits=httpx.Limits(
-            max_connections=10,
-            max_keepalive_connections=5,
-            keepalive_expiry=30.0,
+        timeout=httpx.Timeout(
+            UPSTREAM_READ_TIMEOUT,
+            connect=UPSTREAM_CONNECT_TIMEOUT,
+            pool=UPSTREAM_POOL_TIMEOUT,
         ),
+        limits=httpx.Limits(
+            max_connections=UPSTREAM_MAX_CONNECTIONS,
+            max_keepalive_connections=UPSTREAM_MAX_KEEPALIVE,
+            keepalive_expiry=UPSTREAM_KEEPALIVE_EXPIRY,
+        ),
+    )
+    # Telemetry gets its own small pool. Sharing the upstream client would let
+    # a slow Loki push occupy a connection slot that an API request needs.
+    telemetry_client = httpx.AsyncClient(
+        timeout=httpx.Timeout(LOKI_TIMEOUT_SECONDS, connect=5.0, pool=5.0),
+        limits=httpx.Limits(max_connections=4, max_keepalive_connections=2),
     )
     _load_quota_stats()
     _load_coach_stats()
@@ -2252,6 +2354,8 @@ async def lifespan(app: FastAPI):
         _save_quota_stats(force=True)
         _save_coach_stats(force=True)
         await http_client.aclose()
+        if telemetry_client is not None:
+            await telemetry_client.aclose()
 
 
 app = FastAPI(title="Claude Cloak", lifespan=lifespan)
@@ -2423,6 +2527,39 @@ def filter_response_headers(response: httpx.Response) -> dict[str, str]:
     }
 
 
+def _stream_health_view() -> dict:
+    """Derived view of stream_stats for /health, /quota and the dashboard.
+
+    `stall_rate` and the TTFB figures are what to look at when users report
+    a response stalling mid-stream: a non-zero stall count points at the
+    upstream connection, while a high average TTFB with pool waits points at
+    the proxy's own connection pool being too small for the traffic.
+    """
+    started = stream_stats["streams_started"]
+    samples = stream_stats["ttfb_samples"]
+    waits = stream_stats["pool_waits"]
+    return {
+        "streams_started": started,
+        "streams_completed": stream_stats["streams_completed"],
+        "stalls": stream_stats["stalls"],
+        "stall_rate": round(stream_stats["stalls"] / started, 4) if started else 0.0,
+        "last_stall_at": stream_stats["last_stall_at"],
+        "client_disconnects": stream_stats["client_disconnects"],
+        "connect_retries": stream_stats["connect_retries"],
+        "pool_waits": waits,
+        "pool_wait_ms_avg": round(stream_stats["pool_wait_ms_total"] / waits) if waits else 0,
+        "ttfb_ms_avg": round(stream_stats["ttfb_ms_total"] / samples) if samples else 0,
+        "ttfb_ms_max": stream_stats["ttfb_ms_max"],
+        "config": {
+            "stall_seconds": UPSTREAM_STALL_SECONDS,
+            "max_connections": UPSTREAM_MAX_CONNECTIONS,
+            "pool_timeout": UPSTREAM_POOL_TIMEOUT,
+            "read_timeout": UPSTREAM_READ_TIMEOUT,
+            "connect_retries": UPSTREAM_CONNECT_RETRIES,
+        },
+    }
+
+
 @app.get("/health")
 async def health():
     return {
@@ -2458,7 +2595,9 @@ async def health():
             "by_session_count": len(quota_stats["by_session"]),
             "by_day_count": len(quota_stats["by_day"]),
             "by_user_count": len(quota_stats["by_user"]),
+            "unpriced_models": quota_stats["unpriced_models"],
         },
+        "stream": _stream_health_view(),
         "deploy": {
             "mode": DEPLOY_MODE,
             "bind_host": LOCAL_HOST,
@@ -2894,6 +3033,45 @@ DASHBOARD_HTML = """<!doctype html>
   </section>
 
   <!-- Coaching -->
+  <section>
+    <div class="section-head">
+      <h2>Stream health</h2>
+      <span class="hint">Diagnoses "Response stalled mid-stream" — stalls point upstream, pool waits point at this proxy</span>
+    </div>
+    <div class="grid-cards">
+      <div class="card">
+        <div class="card-label">Stalled streams</div>
+        <div class="card-value num" id="stream-stalls">0</div>
+        <div class="card-meta" id="stream-stalls-meta">no stalls recorded</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Time to first byte</div>
+        <div class="card-value num" id="stream-ttfb">—</div>
+        <div class="card-meta" id="stream-ttfb-meta">average · peak</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Pool waits</div>
+        <div class="card-value num" id="stream-pool">0</div>
+        <div class="card-meta" id="stream-pool-meta">requests queued for a connection</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Connect retries</div>
+        <div class="card-value num" id="stream-retries">0</div>
+        <div class="card-meta">recovered before any byte was sent</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Client disconnects</div>
+        <div class="card-value num" id="stream-disconnects">0</div>
+        <div class="card-meta">client hung up mid-stream</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Streams completed</div>
+        <div class="card-value num" id="stream-completed">0</div>
+        <div class="card-meta" id="stream-completed-meta">of 0 started</div>
+      </div>
+    </div>
+  </section>
+
   <section>
     <div class="section-head">
       <h2>Coaching</h2>
@@ -3413,6 +3591,29 @@ DASHBOARD_HTML = """<!doctype html>
         ? 'No requests recorded yet'
         : `Across ${fmtCount.format(q.messages_requests)} requests on ${(q.by_model || []).length} model(s)`;
 
+    /* Stream health cards */
+    const sh = q.stream || {};
+    const started = sh.streams_started || 0;
+    document.getElementById('stream-stalls').textContent = fmtCount.format(sh.stalls || 0);
+    document.getElementById('stream-stalls-meta').textContent =
+      (sh.stalls || 0) === 0
+        ? `no stalls in ${fmtCount.format(started)} streams`
+        : `${(100 * (sh.stall_rate || 0)).toFixed(1)}% of streams · last ${sh.last_stall_at || '—'}`;
+    document.getElementById('stream-ttfb').textContent =
+      (sh.ttfb_ms_avg || 0) > 0 ? `${fmtCount.format(sh.ttfb_ms_avg)} ms` : '—';
+    document.getElementById('stream-ttfb-meta').textContent =
+      `avg · peak ${fmtCount.format(sh.ttfb_ms_max || 0)} ms`;
+    document.getElementById('stream-pool').textContent = fmtCount.format(sh.pool_waits || 0);
+    document.getElementById('stream-pool-meta').textContent =
+      (sh.pool_waits || 0) === 0
+        ? `pool of ${(sh.config || {}).max_connections || '?'} connections never saturated`
+        : `avg wait ${fmtCount.format(sh.pool_wait_ms_avg || 0)} ms — consider raising UPSTREAM_MAX_CONNECTIONS`;
+    document.getElementById('stream-retries').textContent = fmtCount.format(sh.connect_retries || 0);
+    document.getElementById('stream-disconnects').textContent = fmtCount.format(sh.client_disconnects || 0);
+    document.getElementById('stream-completed').textContent = fmtCount.format(sh.streams_completed || 0);
+    document.getElementById('stream-completed-meta').textContent =
+      `of ${fmtCount.format(started)} started`;
+
     /* Derived totals cards */
     const reqs = q.messages_requests || 0;
     const avg = reqs > 0 ? (q.cost_usd_total || 0) / reqs : 0;
@@ -3877,6 +4078,10 @@ async def quota():
         "period_month": quota_stats["period_month"],
         "monthly_reset_enabled": QUOTA_MONTHLY_RESET,
         "deploy_mode": DEPLOY_MODE,
+        "stream": _stream_health_view(),
+        # Models with no published price in PRICING — their cost is an
+        # estimate at the PRICING_FALLBACK rate, not the real invoice.
+        "unpriced_models": quota_stats["unpriced_models"],
         # `users` is always populated when at least one labelled request has
         # been recorded, even with USER_QUOTA_ENABLED=false — that way the
         # dashboard can attribute spend to users regardless of cap config.
@@ -4091,14 +4296,41 @@ async def proxy(path: str, request: Request):
             log(f"           {DIM}{k}: {mask_value(v, 30)}{RESET}")
 
     try:
-        req = http_client.build_request(
-            method=request.method,
-            url=target_url,
-            headers=headers,
-            content=body,
-            params=dict(request.query_params),
-        )
-        response = await http_client.send(req, stream=True)
+        # Send with a bounded retry. This is safe only because no byte of the
+        # response has reached the client yet — a transport failure here means
+        # the request never produced output, so replaying it cannot duplicate
+        # anything. Retrying costs one extra upstream call and saves the
+        # client from surfacing a dead pooled connection as a stalled stream.
+        send_started = time.monotonic()
+        attempt = 0
+        while True:
+            req = http_client.build_request(
+                method=request.method,
+                url=target_url,
+                headers=headers,
+                content=body,
+                params=dict(request.query_params),
+            )
+            try:
+                response = await http_client.send(req, stream=True)
+                break
+            except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError) as e:
+                attempt += 1
+                if attempt > UPSTREAM_CONNECT_RETRIES:
+                    raise
+                stream_stats["connect_retries"] += 1
+                log(
+                    f"           {YELLOW}upstream {type(e).__name__} — retry "
+                    f"{attempt}/{UPSTREAM_CONNECT_RETRIES}{RESET}"
+                )
+                await _async_sleep(0.25 * attempt)
+
+        # A long gap before response headers usually means the request queued
+        # for a free upstream connection — the classic silent-stall source.
+        connect_ms = int((time.monotonic() - send_started) * 1000)
+        if connect_ms >= 1000:
+            stream_stats["pool_waits"] += 1
+            stream_stats["pool_wait_ms_total"] += connect_ms
 
         elapsed = time.monotonic() - start_time
         status = response.status_code
@@ -4206,15 +4438,76 @@ async def proxy(path: str, request: Request):
                 media_type=response.headers.get("content-type"),
             )
 
+        is_sse = "event-stream" in (response.headers.get("content-type") or "").lower()
+
         async def stream_response():
             # Each cleanup step is guarded so a benign client disconnect or
             # a hiccup in the usage tap doesn't escape as an unhandled
             # exception (Starlette/uvicorn then surface it as an "ASGI
             # application" error even though the response was fully sent).
+            stream_stats["streams_started"] += 1
+            first_byte_at = None
+            chunks = response.aiter_bytes().__aiter__()
             try:
-                async for chunk in response.aiter_bytes():
+                while True:
+                    try:
+                        if UPSTREAM_STALL_SECONDS > 0:
+                            chunk = await asyncio.wait_for(
+                                chunks.__anext__(), UPSTREAM_STALL_SECONDS
+                            )
+                        else:
+                            chunk = await chunks.__anext__()
+                    except StopAsyncIteration:
+                        stream_stats["streams_completed"] += 1
+                        break
+                    except (asyncio.TimeoutError, httpx.ReadTimeout):
+                        # Upstream went silent. Anthropic pings during long
+                        # thinking, so this is a dead connection, not a slow
+                        # one. Close it out with a real error instead of
+                        # leaving the client waiting on a stream that will
+                        # never produce another byte.
+                        stream_stats["stalls"] += 1
+                        stream_stats["last_stall_at"] = datetime.now().isoformat(
+                            timespec="seconds"
+                        )
+                        log(
+                            f"  {BG_RED}{BOLD} STALL {RESET} {RED}#{req_id} upstream sent "
+                            f"nothing for {UPSTREAM_STALL_SECONDS:.0f}s — closing stream{RESET}"
+                        )
+                        if LOKI_ENABLED:
+                            _loki_enqueue("error", {
+                                "status": 504,
+                                "path": "/" + path,
+                                "method": request.method,
+                                "duration_ms": int((time.monotonic() - start_time) * 1000),
+                                "error_type": "upstream_stall",
+                                "conversation_id": client_session_id or "",
+                            })
+                        if is_sse:
+                            # Well-formed SSE error so the client reports a
+                            # failed request it can retry, rather than a
+                            # truncated success.
+                            yield (
+                                b'event: error\ndata: {"type":"error","error":'
+                                b'{"type":"api_error","message":"claude-cloak: upstream '
+                                b'stalled, no data received"}}\n\n'
+                            )
+                        break
+                    if first_byte_at is None:
+                        first_byte_at = time.monotonic()
+                        ttfb_ms = int((first_byte_at - start_time) * 1000)
+                        stream_stats["ttfb_ms_total"] += ttfb_ms
+                        stream_stats["ttfb_samples"] += 1
+                        if ttfb_ms > stream_stats["ttfb_ms_max"]:
+                            stream_stats["ttfb_ms_max"] = ttfb_ms
                     usage_tap.feed(chunk)
                     yield chunk
+            except (asyncio.CancelledError, GeneratorExit):
+                # Client hung up mid-stream (closed tab, Ctrl-C, harness
+                # cancelled the request). Benign — record and re-raise so the
+                # server can finish tearing the response down.
+                stream_stats["client_disconnects"] += 1
+                raise
             finally:
                 try:
                     await response.aclose()

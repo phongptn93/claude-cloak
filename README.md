@@ -298,14 +298,44 @@ Example `/quota`:
 Defaults are public Anthropic list prices (USD per million tokens). Override per-tier via env if Anthropic changes them or you want plan-specific rates:
 
 ```env
-PRICING_SONNET_4_INPUT=3.00
-PRICING_SONNET_4_OUTPUT=15.00
-PRICING_SONNET_4_CACHE_WRITE_5M=3.75
-PRICING_SONNET_4_CACHE_WRITE_1H=6.00
-PRICING_SONNET_4_CACHE_READ=0.30
+PRICING_SONNET_5_INPUT=3.00
+PRICING_SONNET_5_OUTPUT=15.00
+PRICING_SONNET_5_CACHE_WRITE_5M=3.75
+PRICING_SONNET_5_CACHE_WRITE_1H=6.00
+PRICING_SONNET_5_CACHE_READ=0.30
 ```
 
-Model keys: `OPUS_4`, `SONNET_4`, `HAIKU_4`, `OPUS_3`, `SONNET_3_7`, `SONNET_3_5`, `HAIKU_3_5`, `HAIKU_3`. Cost calc uses the per-TTL breakdown when Anthropic provides it (`cache_creation.ephemeral_5m_input_tokens` / `ephemeral_1h_input_tokens`); falls back to default 5 m rate when only the legacy aggregate field is present.
+Current defaults, per million tokens (cache tiers follow Anthropic's standard multipliers on input: 5 m write ×1.25, 1 h write ×2, read ×0.1):
+
+| Model key | Input | Output |
+|---|---|---|
+| `FABLE_5`, `MYTHOS_5` | $10.00 | $50.00 |
+| `OPUS_5`, `OPUS_4_8`, `OPUS_4_7`, `OPUS_4_6`, `OPUS_4_5` | $5.00 | $25.00 |
+| `OPUS_4_1`, `OPUS_4`, `OPUS_3` | $15.00 | $75.00 |
+| `SONNET_5`, `SONNET_4_6`, `SONNET_4`, `SONNET_3_7`, `SONNET_3_5` | $3.00 | $15.00 |
+| `HAIKU_4` | $1.00 | $5.00 |
+| `HAIKU_3_5` | $0.80 | $4.00 |
+| `HAIKU_3` | $0.25 | $1.25 |
+
+Note the split inside the Opus 4 line: **Opus 4.5 and newer are $5/$25**, only Opus 4.0/4.1 kept the older $15/$75 rate. A single `OPUS_4` key covering all of them over-reports 4.6/4.7/4.8 spend by 3×.
+
+A model id matching no key is costed at `PRICING_FALLBACK_INPUT` / `PRICING_FALLBACK_OUTPUT` (Opus tier by default) rather than $0, so a model released after your build still shows up in the total. Those ids are listed under `unpriced_models` in `/quota` — treat their cost as an estimate and add a real key when you see one.
+
+Cost calc uses the per-TTL breakdown when Anthropic provides it (`cache_creation.ephemeral_5m_input_tokens` / `ephemeral_1h_input_tokens`); falls back to the 5 m rate when only the legacy aggregate field is present.
+
+### Stream health (diagnosing "Response stalled mid-stream")
+
+When Claude Code reports a stalled response, it means no bytes reached it for a while — the proxy tracks why, in the **Stream health** section of `/dashboard` and the `stream` block of `/health` and `/quota`:
+
+| Signal | What it points at | Fix |
+|---|---|---|
+| `stalls` > 0 | Upstream connection went silent; the proxy closed the stream and sent the client a proper SSE `error` event instead of hanging | Usually transient. `UPSTREAM_STALL_SECONDS` (default 120 s) sets the patience. |
+| `pool_waits` > 0 with high `pool_wait_ms_avg` | Requests are queueing for a free upstream connection — the classic silent stall on a shared proxy | Raise `UPSTREAM_MAX_CONNECTIONS` (default 100) |
+| `connect_retries` > 0 | Dead pooled connections that were retried before any byte was forwarded — recovered, not user-visible | Nothing, unless it climbs steadily |
+| `client_disconnects` | The client hung up mid-stream (closed tab, cancelled turn) | Benign |
+| `ttfb_ms_avg` / `ttfb_ms_max` | Time to first byte through the proxy | High values with no pool waits point upstream |
+
+Telemetry shipping (Loki) uses its own connection pool, so a slow log push can never take a connection slot away from an API request.
 
 ### What it's good for
 
@@ -319,6 +349,7 @@ Model keys: `OPUS_4`, `SONNET_4`, `HAIKU_4`, `OPUS_3`, `SONNET_3_7`, `SONNET_3_5
 Open `http://localhost:9999/dashboard` for a live web UI:
 
 - **Totals** card grid — total cost, requests, distinct sessions, paid input / output / cache read / cache write
+- **Stream health** cards — stalled streams, time-to-first-byte (avg/peak), connection-pool waits, connect retries, client disconnects
 - **Live rate-limit progress bars** color-coded green / amber / red with reset times
 - **Daily trend chart** — last 15 days, cost line + input/output token bars on dual y-axes
 - **Cost-by-model doughnut** — lifetime breakdown
