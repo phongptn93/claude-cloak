@@ -386,6 +386,42 @@ QUOTA_MAX_DAYS=30              # Cap on per-day buckets
 
 Set `QUOTA_MONTHLY_RESET=true` (default) to automatically clear `cost_usd_total`, `usage_total`, `by_model`, and `by_session` at the start of each calendar month. `by_day` history is preserved so the trend chart spans multiple months. The dashboard topbar shows a `YYYY-MM · resets in Nd` pill so you can see when the next reset happens.
 
+## Config Console (`/config`)
+
+Every knob lives in `.env`, which is invisible unless you can SSH to the box. `/config` puts them on a screen — read-only by default, editable once you authenticate.
+
+```env
+ADMIN_TOKEN=$(openssl rand -hex 32)   # enables editing; without it the console is read-only
+ADMIN_SESSION_HOURS=12
+ADMIN_MAX_FAILED=5
+ADMIN_LOCKOUT_SECONDS=300
+```
+
+### Two gates, not one
+
+`ADMIN_IPS` (which already guards `/admin/*`) decides **where** a request may come from. It does not prove **who** sent it, so it is not enough on its own for a screen that can change behaviour. `/config` adds a second gate:
+
+1. **Network** — the request IP must be in `ADMIN_IPS` (default: loopback only). Non-admin IPs get `403` before a login is even possible.
+2. **Identity** — editing requires `ADMIN_TOKEN`, exchanged for a short-lived cookie signed with HMAC-SHA256 over `SESSION_SECRET`. The cookie is `HttpOnly` (XSS can't read it) and `SameSite=Strict` (no cross-site request can ride it). Tokens are compared in constant time, and an IP is locked out after `ADMIN_MAX_FAILED` bad attempts.
+
+With no `ADMIN_TOKEN` set, the console still renders — but every write is refused, so an unconfigured deployment can't be mutated remotely.
+
+### Three scopes, by blast radius
+
+| Badge | Meaning | Examples |
+|---|---|---|
+| `live` | Applied to the running proxy immediately, no restart | `UPSTREAM_STALL_SECONDS`, `TIMING_JITTER`, `TOKEN_SAVER`, quota caps |
+| `restart` | Saved to `.env`, takes effect next start — and says so instead of pretending | `UPSTREAM_MAX_CONNECTIONS` and the other pool settings (the HTTP client is built once at startup) |
+| `locked` | Never writable from the web, at any privilege level | `ADMIN_IPS`, `ALLOWED_IPS`, `ADMIN_TOKEN`, `SESSION_SECRET`, `DEPLOY_MODE`, `LOCAL_PORT` |
+
+The locked set is the important design decision: those settings decide **who may authenticate**. Leaving them web-editable would let a single leaked token whitelist an attacker's own IP and rewrite the admin password — turning temporary access into permanent access. They stay editable only by someone who can already reach the host.
+
+Secret-valued settings (`ADMIN_TOKEN`, `SESSION_SECRET`, `LOKI_URL`, `LOKI_USER_EMAIL`) report **presence only** — the value never leaves the process, not even to an authenticated admin.
+
+Values are validated before they are written (type, range, allowed choices), so a typo is rejected with a reason rather than silently breaking the proxy. Model pricing is displayed but intentionally read-only: a mistyped rate silently corrupts every cost figure that follows it.
+
+> **Note:** `SESSION_SECRET` is auto-generated at startup when it isn't in `.env`, which invalidates admin sessions on every restart. Pin it in `.env` if you want sign-ins to survive restarts.
+
 ## Coding Coach (optional, on by default)
 
 Because every Claude Code request already flows through the proxy, it's the perfect vantage point to derive **coaching insights about *how* you code** — not just how much you spend. Inspired by tools like Microsoft's *AI Engineering Coach*, but rebuilt to fit this project's anonymity ethos.
@@ -656,6 +692,11 @@ client/
 | `* /u/{label}/{path}` | Same as `* /{path}` but accounts the request to `<label>` regardless of source IP |
 | `GET /dashboard` | Web UI rendering `/quota` as charts (Chart.js, dark theme, auto-refresh 5s) + Coaching section |
 | `GET /coach` | Privacy-safe coaching insights JSON (see Coding Coach section) |
+| `GET /config` | Config console — `ADMIN_IPS` only; read-only until you sign in with `ADMIN_TOKEN` |
+| `GET /config/data` | Current settings as JSON, with scope and validation metadata. Secrets report presence only |
+| `POST /config/login` | Exchange `ADMIN_TOKEN` for a signed session cookie (rate-limited per IP) |
+| `POST /config/logout` | Drop the session cookie |
+| `POST /config/apply` | Write a batch of settings — requires a session; returns applied / rejected / restart-required |
 | `* /{path}` | Proxy catch-all — applies all 8 layers then forwards to `api.anthropic.com/{path}` |
 
 ## Requirements

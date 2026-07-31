@@ -2402,11 +2402,14 @@ class AccessControlMiddleware:
         state["stripped_path"] = stripped_path
         state["user_label"] = user_label
 
-        # Admin endpoints are gated SOLELY by ADMIN_IPS (default loopback). We
+        # Admin + config endpoints are gated SOLELY by ADMIN_IPS (default
+        # loopback). /config carries a second, stronger gate of its own
+        # (ADMIN_TOKEN) — this one only narrows where a login can be
+        # attempted from. We
         # check before the general whitelist so the VM operator can curl
         # /admin/* from 127.0.0.1 / ::1 without also having to add loopback
         # to ALLOWED_IPS — those two lists are meant to be independent.
-        if raw_path.startswith("/admin/"):
+        if raw_path.startswith("/admin/") or raw_path == "/config" or raw_path.startswith("/config/"):
             if client_ip not in ADMIN_IPS:
                 await JSONResponse({"error": "forbidden"}, status_code=403)(scope, receive, send)
                 return
@@ -2606,6 +2609,360 @@ async def health():
             "user_quota_enabled": USER_QUOTA_ENABLED,
             "user_quota_period": USER_QUOTA_PERIOD,
         },
+    }
+
+
+# ============================================================
+# CONFIG CONSOLE (/config)
+#
+# Every knob lives in .env, which is invisible to anyone not on the box.
+# This exposes them as a screen — but a config screen is a privilege
+# surface, so it is built around three rules:
+#
+#   1. Authenticate, don't just filter by IP. The existing ADMIN_IPS gate
+#      still applies, but it only proves *where* a request came from, not
+#      *who* sent it. Editing additionally requires ADMIN_TOKEN, proven via
+#      a short-lived HMAC-signed cookie with per-IP lockout on brute force.
+#   2. Classify by blast radius, not by convenience:
+#        live    — safe to change on a running proxy; applied immediately
+#        restart — persisted, but only takes effect on the next start
+#        locked  — never writable from the web, at any privilege level
+#      ADMIN_IPS / ALLOWED_IPS / ADMIN_TOKEN / SESSION_SECRET are locked on
+#      purpose: they decide who may authenticate, so a web path to edit them
+#      turns one leaked token into permanent access.
+#   3. Never render a secret. Secret-valued settings show presence only.
+# ============================================================
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
+ADMIN_SESSION_HOURS = float(os.getenv("ADMIN_SESSION_HOURS", "12"))
+ADMIN_MAX_FAILED = int(os.getenv("ADMIN_MAX_FAILED", "5"))
+ADMIN_LOCKOUT_SECONDS = float(os.getenv("ADMIN_LOCKOUT_SECONDS", "300"))
+ADMIN_COOKIE_NAME = "cloak_admin"
+
+# ip -> [failure_count, first_failure_monotonic]
+_admin_failures: dict[str, list] = {}
+
+
+def _issue_admin_cookie() -> tuple[str, int]:
+    """Mint a signed, expiring admin cookie value.
+
+    The signature is HMAC-SHA256 over the expiry using SESSION_SECRET, so no
+    server-side session store is needed and a restart that regenerates the
+    secret invalidates every outstanding cookie.
+    """
+    expires_at = int(time.time() + ADMIN_SESSION_HOURS * 3600)
+    sig = hmac.new(
+        SESSION_SECRET.encode(), str(expires_at).encode(), hashlib.sha256
+    ).hexdigest()
+    return f"{expires_at}.{sig}", expires_at
+
+
+def _verify_admin_cookie(raw: str | None) -> bool:
+    if not raw or "." not in raw:
+        return False
+    expires_str, _, sig = raw.partition(".")
+    try:
+        expires_at = int(expires_str)
+    except ValueError:
+        return False
+    if expires_at <= time.time():
+        return False
+    expected = hmac.new(
+        SESSION_SECRET.encode(), expires_str.encode(), hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(expected, sig)
+
+
+def _admin_lockout_remaining(ip: str) -> int:
+    """Seconds left on a brute-force lockout for this IP (0 = not locked)."""
+    entry = _admin_failures.get(ip)
+    if not entry or entry[0] < ADMIN_MAX_FAILED:
+        return 0
+    remaining = ADMIN_LOCKOUT_SECONDS - (time.monotonic() - entry[1])
+    if remaining <= 0:
+        _admin_failures.pop(ip, None)
+        return 0
+    return int(remaining) + 1
+
+
+def _record_admin_failure(ip: str) -> None:
+    entry = _admin_failures.get(ip)
+    if not entry or time.monotonic() - entry[1] > ADMIN_LOCKOUT_SECONDS:
+        _admin_failures[ip] = [1, time.monotonic()]
+    else:
+        entry[0] += 1
+
+
+def _request_is_admin(request: Request) -> bool:
+    """True when the caller proved possession of ADMIN_TOKEN.
+
+    With no ADMIN_TOKEN configured nobody is an authenticated admin — the
+    console stays readable (it is already behind ADMIN_IPS) but every write
+    is refused, so an unconfigured deployment cannot be mutated remotely.
+    """
+    if not ADMIN_TOKEN:
+        return False
+    return _verify_admin_cookie(request.cookies.get(ADMIN_COOKIE_NAME))
+
+
+# scope: live = hot-applied | restart = saved, needs restart | locked = read-only
+CONFIG_SPECS: list[dict] = [
+    # ---- Stream health / upstream ----
+    {"key": "UPSTREAM_STALL_SECONDS", "var": "UPSTREAM_STALL_SECONDS", "type": "float",
+     "scope": "live", "section": "Stream health", "min": 0, "max": 3600,
+     "desc": "End a stream that receives no bytes for this long and send the client a proper SSE error. 0 disables."},
+    {"key": "UPSTREAM_CONNECT_RETRIES", "var": "UPSTREAM_CONNECT_RETRIES", "type": "int",
+     "scope": "live", "section": "Stream health", "min": 0, "max": 10,
+     "desc": "Retries for a transport failure, only while no byte has been forwarded yet."},
+    {"key": "UPSTREAM_MAX_CONNECTIONS", "var": "UPSTREAM_MAX_CONNECTIONS", "type": "int",
+     "scope": "restart", "section": "Stream health", "min": 1, "max": 1000,
+     "desc": "Upstream connection pool size. Too small and concurrent requests queue silently, which clients report as a stall."},
+    {"key": "UPSTREAM_MAX_KEEPALIVE", "var": "UPSTREAM_MAX_KEEPALIVE", "type": "int",
+     "scope": "restart", "section": "Stream health", "min": 0, "max": 1000,
+     "desc": "Idle connections kept alive for reuse."},
+    {"key": "UPSTREAM_POOL_TIMEOUT", "var": "UPSTREAM_POOL_TIMEOUT", "type": "float",
+     "scope": "restart", "section": "Stream health", "min": 1, "max": 600,
+     "desc": "How long a request waits for a free pool slot before failing loudly."},
+    {"key": "UPSTREAM_READ_TIMEOUT", "var": "UPSTREAM_READ_TIMEOUT", "type": "float",
+     "scope": "restart", "section": "Stream health", "min": 1, "max": 3600,
+     "desc": "Bound on a single silent read from upstream."},
+    {"key": "UPSTREAM_CONNECT_TIMEOUT", "var": "UPSTREAM_CONNECT_TIMEOUT", "type": "float",
+     "scope": "restart", "section": "Stream health", "min": 1, "max": 120,
+     "desc": "TCP/TLS connect timeout to Anthropic."},
+
+    # ---- Anonymity ----
+    {"key": "TIMING_JITTER", "var": "TIMING_JITTER_ENABLED", "type": "bool",
+     "scope": "live", "section": "Anonymity",
+     "desc": "Random per-request delay so simultaneous multi-device traffic doesn't look like one machine."},
+    {"key": "TIMING_JITTER_MIN_MS", "var": "TIMING_JITTER_MIN_MS", "type": "int",
+     "scope": "live", "section": "Anonymity", "min": 0, "max": 5000,
+     "desc": "Lower bound of the jitter window."},
+    {"key": "TIMING_JITTER_MAX_MS", "var": "TIMING_JITTER_MAX_MS", "type": "int",
+     "scope": "live", "section": "Anonymity", "min": 0, "max": 5000,
+     "desc": "Upper bound of the jitter window."},
+    {"key": "IDENTITY_REFRESH_DAYS", "var": "IDENTITY_REFRESH_DAYS", "type": "int",
+     "scope": "live", "section": "Anonymity", "min": 0, "max": 365,
+     "desc": "Re-capture the locked identity fingerprint after this many days. 0 keeps it forever."},
+    {"key": "CAPTURE_LOCK_FROM_IP", "type": "str", "scope": "locked", "section": "Anonymity",
+     "desc": "Only this IP may set the locked identity. Locked: it controls whose fingerprint everyone else inherits."},
+
+    # ---- Token saver ----
+    {"key": "TOKEN_SAVER", "var": "TOKEN_SAVER_ENABLED", "type": "bool",
+     "scope": "live", "section": "Token saver",
+     "desc": "Master switch for input-token reduction on /v1/messages."},
+    {"key": "CACHE_EXTEND_TTL", "var": "CACHE_EXTEND_TTL", "type": "bool",
+     "scope": "live", "section": "Token saver",
+     "desc": "Bump the prompt-cache TTL from 5m to 1h on the stable prefix."},
+    {"key": "TOOL_RESULT_TRUNCATE", "var": "TOOL_RESULT_TRUNCATE", "type": "bool",
+     "scope": "live", "section": "Token saver",
+     "desc": "Trim oversized tool results before they are re-sent as context."},
+    {"key": "TOOL_RESULT_MAX_BYTES", "var": "TOOL_RESULT_MAX_BYTES", "type": "int",
+     "scope": "live", "section": "Token saver", "min": 1000, "max": 10_000_000,
+     "desc": "Size above which a tool result is trimmed."},
+    {"key": "TOOL_RESULT_KEEP_RECENT", "var": "TOOL_RESULT_KEEP_RECENT", "type": "int",
+     "scope": "live", "section": "Token saver", "min": 0, "max": 100,
+     "desc": "Most recent tool results left untouched."},
+
+    # ---- Quota & cost ----
+    {"key": "QUOTA_TRACKING", "var": "QUOTA_TRACKING_ENABLED", "type": "bool",
+     "scope": "live", "section": "Quota & cost",
+     "desc": "Record token usage and estimated cost per request."},
+    {"key": "QUOTA_PERSIST_INTERVAL", "var": "QUOTA_PERSIST_INTERVAL_SECONDS", "type": "int",
+     "scope": "live", "section": "Quota & cost", "min": 0, "max": 3600,
+     "desc": "Debounce between writes of .quota.json. 0 writes on every response."},
+    {"key": "QUOTA_MAX_SESSIONS", "var": "QUOTA_MAX_SESSIONS", "type": "int",
+     "scope": "live", "section": "Quota & cost", "min": 1, "max": 10000,
+     "desc": "Per-session buckets kept before the oldest are evicted."},
+    {"key": "QUOTA_MAX_DAYS", "var": "QUOTA_MAX_DAYS", "type": "int",
+     "scope": "live", "section": "Quota & cost", "min": 1, "max": 3650,
+     "desc": "Days of history kept for the trend chart."},
+    {"key": "QUOTA_MONTHLY_RESET", "var": "QUOTA_MONTHLY_RESET", "type": "bool",
+     "scope": "live", "section": "Quota & cost",
+     "desc": "Zero the running totals at the start of each calendar month."},
+    {"key": "PRICING_FALLBACK_INPUT", "type": "float", "scope": "restart",
+     "section": "Quota & cost", "min": 0, "max": 1000,
+     "desc": "Input rate applied to a model id matching no pricing key (see unpriced_models in /quota)."},
+    {"key": "PRICING_FALLBACK_OUTPUT", "type": "float", "scope": "restart",
+     "section": "Quota & cost", "min": 0, "max": 1000,
+     "desc": "Output rate for the same fallback path."},
+
+    # ---- Per-user quota ----
+    {"key": "USER_QUOTA_ENABLED", "var": "USER_QUOTA_ENABLED", "type": "bool",
+     "scope": "live", "section": "Per-user quota",
+     "desc": "Track and optionally cap spend per user label."},
+    {"key": "USER_QUOTA_HARD_LIMIT", "var": "USER_QUOTA_HARD_LIMIT", "type": "bool",
+     "scope": "live", "section": "Per-user quota",
+     "desc": "Reject requests with 429 once a user is over cap. Off = track only."},
+    {"key": "USER_QUOTA_DEFAULT_USD", "var": "USER_QUOTA_DEFAULT_USD", "type": "float",
+     "scope": "live", "section": "Per-user quota", "min": 0, "max": 100000,
+     "desc": "Cap applied to a user with no explicit entry in USER_QUOTA_CAPS."},
+    {"key": "USER_QUOTA_PERIOD", "type": "str", "scope": "restart", "section": "Per-user quota",
+     "choices": ["day", "week", "month"],
+     "desc": "Window the per-user cap resets on."},
+    {"key": "USER_QUOTA_CAPS", "type": "str", "scope": "restart", "section": "Per-user quota",
+     "desc": "Per-user overrides, e.g. phong=50,nam=20."},
+
+    # ---- Coaching ----
+    {"key": "COACH_ENABLED", "var": "COACH_ENABLED", "type": "bool",
+     "scope": "live", "section": "Coaching",
+     "desc": "Derive privacy-safe practice insights from traffic already passing through (counts only)."},
+
+    # ---- Access control (locked) ----
+    {"key": "DEPLOY_MODE", "type": "str", "scope": "locked", "section": "Access control",
+     "desc": "local or server. Locked: it decides whether the IP whitelist is enforced at all."},
+    {"key": "ALLOWED_IPS", "type": "str", "scope": "locked", "section": "Access control",
+     "desc": "Who may use the proxy. Locked: web-editable would let one leaked token grant permanent access."},
+    {"key": "ADMIN_IPS", "type": "str", "scope": "locked", "section": "Access control",
+     "desc": "Who may reach /admin and /config. Locked for the same reason."},
+    {"key": "STATS_PRIVATE", "type": "str", "scope": "locked", "section": "Access control",
+     "desc": "Gate the stats endpoints to STATS_VIEW_IPS."},
+    {"key": "STATS_VIEW_IPS", "type": "str", "scope": "locked", "section": "Access control",
+     "desc": "Who may see per-user spend."},
+    {"key": "IP_LABELS", "type": "str", "scope": "locked", "section": "Access control",
+     "desc": "IP-to-user-label mapping used for cost attribution."},
+    {"key": "ADMIN_TOKEN", "var": "ADMIN_TOKEN", "type": "str", "scope": "locked",
+     "section": "Access control", "secret": True,
+     "desc": "Password for this console. Locked: it is the credential being checked."},
+    # var is set so presence reflects the in-process value: SESSION_SECRET is
+    # auto-generated at startup when absent from .env, and reporting it as
+    # "not set" would wrongly suggest cookies are unsigned.
+    {"key": "SESSION_SECRET", "var": "SESSION_SECRET", "type": "str", "scope": "locked",
+     "section": "Access control", "secret": True,
+     "desc": "HMAC key for consistent IDs and admin cookies. Auto-generated at startup if absent, which invalidates admin sessions on every restart — set it in .env to keep them across restarts."},
+    {"key": "LOCAL_PORT", "type": "str", "scope": "locked", "section": "Access control",
+     "desc": "Listen port. Changing it from the web would strand the console."},
+
+    # ---- Telemetry shipping ----
+    {"key": "LOKI_URL", "type": "str", "scope": "restart", "section": "Telemetry", "secret": True,
+     "desc": "Grafana Loki push endpoint. Empty disables shipping. Treated as a secret — it can embed credentials."},
+    {"key": "LOKI_BATCH_SIZE", "type": "int", "scope": "restart", "section": "Telemetry", "min": 1, "max": 10000,
+     "desc": "Entries per push."},
+    {"key": "LOKI_FLUSH_INTERVAL", "type": "float", "scope": "restart", "section": "Telemetry", "min": 1, "max": 3600,
+     "desc": "Seconds between flushes."},
+    {"key": "LOKI_USER_EMAIL", "type": "str", "scope": "restart", "section": "Telemetry", "secret": True,
+     "desc": "Optional Loki label. Treated as a secret — it is personal data."},
+]
+
+CONFIG_INDEX = {s["key"]: s for s in CONFIG_SPECS}
+CONFIG_SECTIONS = list(dict.fromkeys(s["section"] for s in CONFIG_SPECS))
+
+
+def _config_current_value(spec: dict):
+    """Effective value right now — the live global when there is one."""
+    var = spec.get("var")
+    if var and var in globals():
+        return globals()[var]
+    return os.getenv(spec["key"], "")
+
+
+def _config_coerce(spec: dict, raw):
+    """Validate and convert a submitted value, or raise ValueError."""
+    t = spec["type"]
+    if t == "bool":
+        if isinstance(raw, bool):
+            return raw
+        s = str(raw).strip().lower()
+        if s not in ("true", "false"):
+            raise ValueError("expected true or false")
+        return s == "true"
+    if t in ("int", "float"):
+        try:
+            val = int(raw) if t == "int" else float(raw)
+        except (TypeError, ValueError):
+            raise ValueError(f"expected {'an integer' if t == 'int' else 'a number'}")
+        lo, hi = spec.get("min"), spec.get("max")
+        if lo is not None and val < lo:
+            raise ValueError(f"must be >= {lo}")
+        if hi is not None and val > hi:
+            raise ValueError(f"must be <= {hi}")
+        return val
+    val = str(raw).strip()
+    choices = spec.get("choices")
+    if choices and val not in choices:
+        raise ValueError(f"must be one of {', '.join(choices)}")
+    if "\n" in val or "\r" in val:
+        raise ValueError("must be a single line")
+    return val
+
+
+def _config_env_str(val) -> str:
+    if isinstance(val, bool):
+        return "true" if val else "false"
+    return str(val)
+
+
+def _config_view(authenticated: bool) -> dict:
+    """Everything the console renders. Secret values are never included."""
+    sections: dict[str, list] = {s: [] for s in CONFIG_SECTIONS}
+    for spec in CONFIG_SPECS:
+        value = _config_current_value(spec)
+        secret = bool(spec.get("secret"))
+        sections[spec["section"]].append({
+            "key": spec["key"],
+            "type": spec["type"],
+            "scope": spec["scope"],
+            "desc": spec["desc"],
+            "secret": secret,
+            # Presence, never the value — this response is a redaction
+            # boundary, so the secret must not travel even to an admin.
+            "value": ("set" if str(value) else "") if secret else _config_env_str(value),
+            "from_env": spec["key"] in os.environ,
+            "choices": spec.get("choices"),
+            "min": spec.get("min"),
+            "max": spec.get("max"),
+        })
+    return {
+        "sections": [{"name": s, "settings": sections[s]} for s in CONFIG_SECTIONS],
+        "authenticated": authenticated,
+        "auth_configured": bool(ADMIN_TOKEN),
+        "editable": authenticated,
+        "env_path": ENV_PATH,
+        "pricing": [
+            {"model": k, **v} for k, v in sorted(PRICING.items())
+        ],
+        "pricing_editable": False,
+    }
+
+
+def _config_apply(changes: dict) -> dict:
+    """Validate, persist and (where safe) hot-apply a batch of changes."""
+    applied, rejected, restart_required = {}, {}, []
+    for key, raw in changes.items():
+        spec = CONFIG_INDEX.get(key)
+        if spec is None:
+            rejected[key] = "unknown setting"
+            continue
+        if spec["scope"] == "locked":
+            rejected[key] = "locked — edit .env on the host and restart"
+            continue
+        try:
+            val = _config_coerce(spec, raw)
+        except ValueError as e:
+            rejected[key] = str(e)
+            continue
+        env_val = _config_env_str(val)
+        save_to_env(key, env_val)
+        os.environ[key] = env_val
+        var = spec.get("var")
+        if spec["scope"] == "live" and var:
+            globals()[var] = val
+        else:
+            restart_required.append(key)
+        applied[key] = env_val
+
+    # Jitter bounds are a pair; a min above max would make randint raise on
+    # every request, so normalise rather than let it blow up mid-traffic.
+    if TIMING_JITTER_MIN_MS > TIMING_JITTER_MAX_MS:
+        globals()["TIMING_JITTER_MIN_MS"] = TIMING_JITTER_MAX_MS
+        save_to_env("TIMING_JITTER_MIN_MS", str(TIMING_JITTER_MAX_MS))
+        applied["TIMING_JITTER_MIN_MS"] = str(TIMING_JITTER_MAX_MS)
+
+    if applied:
+        log(f"  {BG_GREEN}{BOLD} CONFIG {RESET} {GREEN}updated: "
+            f"{', '.join(sorted(applied))}{RESET}")
+    return {
+        "applied": applied,
+        "rejected": rejected,
+        "restart_required": sorted(set(restart_required)),
     }
 
 
@@ -2965,6 +3322,7 @@ DASHBOARD_HTML = """<!doctype html>
   <span class="pill" id="period-pill" title="Current tracking period — resets automatically on the 1st of each month" style="display:none"></span>
   <span class="pill" id="last-refresh" title="Time of last successful /quota fetch">—</span>
   <span class="pill live" id="status-pill"><span class="dot"></span><span id="status-text">connecting…</span></span>
+  <a class="pill" href="/config" title="Settings — reachable only from ADMIN_IPS">Config</a>
 </header>
 
 <main>
@@ -3964,9 +4322,400 @@ DASHBOARD_HTML = """<!doctype html>
 """
 
 
+CONFIG_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Claude Cloak — Configuration</title>
+<style>
+  :root {
+    --bg-0:#0a0a0d; --bg-1:#111118; --bg-2:#1a1a24; --bg-3:#232330;
+    --border:#2a2a3a; --text:#ebebf0; --text-soft:#b8b8c4; --muted:#7c7c8c;
+    --accent:#c084fc; --accent-2:#67e8f9; --ok:#4ade80; --warn:#fbbf24; --danger:#f87171;
+    --radius:10px; --radius-sm:6px;
+    --font-sans:-apple-system,BlinkMacSystemFont,"Inter","Segoe UI",Roboto,system-ui,sans-serif;
+    --font-mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+  }
+  *,*::before,*::after{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{background:var(--bg-0);color:var(--text);font:14px/1.5 var(--font-sans);
+       -webkit-font-smoothing:antialiased;min-height:100vh}
+  code,.num{font-family:var(--font-mono)}
+  a{color:var(--accent-2);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .topbar{position:sticky;top:0;z-index:10;display:flex;align-items:center;gap:16px;
+          padding:14px 28px;background:rgba(10,10,13,.85);backdrop-filter:blur(8px);
+          border-bottom:1px solid var(--border)}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:600}
+  .brand-mark{width:22px;height:22px;border-radius:5px;
+              background:linear-gradient(135deg,var(--accent),var(--accent-2));
+              box-shadow:0 0 12px rgba(192,132,252,.35)}
+  .brand-tag{color:var(--muted);font-weight:500;font-size:12px;margin-left:4px}
+  .spacer{flex:1}
+  .pill{display:inline-flex;align-items:center;gap:6px;padding:5px 11px;background:var(--bg-2);
+        border:1px solid var(--border);border-radius:999px;font-size:12px;color:var(--text-soft)}
+  .pill.ok{color:var(--ok)} .pill.warn{color:var(--warn)}
+  main{max-width:1080px;margin:0 auto;padding:28px}
+  .note{background:var(--bg-1);border:1px solid var(--border);border-left:3px solid var(--accent);
+        border-radius:var(--radius);padding:14px 18px;margin-bottom:22px;color:var(--text-soft)}
+  .note strong{color:var(--text)}
+  .note.warn{border-left-color:var(--warn)}
+  .note.danger{border-left-color:var(--danger)}
+  h2{font-size:15px;margin:26px 0 12px;letter-spacing:.02em}
+  .panel{background:var(--bg-1);border:1px solid var(--border);border-radius:var(--radius);
+         overflow:hidden}
+  .row{display:grid;grid-template-columns:minmax(220px,1fr) minmax(200px,320px);gap:18px;
+       padding:14px 18px;border-bottom:1px solid var(--border)}
+  .row:last-child{border-bottom:none}
+  .row-key{font-family:var(--font-mono);font-size:13px;color:var(--text);
+           display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .row-desc{color:var(--muted);font-size:12.5px;margin-top:4px}
+  .row-ctl{display:flex;align-items:flex-start;justify-content:flex-end}
+  .badge{font-size:10.5px;padding:2px 7px;border-radius:999px;border:1px solid var(--border);
+         background:var(--bg-2);color:var(--muted);letter-spacing:.03em;text-transform:uppercase}
+  .badge.live{color:var(--ok);border-color:rgba(74,222,128,.3)}
+  .badge.restart{color:var(--warn);border-color:rgba(251,191,36,.3)}
+  .badge.locked{color:var(--danger);border-color:rgba(248,113,113,.3)}
+  input[type=text],input[type=number],input[type=password],select{
+    width:100%;background:var(--bg-2);color:var(--text);border:1px solid var(--border);
+    border-radius:var(--radius-sm);padding:8px 10px;font:13px/1.4 var(--font-mono)}
+  input:disabled,select:disabled{opacity:.55;cursor:not-allowed}
+  input:focus,select:focus{outline:none;border-color:var(--accent)}
+  .dirty input,.dirty select{border-color:var(--accent);box-shadow:0 0 0 2px rgba(192,132,252,.15)}
+  .toggle{display:inline-flex;gap:6px}
+  .toggle button{background:var(--bg-2);border:1px solid var(--border);color:var(--muted);
+                 padding:7px 16px;border-radius:var(--radius-sm);cursor:pointer;font:13px var(--font-sans)}
+  .toggle button.on{background:rgba(74,222,128,.12);border-color:rgba(74,222,128,.4);color:var(--ok)}
+  .toggle button:disabled{cursor:not-allowed;opacity:.55}
+  .btn{background:var(--accent);color:#1a1022;border:none;padding:9px 18px;border-radius:var(--radius-sm);
+       font:600 13px var(--font-sans);cursor:pointer}
+  .btn:disabled{opacity:.5;cursor:not-allowed}
+  .btn.ghost{background:var(--bg-2);color:var(--text-soft);border:1px solid var(--border)}
+  .savebar{position:sticky;bottom:0;display:flex;align-items:center;gap:14px;padding:14px 18px;
+           margin-top:22px;background:rgba(17,17,24,.96);border:1px solid var(--border);
+           border-radius:var(--radius);backdrop-filter:blur(8px)}
+  .savebar .msg{flex:1;color:var(--text-soft);font-size:13px}
+  .login{max-width:420px;margin:60px auto;background:var(--bg-1);border:1px solid var(--border);
+         border-radius:var(--radius);padding:26px}
+  .login h1{font-size:17px;margin:0 0 6px}
+  .login p{color:var(--muted);font-size:13px;margin:0 0 18px}
+  .login .err{color:var(--danger);font-size:13px;margin-top:12px;min-height:18px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:9px 18px;border-bottom:1px solid var(--border)}
+  th{color:var(--muted);font-weight:500;font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+  td.num{font-family:var(--font-mono);text-align:right}
+  th.num{text-align:right}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <div class="brand"><div class="brand-mark"></div>
+    <span>Claude Cloak</span><span class="brand-tag">configuration</span></div>
+  <div class="spacer"></div>
+  <span class="pill" id="auth-pill">checking…</span>
+  <a href="/dashboard">Dashboard</a>
+  <button class="btn ghost" id="logout" style="display:none">Sign out</button>
+</div>
+
+<main id="main"><div class="note">Loading configuration…</div></main>
+
+<script>
+let VIEW = null;
+const pending = {};
+
+const esc = (s) => String(s).replace(/[&<>"']/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+async function load() {
+  const r = await fetch('/config/data', {credentials:'same-origin'});
+  VIEW = await r.json();
+  render();
+}
+
+function render() {
+  const pill = document.getElementById('auth-pill');
+  const logout = document.getElementById('logout');
+  if (!VIEW.auth_configured) {
+    pill.textContent = 'read-only · no ADMIN_TOKEN';
+    pill.className = 'pill warn';
+  } else if (VIEW.authenticated) {
+    pill.textContent = 'signed in';
+    pill.className = 'pill ok';
+    logout.style.display = '';
+  } else {
+    pill.textContent = 'locked';
+    pill.className = 'pill warn';
+  }
+
+  const main = document.getElementById('main');
+  if (VIEW.auth_configured && !VIEW.authenticated) { main.innerHTML = loginHtml(); wireLogin(); return; }
+
+  let html = '';
+  if (!VIEW.auth_configured) {
+    html += `<div class="note warn"><strong>Read-only.</strong> No <code>ADMIN_TOKEN</code> is set,
+      so nothing here can be changed from the browser. Add <code>ADMIN_TOKEN=&lt;a long random string&gt;</code>
+      to <code>${esc(VIEW.env_path)}</code> and restart to enable editing. Reaching this page at all
+      already requires an IP in <code>ADMIN_IPS</code>.</div>`;
+  } else {
+    html += `<div class="note"><strong>Signed in.</strong> Changes are written to
+      <code>${esc(VIEW.env_path)}</code>. <span class="badge live">live</span> applies immediately,
+      <span class="badge restart">restart</span> is saved but needs a proxy restart, and
+      <span class="badge locked">locked</span> settings are never writable from the web — they decide
+      who may authenticate, so editing them here would turn one leaked token into permanent access.</div>`;
+  }
+
+  for (const sec of VIEW.sections) {
+    html += `<h2>${esc(sec.name)}</h2><div class="panel">`;
+    for (const s of sec.settings) html += rowHtml(s);
+    html += `</div>`;
+  }
+
+  html += `<h2>Model pricing (USD per million tokens)</h2>
+    <div class="note">Read-only here on purpose — a mistyped rate silently corrupts every cost number
+    that follows. Override with <code>PRICING_&lt;MODEL&gt;_&lt;TIER&gt;</code> in
+    <code>.env</code>. Model ids matching no row are costed at the
+    <code>PRICING_FALLBACK_*</code> rate and listed as <code>unpriced_models</code> in
+    <a href="/quota">/quota</a>.</div>
+    <div class="panel"><table><thead><tr><th>Model</th><th class="num">Input</th>
+    <th class="num">Output</th><th class="num">Cache write 5m</th><th class="num">Cache write 1h</th>
+    <th class="num">Cache read</th></tr></thead><tbody>`;
+  for (const p of VIEW.pricing) {
+    html += `<tr><td><code>${esc(p.model)}</code></td><td class="num">$${p.input.toFixed(2)}</td>
+      <td class="num">$${p.output.toFixed(2)}</td><td class="num">$${p.cache_write_5m.toFixed(2)}</td>
+      <td class="num">$${p.cache_write_1h.toFixed(2)}</td><td class="num">$${p.cache_read.toFixed(2)}</td></tr>`;
+  }
+  html += `</tbody></table></div>`;
+
+  html += `<div class="savebar"><span class="msg" id="save-msg">No pending changes.</span>
+    <button class="btn ghost" id="reset" disabled>Discard</button>
+    <button class="btn" id="save" disabled>Save changes</button></div>`;
+
+  main.innerHTML = html;
+  wireRows();
+}
+
+function rowHtml(s) {
+  const locked = s.scope === 'locked' || !VIEW.editable;
+  const val = esc(s.value ?? '');
+  let ctl;
+  if (s.secret) {
+    ctl = `<input type="text" value="${s.value ? '•••••••• set' : 'not set'}" disabled>`;
+  } else if (locked && !s.value) {
+    // An empty disabled box reads as an editable field the user forgot to
+    // fill in; say plainly that nothing is configured.
+    ctl = `<input type="text" value="not set" disabled>`;
+  } else if (s.type === 'bool') {
+    const on = s.value === 'true';
+    ctl = `<div class="toggle" data-key="${esc(s.key)}">
+      <button data-val="true" class="${on ? 'on' : ''}" ${locked ? 'disabled' : ''}>On</button>
+      <button data-val="false" class="${!on ? 'on' : ''}" ${locked ? 'disabled' : ''}>Off</button></div>`;
+  } else if (s.choices) {
+    ctl = `<select data-key="${esc(s.key)}" ${locked ? 'disabled' : ''}>` +
+      s.choices.map(c => `<option ${c === s.value ? 'selected' : ''}>${esc(c)}</option>`).join('') +
+      `</select>`;
+  } else if (s.type === 'int' || s.type === 'float') {
+    ctl = `<input type="number" step="${s.type === 'int' ? '1' : 'any'}"
+      ${s.min !== null && s.min !== undefined ? `min="${s.min}"` : ''}
+      ${s.max !== null && s.max !== undefined ? `max="${s.max}"` : ''}
+      data-key="${esc(s.key)}" value="${val}" ${locked ? 'disabled' : ''}>`;
+  } else {
+    ctl = `<input type="text" data-key="${esc(s.key)}" value="${val}" ${locked ? 'disabled' : ''}>`;
+  }
+  return `<div class="row" id="row-${esc(s.key)}">
+    <div><div class="row-key"><span>${esc(s.key)}</span>
+      <span class="badge ${esc(s.scope)}">${esc(s.scope)}</span></div>
+      <div class="row-desc">${esc(s.desc)}</div></div>
+    <div class="row-ctl">${ctl}</div></div>`;
+}
+
+function markDirty(key, value) {
+  pending[key] = value;
+  const row = document.getElementById('row-' + key);
+  if (row) row.classList.add('dirty');
+  const n = Object.keys(pending).length;
+  document.getElementById('save-msg').textContent =
+    n ? `${n} pending change${n > 1 ? 's' : ''}.` : 'No pending changes.';
+  document.getElementById('save').disabled = !n;
+  document.getElementById('reset').disabled = !n;
+}
+
+function wireRows() {
+  document.querySelectorAll('input[data-key],select[data-key]').forEach(el => {
+    el.addEventListener('change', () => markDirty(el.dataset.key, el.value));
+  });
+  document.querySelectorAll('.toggle').forEach(t => {
+    t.querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
+      if (b.disabled) return;
+      t.querySelectorAll('button').forEach(x => x.classList.remove('on'));
+      b.classList.add('on');
+      markDirty(t.dataset.key, b.dataset.val);
+    }));
+  });
+  document.getElementById('reset').addEventListener('click', () => { load(); for (const k in pending) delete pending[k]; });
+  document.getElementById('save').addEventListener('click', save);
+  const lo = document.getElementById('logout');
+  if (lo) lo.onclick = async () => {
+    await fetch('/config/logout', {method:'POST', credentials:'same-origin'});
+    location.reload();
+  };
+}
+
+async function save() {
+  const btn = document.getElementById('save');
+  btn.disabled = true;
+  const r = await fetch('/config/apply', {
+    method:'POST', credentials:'same-origin',
+    headers:{'content-type':'application/json'},
+    body: JSON.stringify({changes: pending}),
+  });
+  const res = await r.json();
+  const msg = document.getElementById('save-msg');
+  if (r.status === 401) {
+    msg.textContent = res.error || 'not authenticated';
+    location.reload();
+    return;
+  }
+  const parts = [];
+  if (Object.keys(res.applied || {}).length) parts.push(`saved ${Object.keys(res.applied).length}`);
+  for (const [k, why] of Object.entries(res.rejected || {})) parts.push(`${k}: ${why}`);
+  if ((res.restart_required || []).length) parts.push(`restart needed for ${res.restart_required.join(', ')}`);
+  msg.textContent = parts.join(' · ') || 'nothing changed';
+  for (const k in pending) delete pending[k];
+  await load();
+  document.getElementById('save-msg').textContent = parts.join(' · ') || 'nothing changed';
+}
+
+function loginHtml() {
+  return `<div class="login"><h1>Sign in</h1>
+    <p>Enter <code>ADMIN_TOKEN</code> to change settings. Your IP is already allowed by
+    <code>ADMIN_IPS</code>; this proves who you are.</p>
+    <input type="password" id="tok" placeholder="admin token" autocomplete="current-password">
+    <div class="err" id="login-err"></div>
+    <div style="margin-top:14px"><button class="btn" id="do-login">Sign in</button></div></div>`;
+}
+
+function wireLogin() {
+  const go = async () => {
+    const err = document.getElementById('login-err');
+    err.textContent = '';
+    const r = await fetch('/config/login', {
+      method:'POST', credentials:'same-origin',
+      headers:{'content-type':'application/json'},
+      body: JSON.stringify({token: document.getElementById('tok').value}),
+    });
+    const res = await r.json();
+    if (res.ok) { load(); } else { err.textContent = res.error || 'sign in failed'; }
+  };
+  document.getElementById('do-login').addEventListener('click', go);
+  document.getElementById('tok').addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
+}
+
+load();
+</script>
+</body>
+</html>"""
+
+
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard():
     return HTMLResponse(content=DASHBOARD_HTML)
+
+
+@app.get("/config", response_class=HTMLResponse)
+async def config_page():
+    """Config console. Reachable only from ADMIN_IPS (enforced upstream)."""
+    return HTMLResponse(content=CONFIG_HTML)
+
+
+@app.get("/config/data")
+async def config_data(request: Request):
+    return _config_view(_request_is_admin(request))
+
+
+@app.post("/config/login")
+async def config_login(request: Request):
+    """Exchange ADMIN_TOKEN for a short-lived signed cookie."""
+    client_ip = getattr(request.state, "client_ip", "") or ""
+    if not ADMIN_TOKEN:
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "ADMIN_TOKEN is not set — the console is read-only. "
+                         "Add ADMIN_TOKEN to .env and restart to enable editing.",
+            },
+            status_code=503,
+        )
+
+    locked_for = _admin_lockout_remaining(client_ip)
+    if locked_for:
+        return JSONResponse(
+            {"ok": False, "error": f"too many failed attempts — retry in {locked_for}s"},
+            status_code=429,
+        )
+
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    supplied = str(payload.get("token") or "")
+
+    # Constant-time compare so a wrong token cannot be recovered by timing.
+    if not hmac.compare_digest(supplied, ADMIN_TOKEN):
+        _record_admin_failure(client_ip)
+        left = max(0, ADMIN_MAX_FAILED - _admin_failures.get(client_ip, [0])[0])
+        log(f"  {BG_RED}{BOLD} CONFIG {RESET} {RED}failed login from {client_ip or '<unknown>'}{RESET}")
+        return JSONResponse(
+            {"ok": False, "error": f"invalid token ({left} attempt(s) left)"},
+            status_code=401,
+        )
+
+    _admin_failures.pop(client_ip, None)
+    cookie, expires_at = _issue_admin_cookie()
+    resp = JSONResponse({"ok": True, "expires_at": expires_at})
+    resp.set_cookie(
+        ADMIN_COOKIE_NAME,
+        cookie,
+        max_age=int(ADMIN_SESSION_HOURS * 3600),
+        httponly=True,      # not readable from JS, so XSS cannot lift it
+        samesite="strict",  # no cross-site form can ride the session
+        path="/",
+    )
+    log(f"  {BG_GREEN}{BOLD} CONFIG {RESET} {GREEN}admin signed in from {client_ip or '<unknown>'}{RESET}")
+    return resp
+
+
+@app.post("/config/logout")
+async def config_logout():
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie(ADMIN_COOKIE_NAME, path="/")
+    return resp
+
+
+@app.post("/config/apply")
+async def config_apply(request: Request):
+    """Write a batch of settings. Requires a valid admin session."""
+    if not _request_is_admin(request):
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "not authenticated"
+                if ADMIN_TOKEN
+                else "ADMIN_TOKEN is not set — editing is disabled",
+            },
+            status_code=401,
+        )
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    changes = payload.get("changes")
+    if not isinstance(changes, dict) or not changes:
+        return JSONResponse({"ok": False, "error": "no changes supplied"}, status_code=400)
+
+    result = _config_apply(changes)
+    result["ok"] = not result["rejected"]
+    return JSONResponse(result, status_code=200 if result["ok"] else 207)
 
 
 @app.get("/coach")
