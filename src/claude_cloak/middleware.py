@@ -9,6 +9,7 @@ from .access import (
     is_ip_allowed,
     label_for_ip,
     parse_user_prefix,
+    resolve_client_ip,
     seconds_until_user_period_reset,
 )
 from .quota.users import get_or_create_user_bucket, is_user_over_cap
@@ -40,7 +41,17 @@ class AccessControlMiddleware:
             return
 
         client = scope.get("client")
-        client_ip = client[0] if client else ""
+        peer_ip = client[0] if client else ""
+        # Behind a configured reverse proxy the peer is the proxy; every gate
+        # below must judge the real client instead. Untrusted peers keep their
+        # own address, so a forged header buys nothing.
+        forwarded_for = ""
+        if settings.TRUSTED_PROXY_NETWORKS:
+            for raw_key, raw_val in scope.get("headers", []):
+                if raw_key == b"x-forwarded-for":
+                    forwarded_for = raw_val.decode("latin-1")
+                    break
+        client_ip = resolve_client_ip(peer_ip, forwarded_for)
         raw_path = scope.get("path") or "/"
         method = scope.get("method", "GET")
 

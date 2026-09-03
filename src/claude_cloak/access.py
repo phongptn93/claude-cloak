@@ -20,6 +20,37 @@ def is_ip_allowed(ip: str) -> bool:
     return any(addr in net for net in settings.ALLOWED_NETWORKS)
 
 
+def is_trusted_proxy(ip: str) -> bool:
+    if not settings.TRUSTED_PROXY_NETWORKS:
+        return False
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(addr in net for net in settings.TRUSTED_PROXY_NETWORKS)
+
+
+def resolve_client_ip(peer_ip: str, forwarded_for: str) -> str:
+    """The address every IP gate should judge.
+
+    Normally the TCP peer. When the peer is a configured reverse proxy, the
+    rightmost X-Forwarded-For entry that is not itself a trusted proxy — that
+    is the address the trusted hop observed, and the last one a client cannot
+    forge by prepending entries of its own.
+    """
+    if not forwarded_for or not is_trusted_proxy(peer_ip):
+        return peer_ip
+    for candidate in reversed([h.strip() for h in forwarded_for.split(",") if h.strip()]):
+        if is_trusted_proxy(candidate):
+            continue
+        try:
+            ipaddress.ip_address(candidate)
+        except ValueError:
+            return peer_ip
+        return candidate
+    return peer_ip
+
+
 def label_for_ip(ip: str) -> str:
     """Return the human label for a source IP, falling back to the IP string."""
     if not ip:

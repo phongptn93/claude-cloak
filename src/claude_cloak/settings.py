@@ -95,6 +95,45 @@ STATS_PATHS = ("/health", "/quota", "/quota/users", "/dashboard", "/coach")
 STATS_PATH_PREFIXES = ("/quota/users/",)
 
 # ============================================================
+# TLS (direct termination, no reverse proxy needed)
+# Point these at a Let's Encrypt live/ pair to serve HTTPS from the proxy
+# itself. Leaving them empty serves plain HTTP.
+# ============================================================
+TLS_CERTFILE = env_str("TLS_CERTFILE")
+TLS_KEYFILE = env_str("TLS_KEYFILE")
+TLS_ENABLED = bool(TLS_CERTFILE and TLS_KEYFILE)
+
+# Plain-HTTP side listener, normally port 80. It does two jobs and nothing
+# else: serve ACME http-01 challenge files so certbot can renew without the
+# proxy going down, and redirect every other request to the HTTPS port.
+# 0 disables it. Binding below 1024 needs CAP_NET_BIND_SERVICE (see the
+# systemd unit) or root.
+HTTP_REDIRECT_PORT = env_int("HTTP_REDIRECT_PORT", 0)
+# Webroot certbot writes challenges into: files land in
+# <dir>/.well-known/acme-challenge/<token>.
+ACME_WEBROOT = env_str("ACME_WEBROOT")
+# Public hostname used when redirecting to HTTPS. Empty = reuse the Host
+# header the client sent.
+PUBLIC_HOSTNAME = env_str("PUBLIC_HOSTNAME")
+# Port clients reach HTTPS on, when that differs from the port the process
+# binds — a container publishing 443:9999, for instance. 0 = same as
+# LOCAL_PORT. Only affects the redirect URL.
+PUBLIC_HTTPS_PORT = env_int("PUBLIC_HTTPS_PORT", 0)
+
+# ============================================================
+# TRUSTED REVERSE PROXIES
+# Every IP gate in this proxy (ALLOWED_IPS, ADMIN_IPS, STATS_VIEW_IPS,
+# per-user labels) reads the TCP peer address. Behind a reverse proxy that
+# peer is the proxy itself, which would collapse the whitelist and hand the
+# admin console to everyone. Listing the proxy here makes the real client
+# address be taken from X-Forwarded-For instead — but ONLY for connections
+# that actually originate from a listed address, so a forged header from an
+# arbitrary client is ignored. Empty (default) = never trust the header.
+# ============================================================
+TRUSTED_PROXY_IPS_RAW = env_str("TRUSTED_PROXY_IPS")
+TRUSTED_PROXY_NETWORKS = parse_allowed_networks(TRUSTED_PROXY_IPS_RAW)
+
+# ============================================================
 # IDENTITY
 # ============================================================
 # When set, only this exact IP may lock the device identity on the first
