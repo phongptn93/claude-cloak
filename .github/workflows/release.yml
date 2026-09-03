@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.0.1  # no floating v10 tag is published
         with:
           enable-cache: true
       # --locked everywhere: a tag whose lockfile drifted from pyproject.toml
@@ -39,7 +39,7 @@ jobs:
       version: ${{ steps.meta.outputs.version }}
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.0.1  # no floating v10 tag is published
       - id: meta
         run: echo "version=$(uv version --short)" >> "$GITHUB_OUTPUT"
       - name: Refuse a tag that disagrees with the project version

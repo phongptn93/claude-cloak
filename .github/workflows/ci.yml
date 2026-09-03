@@ -28,7 +28,7 @@ jobs:
         python-version: ["3.11", "3.13"]
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.0.1  # no floating v10 tag is published
         with:
           enable-cache: true
           python-version: ${{ matrix.python-version }}
@@ -54,7 +54,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.0.1  # no floating v10 tag is published
         with:
           enable-cache: true
       - run: deploy/build-release.sh
