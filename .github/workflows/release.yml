@@ -1,0 +1,108 @@
+name: release
+
+# Builds the deployable artifact and attaches it to a GitHub Release, so a
+# host installs a signed, immutable bundle instead of cloning and building.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (must already exist)"
+        required: true
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      # --locked everywhere: a tag whose lockfile drifted from pyproject.toml
+      # must fail here, not on a production host.
+      - run: uv sync --locked
+      - run: uv run ruff check src tests
+      - run: uv run ruff format --check src tests
+      - run: uv run ty check src
+      - run: uv run pytest
+
+  build:
+    needs: verify
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+      - id: meta
+        run: echo "version=$(uv version --short)" >> "$GITHUB_OUTPUT"
+      - name: Refuse a tag that disagrees with the project version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          test "$tag" = "${{ steps.meta.outputs.version }}" \
+            || { echo "tag $tag != project version ${{ steps.meta.outputs.version }}"; exit 1; }
+      - run: deploy/build-release.sh
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum claude-cloak-*.tar.gz > SHA256SUMS
+      # Provenance ties the bundle to this workflow run and commit, so a host
+      # can verify where it came from with `gh attestation verify`.
+      - uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: dist/claude-cloak-*.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-bundle
+          path: |
+            dist/claude-cloak-*.tar.gz
+            dist/SHA256SUMS
+
+  smoke:
+    needs: build
+    runs-on: ubuntu-latest
+    container: ubuntu:24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: release-bundle }
+      # Install the artifact exactly as a host would: no uv, no git, no
+      # compiler, only the distro python. This is the consumer's copy, not
+      # the build environment's.
+      - run: |
+          set -e
+          apt-get update -qq && apt-get install -y -qq python3-venv >/dev/null
+          tar xzf claude-cloak-*.tar.gz && cd claude-cloak-*/
+          printf '#!/bin/sh\nexit 0\n' > /usr/bin/systemctl && chmod +x /usr/bin/systemctl
+          ./deploy/systemd/install.sh
+          /opt/claude-cloak/.venv/bin/python -c "import claude_cloak.app; print('bundle installs and imports')"
+          /opt/claude-cloak/.venv/bin/python -c "
+          from httpx._decoders import SUPPORTED_DECODERS as d
+          assert {'br', 'zstd'} <= set(d), d
+          print('br/zstd decoders present')"
+
+  publish:
+    needs: [build, smoke]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with: { name: release-bundle }
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            claude-cloak-*.tar.gz
+            SHA256SUMS
+          generate_release_notes: true
+          body: |
+            Install on a Linux host — no clone, no build:
+
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/deploy/install-from-release.sh | sudo bash
+            ```

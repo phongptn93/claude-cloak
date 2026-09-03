@@ -3,6 +3,10 @@
 `tests/golden/` was captured from the pre-refactor single-file proxy: the full
 key path + value type of every JSON endpoint, and the sha256 of both HTML pages.
 These files are the record that the split changed no observable output.
+
+Deliberate additions are allowed and must be listed in ADDED_SINCE_BASELINE,
+which doubles as the changelog for the public response shape. Anything else —
+a renamed key, a dropped field, a changed type — fails.
 """
 
 from __future__ import annotations
@@ -18,6 +22,14 @@ from claude_cloak.app import create_app
 from claude_cloak.web import config_html, dashboard_html
 
 GOLDEN = Path(__file__).parent / "golden"
+
+# Key paths added on purpose after the baseline was captured. Each entry is a
+# prefix; everything under it is treated as new surface rather than drift.
+ADDED_SINCE_BASELINE = {
+    # TLS certificate expiry, so a renewal that stops working is visible
+    # before it becomes an outage.
+    "health": [".tls"],
+}
 
 ENDPOINTS = {
     "health": "/health",
@@ -55,8 +67,13 @@ async def test_json_shape_matches_the_pre_refactor_contract(client, name, path):
     assert response.status_code == 200
 
     expected = (GOLDEN / f"{name}.keys").read_text().splitlines()
-    actual = list(key_paths(json.loads(response.text)))
+    added = tuple(ADDED_SINCE_BASELINE.get(name, ()))
+    actual = [k for k in key_paths(json.loads(response.text)) if not k.startswith(added)]
     assert actual == expected
+
+    if added:
+        full = list(key_paths(json.loads(response.text)))
+        assert len(full) > len(actual), f"{name}: {added} is declared but absent"
 
 
 @pytest.mark.parametrize(

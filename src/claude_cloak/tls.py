@@ -10,6 +10,7 @@ into something visible days ahead of the outage.
 from __future__ import annotations
 
 import datetime
+import importlib
 import ssl
 from pathlib import Path
 
@@ -23,9 +24,12 @@ CRITICAL_DAYS = 7
 
 def _not_after(certfile: str) -> datetime.datetime | None:
     try:
-        # Private but long-stable; a diagnostic must never take the proxy down,
-        # so any failure just leaves the field absent.
-        decoded = ssl._ssl._test_decode_cert(certfile)  # type: ignore[attr-defined]
+        # There is no public stdlib call that reads notAfter from a file on
+        # disk. This one is private but long-stable, and a diagnostic must
+        # never be able to take the proxy down — any failure here just leaves
+        # the field absent.
+        decode = importlib.import_module("_ssl")._test_decode_cert  # ty: ignore[unresolved-attribute]
+        decoded = decode(certfile)
         seconds = ssl.cert_time_to_seconds(decoded["notAfter"])
     except Exception:
         return None

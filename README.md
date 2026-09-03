@@ -737,6 +737,16 @@ tests/                     # pytest suite + golden endpoint snapshots
 Dependencies are pinned in `uv.lock`; `uv sync` reproduces the exact environment.
 There is no `requirements.txt` and no `pip` step any more.
 
+## Deployment
+
+Production deployment — Azure VM, Let's Encrypt, systemd/Docker/Windows, and
+running alongside another HTTPS service — is documented in
+**[deploy/README.md](deploy/README.md)**.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/phongptn93/claude-cloak/main/deploy/install-from-release.sh | sudo bash
+```
+
 ## Development
 
 ```bash

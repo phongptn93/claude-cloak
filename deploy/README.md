@@ -152,14 +152,41 @@ automatic renewal has already missed a window and needs looking at.
 
 ## 1. Native systemd (Linux)
 
+Install from a published release — no clone, no build, no toolchain on the
+host beyond its own python3:
+
 ```bash
-git clone https://github.com/phongptn93/claude-cloak && cd claude-cloak
-sudo deploy/systemd/install.sh
+curl -fsSL https://raw.githubusercontent.com/phongptn93/claude-cloak/main/deploy/install-from-release.sh | sudo bash
 sudo -e /var/lib/claude-cloak/.env
 sudo systemctl restart claude-cloak
-systemctl status claude-cloak
 journalctl -u claude-cloak -f
 ```
+
+Pin a version, or install from an internal mirror:
+
+```bash
+sudo ./install-from-release.sh v0.2.0
+sudo BASE_URL=http://10.0.0.5/releases ./install-from-release.sh v0.2.0
+```
+
+The script downloads the bundle, checks it against the release's
+`SHA256SUMS`, and refuses to install on a mismatch. Where `gh` and a token
+are available it also runs `gh attestation verify`, which ties the bundle to
+the workflow run and commit that produced it.
+
+Upgrading is the same command; `.env` and the persisted counters are never
+touched. To roll back, install the previous tag.
+
+<details>
+<summary>Installing from a source checkout instead</summary>
+
+```bash
+git clone https://github.com/phongptn93/claude-cloak && cd claude-cloak
+sudo deploy/systemd/install.sh          # falls back to uv sync --locked
+```
+
+This needs uv on the host and is the path used while developing.
+</details>
 
 The relevant part of `/var/lib/claude-cloak/.env`:
 
@@ -241,6 +268,114 @@ win-acme installs its own renewal task; `renew-cert.ps1` restarts the proxy
 when a certificate changes.
 
 ---
+
+## Release pipeline
+
+`.github/workflows/release.yml` runs on a `v*` tag:
+
+| Job | What it guarantees |
+|---|---|
+| `verify` | `uv sync --locked`, ruff, ty, pytest — a tag whose lockfile drifted fails here, not on a host |
+| `build` | Refuses a tag that disagrees with the project version; builds the bundle; publishes SHA256SUMS and a signed build provenance attestation |
+| `smoke` | Installs the bundle in a bare `ubuntu:24.04` container with no uv, no git and no compiler, then imports the app and asserts the br/zstd decoders are present — the consumer's copy is tested, not the build environment's |
+| `publish` | Attaches the bundle to the GitHub Release |
+
+Cutting a release:
+
+```bash
+uv version --bump patch          # or minor/major
+git commit -am "release: $(uv version --short)"
+git tag "v$(uv version --short)" && git push --follow-tags
+```
+
+Hosts then upgrade with the same `install-from-release.sh` they installed
+with.
+
+## Running alongside another service on the same VM
+
+The question comes up as soon as a second HTTPS service wants port 443 — a
+chat-platform bot endpoint, for instance, which typically serves plain HTTP
+on a local port and needs a public HTTPS URL with a chain-trusted
+certificate for the platform to deliver webhooks to.
+
+The two have **opposite exposure requirements**, and that decides the shape:
+
+| | claude-cloak | a bot / webhook endpoint |
+|---|---|---|
+| Who may connect | your team's IPs only | the platform's servers, from undisclosed dynamic IPs |
+| Client IP | load-bearing — every gate judges it | irrelevant; requests carry their own signed auth |
+| TLS | terminates in-process, by design | needs a terminator in front |
+
+Putting both behind one shared reverse proxy forces `443` open to the
+internet, which throws away claude-cloak's network-layer restriction and
+leaves only the application-level `ALLOWED_IPS`. Better to keep them apart.
+
+### Recommended: a second public IP on the same VM
+
+Azure lets one NIC carry several IP configurations, each with its own public
+IP and its own DNS label. Give each service an address and the conflict
+disappears — no shared proxy, no shared failure, and claude-cloak keeps
+seeing real client addresses.
+
+```bash
+RG=rg-claude-cloak
+az network public-ip create -g $RG -n public-ip-svc2 --sku Standard \
+   --allocation-method Static --dns-name <second-label>
+NIC=$(az network nic list -g $RG --query "[0].name" -o tsv)
+az network nic ip-config create -g $RG --nic-name $NIC -n ipconfig-svc2 \
+   --private-ip-address 10.0.0.5 --public-ip-address public-ip-svc2
+sudo reboot     # the OS only picks up a new IP configuration on restart
+```
+
+Then bind each service to its own private address — Azure maps each to its
+matching public IP:
+
+```ini
+# /var/lib/claude-cloak/.env
+LOCAL_HOST=10.0.0.4          # primary IP config
+```
+
+```caddy
+# /etc/caddy/Caddyfile — Caddy fronts ONLY the second service, and obtains
+# its own certificate for the second label. claude-cloak is untouched.
+<second-label>.<region>.cloudapp.azure.com {
+    bind 10.0.0.5
+    reverse_proxy 127.0.0.1:<service-port>
+}
+```
+
+NSG rules target the destination address, so each service keeps its own
+policy:
+
+```bash
+az network nsg rule create -g $RG --nsg-name <nsg> -n allow-https-cloak \
+   --priority 1020 --destination-address-prefixes 10.0.0.4 \
+   --destination-port-ranges 443 --source-address-prefixes <team IPs> --access Allow --protocol Tcp
+az network nsg rule create -g $RG --nsg-name <nsg> -n allow-https-svc2 \
+   --priority 1030 --destination-address-prefixes 10.0.0.5 \
+   --destination-port-ranges 443 --source-address-prefixes Internet --access Allow --protocol Tcp
+```
+
+Cost: one extra Standard static IPv4 address, $0.005/hour — about $3.65 a
+month (Azure retail price, southeastasia, at the time of writing).
+
+### Alternatives
+
+**Separate ports on one IP** — free. The other service takes 443, claude-cloak moves to
+`LOCAL_PORT=8443`; both read the same certificate, and the certbot deploy
+hook restarts both. Clients set `https://<fqdn>:8443/u/<name>`. The cost is
+a non-standard port, which some restrictive networks block.
+
+**One shared reverse proxy** — supported: list the proxy in
+`TRUSTED_PROXY_IPS` and claude-cloak will take the client address from
+`X-Forwarded-For` for connections that genuinely come from it. Use `Caddy`
+with `flush_interval -1` so SSE is not buffered. Accept that `443` is then
+open to the internet for everyone, and that a proxy restart drops both
+services at once.
+
+**Separate VMs** — the cleanest isolation, and the obvious answer if the
+other service ever needs to scale, since claude-cloak cannot run more than one process.
+Costs a second VM (`Standard_B2s`, ~$38.54/month in southeastasia).
 
 ## Pointing clients at it
 

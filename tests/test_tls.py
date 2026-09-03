@@ -13,9 +13,24 @@ from claude_cloak.tls import certificate_view
 def _issue(tmp_path, days: int):
     cert, key = tmp_path / "c.pem", tmp_path / "k.pem"
     subprocess.run(
-        ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
-         "-keyout", str(key), "-out", str(cert), "-days", str(days), "-subj", "/CN=t"],
-        check=True, capture_output=True,
+        [
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            str(key),
+            "-out",
+            str(cert),
+            "-days",
+            str(days),
+            "-subj",
+            "/CN=t",
+        ],
+        check=True,
+        capture_output=True,
     )
     return cert, key
 
@@ -28,6 +43,7 @@ def cert_factory(tmp_path, monkeypatch):
         monkeypatch.setattr(settings, "TLS_KEYFILE", str(key))
         monkeypatch.setattr(settings, "TLS_ENABLED", True)
         return cert
+
     return make
 
 
