@@ -20,8 +20,8 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: astral-sh/setup-uv@v7
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
         with:
           enable-cache: true
       # --locked everywhere: a tag whose lockfile drifted from pyproject.toml
@@ -29,7 +29,7 @@ jobs:
       - run: uv sync --locked
       - run: uv run ruff check src tests
       - run: uv run ruff format --check src tests
-      - run: uv run ty check src
+      - run: uv run ty check
       - run: uv run pytest
 
   build:
@@ -38,8 +38,8 @@ jobs:
     outputs:
       version: ${{ steps.meta.outputs.version }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: astral-sh/setup-uv@v7
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
       - id: meta
         run: echo "version=$(uv version --short)" >> "$GITHUB_OUTPUT"
       - name: Refuse a tag that disagrees with the project version
@@ -54,10 +54,10 @@ jobs:
         run: sha256sum claude-cloak-*.tar.gz > SHA256SUMS
       # Provenance ties the bundle to this workflow run and commit, so a host
       # can verify where it came from with `gh attestation verify`.
-      - uses: actions/attest-build-provenance@v3
+      - uses: actions/attest-build-provenance@v4
         with:
           subject-path: dist/claude-cloak-*.tar.gz
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-bundle
           path: |
@@ -69,7 +69,7 @@ jobs:
     runs-on: ubuntu-latest
     container: ubuntu:24.04
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with: { name: release-bundle }
       # Install the artifact exactly as a host would: no uv, no git, no
       # compiler, only the distro python. This is the consumer's copy, not
@@ -91,10 +91,10 @@ jobs:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with: { name: release-bundle }
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: |
             claude-cloak-*.tar.gz

@@ -269,6 +269,17 @@ when a certificate changes.
 
 ---
 
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push to `main` and every pull request:
+
+| Job | What it guarantees |
+|---|---|
+| `verify` | `uv sync --locked`, ruff, `ty check` (whole project, tests included) and pytest on **Python 3.11 and 3.13** — the floor is what a distro host actually ships, so it is the version that breaks in the field |
+| `scripts` | `shellcheck -S warning` over every tracked `*.sh`. The install and launcher scripts have no test suite and run as root on a host; this is the only gate they get |
+| `bundle` | Builds the release bundle and installs it in a bare `ubuntu:24.04` container — no uv, no git, no compiler — then imports the app, asserts the br/zstd decoders, and checks the `.env` template reached `/var/lib/claude-cloak/.env` |
+| `docker` | Builds `deploy/docker/Dockerfile` and imports the app inside the image — a second, independent install path that breaks on its own schedule |
+
 ## Release pipeline
 
 `.github/workflows/release.yml` runs on a `v*` tag:

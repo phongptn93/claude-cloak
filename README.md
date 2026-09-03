@@ -6,8 +6,9 @@
 
 [![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)](https://python.org)
 [![uv](https://img.shields.io/badge/managed%20by-uv-DE5FE9?logo=astral&logoColor=white)](https://docs.astral.sh/uv/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.141-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
 [![License](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
+[![CI](https://github.com/phongptn93/claude-cloak/actions/workflows/ci.yml/badge.svg)](https://github.com/phongptn93/claude-cloak/actions/workflows/ci.yml)
 
 <img src="https://img.shields.io/badge/Windows-0078D6?logo=windows&logoColor=white" alt="Windows"> <img src="https://img.shields.io/badge/Claude_Code-VS_Code-7C3AED?logo=visual-studio-code" alt="VS Code">
 
@@ -666,6 +667,7 @@ If `service.log` shows `'uv' is not recognized`, the SYSTEM account can't see uv
 ## Project Structure
 
 ```
+CHANGELOG.md               # What changed in each version, and what is still known-broken
 .env.example               # Config template with all captured header fields
 .env                       # Captured identity + config (git-ignored)
 .quota.json                # Persisted quota/cost counters (git-ignored, auto-managed)
@@ -740,6 +742,11 @@ tests/                     # pytest suite + golden endpoint snapshots
 Dependencies are pinned in `uv.lock`; `uv sync` reproduces the exact environment.
 There is no `requirements.txt` and no `pip` step any more.
 
+## Changelog
+
+Every release is described in **[CHANGELOG.md](CHANGELOG.md)**, including the
+known limitations that ship with it.
+
 ## Deployment
 
 Production deployment — Azure VM, Let's Encrypt, systemd/Docker/Windows, and
@@ -756,8 +763,14 @@ curl -fsSL https://raw.githubusercontent.com/phongptn93/claude-cloak/main/deploy
 uv sync                  # create/refresh the environment from uv.lock
 uv run pytest            # test suite
 uv run ruff check src tests && uv run ruff format src tests
-uv run ty check src      # type check
+uv run ty check          # type check — whole project, tests included
 ```
+
+These are the same four commands CI runs, so a green local run means a green
+`verify` job. CI additionally runs them on Python 3.11 (the `requires-python`
+floor), shellchecks every `*.sh`, installs the release bundle in a bare
+`ubuntu:24.04` container and builds the Docker image — see
+[deploy/README.md](deploy/README.md#continuous-integration).
 
 ### Offline echo mode
 
@@ -780,7 +793,10 @@ production — no request reaches Anthropic.
 
 ### Configuration
 
-Everything is read from `.env` — there are no tunable literals left in the code.
+Everything is read from `.env` at the repository root — there are no tunable
+literals left in the code. Set `CLAUDE_CLOAK_ENV` to point elsewhere; every
+packaged deployment does. An older `client/.env` is still read as a last
+resort, with a warning naming the file it should move to.
 `.env.example` documents every key, including an **Advanced** section for
 values that were previously hardcoded (cache beta id, buffer caps, retry
 backoff, cookie name, …). Static tables (telemetry paths, sanitized body fields,

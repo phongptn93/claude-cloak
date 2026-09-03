@@ -24,7 +24,7 @@ ENV_FILENAME = ".env"
 ENV_PATH_VAR = "CLAUDE_CLOAK_ENV"
 
 
-# Pre-0.3 installs kept .env under client/. Still honoured, but last, so a
+# Older checkouts kept .env under client/. Still honoured, but last, so a
 # stale copy there can never shadow the root file it was migrated to.
 LEGACY_ENV_DIR = "client"
 
