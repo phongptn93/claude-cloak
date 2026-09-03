@@ -8,7 +8,12 @@ license = { text = "MIT" }
 
 dependencies = [
     "fastapi>=0.141.1",
-    "httpx>=0.28.1",
+    # brotli + zstd matter: the proxy forwards the captured client's
+    # accept-encoding (real Claude Code advertises "gzip, deflate, br, zstd").
+    # Without these decoders httpx cannot decompress a br/zstd response, and
+    # since content-encoding is stripped on the way out the client would
+    # receive undecodable bytes.
+    "httpx[brotli,zstd]>=0.28.1",
     "python-dotenv>=1.2.3",
     "uvicorn>=0.52.4",
 ]
