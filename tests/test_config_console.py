@@ -69,3 +69,29 @@ def test_apply_refuses_locked_keys(monkeypatch):
     result = config_console._config_apply({"DEPLOY_MODE": "server"})
     assert not result["applied"]
     assert "locked" in result["rejected"]["DEPLOY_MODE"]
+
+
+def test_choice_specs_are_values_the_code_accepts(monkeypatch):
+    """A dropdown value the settings module normalises away is a silent no-op.
+
+    USER_QUOTA_PERIOD offered day/week/month while settings only accepts
+    daily/monthly, so every choice the console listed fell back to monthly
+    after the restart the console itself asked for.
+    """
+    import importlib
+
+    for spec in config_console.CONFIG_SPECS:
+        choices = spec.get("choices")
+        var = spec.get("var") or spec["key"]
+        if not choices or not hasattr(settings, var):
+            continue
+        for choice in choices:
+            monkeypatch.setenv(spec["key"], choice)
+            fresh = importlib.reload(settings)
+            actual = getattr(fresh, var)
+            monkeypatch.delenv(spec["key"], raising=False)
+            importlib.reload(settings)
+            assert actual == choice, (
+                f"{spec['key']}={choice} is offered by the console but "
+                f"settings normalises it to {actual!r}"
+            )

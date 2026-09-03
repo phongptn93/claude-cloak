@@ -11,10 +11,12 @@ from fastapi import FastAPI
 from . import settings, state
 from .banner import print_banner, print_status
 from .coach import _load_coach_stats, _save_coach_stats
+from .env import ENV_PATH, save_to_env
 from .loki import _loki_flush_once, _loki_flusher_loop
 from .middleware import AccessControlMiddleware
 from .quota.persist import _load_quota_stats, _save_quota_stats
 from .routes import admin, coach, config, health, pages, passthrough, quota
+from .terminal import RESET, YELLOW, log
 
 
 def build_upstream_client() -> httpx.AsyncClient:
@@ -48,8 +50,30 @@ def build_telemetry_client() -> httpx.AsyncClient:
     )
 
 
+def persist_generated_session_secret() -> None:
+    """Write a freshly generated SESSION_SECRET to .env, once.
+
+    Without this the secret is new on every start, so every /config sign-in
+    dies on restart — and this service restarts on each certificate renewal.
+    identity.py already saved it, but only inside identity capture, which
+    server mode disables; a shared deployment therefore never reached it.
+    """
+    if not settings.SESSION_SECRET_GENERATED:
+        return
+    try:
+        save_to_env("SESSION_SECRET", settings.SESSION_SECRET)
+    except OSError as exc:
+        log(
+            f"  {YELLOW}SESSION_SECRET could not be saved to {ENV_PATH} ({exc}). "
+            f"Admin sessions will not survive a restart.{RESET}"
+        )
+        return
+    settings.SESSION_SECRET_GENERATED = False
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    persist_generated_session_secret()
     state.runtime.http_client = build_upstream_client()
     state.runtime.telemetry_client = build_telemetry_client()
     _load_quota_stats()

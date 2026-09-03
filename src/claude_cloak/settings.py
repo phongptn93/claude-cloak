@@ -197,6 +197,10 @@ USER_LABEL_RE = re.compile(rf"^/u/({USER_LABEL_PATTERN})(/.*)?$")
 # SESSION SECRET (deterministic ID derivation across devices)
 # ============================================================
 SESSION_SECRET = env_str("SESSION_SECRET")
+# Generated here but persisted by the app lifespan, not at import time: this
+# module is imported by tests and by `python -c` probes, and writing to the
+# operator's .env from an import would be a surprise.
+SESSION_SECRET_GENERATED = not SESSION_SECRET
 if not SESSION_SECRET:
     SESSION_SECRET = secrets.token_hex(32)
 

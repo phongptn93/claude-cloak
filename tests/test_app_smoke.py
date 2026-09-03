@@ -7,6 +7,7 @@ import json
 import httpx
 import pytest
 
+from claude_cloak import env as env_module
 from claude_cloak import settings, state
 from claude_cloak.app import create_app
 
@@ -111,3 +112,40 @@ async def test_dev_echo_records_usage_and_cost(client, monkeypatch):
         await client.post("/v1/messages", json={"model": "claude-opus-5", "messages": []})
     after = state.quota_stats["usage_total"]["input_tokens"]
     assert after == before + settings.DEV_ECHO_INPUT_TOKENS
+
+
+def test_generated_session_secret_is_persisted_once(tmp_path, monkeypatch):
+    """A regenerated secret invalidates every admin session on restart.
+
+    Server mode disables identity capture, which used to be the only code
+    path that saved it, so a shared deployment rotated the secret on every
+    start — including the restart each certificate renewal triggers.
+    """
+    from claude_cloak import app as app_module
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("LOCAL_PORT=9999\n", encoding="utf-8")
+    monkeypatch.setattr(env_module, "ENV_PATH", str(env_file))
+    monkeypatch.setattr(app_module, "ENV_PATH", str(env_file))
+    monkeypatch.setattr(settings, "SESSION_SECRET", "a" * 64)
+    monkeypatch.setattr(settings, "SESSION_SECRET_GENERATED", True)
+
+    app_module.persist_generated_session_secret()
+    assert f"SESSION_SECRET={'a' * 64}" in env_file.read_text()
+    assert settings.SESSION_SECRET_GENERATED is False
+
+    # Second start must be a no-op, not a rotation.
+    monkeypatch.setattr(settings, "SESSION_SECRET", "b" * 64)
+    app_module.persist_generated_session_secret()
+    assert f"SESSION_SECRET={'a' * 64}" in env_file.read_text()
+
+
+def test_a_configured_session_secret_is_never_rewritten(tmp_path, monkeypatch):
+    from claude_cloak import app as app_module
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("SESSION_SECRET=operator-chose-this\n", encoding="utf-8")
+    monkeypatch.setattr(env_module, "ENV_PATH", str(env_file))
+    monkeypatch.setattr(settings, "SESSION_SECRET_GENERATED", False)
+    app_module.persist_generated_session_secret()
+    assert env_file.read_text() == "SESSION_SECRET=operator-chose-this\n"

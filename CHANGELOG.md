@@ -4,7 +4,23 @@ Notable changes to Claude Cloak. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.2.0] — Unreleased
+## [0.2.1] — Unreleased
+
+### Fixed
+
+- **The `/config` console offered quota periods the code rejects.**
+  `USER_QUOTA_PERIOD` listed `day`/`week`/`month` while `settings.py` accepts
+  only `daily`/`monthly` and normalises everything else to monthly. All three
+  offered values were silent no-ops: the console asked for a restart, and the
+  restart discarded the choice. A test now walks every spec with `choices` and
+  asserts the settings module keeps the value.
+- **`SESSION_SECRET` was regenerated on every start in server mode**, so every
+  `/config` sign-in died on restart — including the restart each certificate
+  renewal triggers. The secret was only persisted inside identity capture,
+  which server mode disables by design. It is now written once from the app
+  lifespan, which every deployment path runs.
+
+## [0.2.0] — 2026-09-03
 
 The first packaged release. Everything before this lived as a single
 5,365-line `client/proxy.py` with a `requirements.txt`, no lockfile, no tests

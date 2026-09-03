@@ -269,7 +269,10 @@ CONFIG_SPECS: list[dict] = [
         "type": "str",
         "scope": "restart",
         "section": "Per-user quota",
-        "choices": ["day", "week", "month"],
+        # Must match what settings.py accepts: anything else is normalised to
+        # monthly, so offering a value the code does not know silently does
+        # nothing after the restart the console asks for.
+        "choices": ["daily", "monthly"],
         "desc": "Window the per-user cap resets on.",
     },
     {

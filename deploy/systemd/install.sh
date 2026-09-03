@@ -86,6 +86,7 @@ if [ ! -f "$DATA_DIR/.env" ]; then
     cp "$ENV_TEMPLATE" "$DATA_DIR/.env"
     echo "Created $DATA_DIR/.env from the template — edit it before starting."
 fi
+
 chown "$SERVICE_USER:$SERVICE_USER" "$DATA_DIR/.env"
 chmod 600 "$DATA_DIR/.env"
 
