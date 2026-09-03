@@ -25,7 +25,7 @@ uv export --no-dev --no-emit-project --format requirements-txt \
 
 cp -r deploy "$STAGE/deploy"
 rm -f "$STAGE/deploy/build-release.sh"
-cp client/.env.example "$STAGE/.env.example"
+cp .env.example "$STAGE/.env.example"
 cp README.md "$STAGE/README.md"
 printf '%s\n' "$VERSION" > "$STAGE/VERSION"
 git rev-parse HEAD > "$STAGE/GIT_SHA" 2>/dev/null || true

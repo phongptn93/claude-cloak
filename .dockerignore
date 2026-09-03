@@ -5,10 +5,10 @@
 .ty_cache
 __pycache__
 *.pyc
-client/.env
-client/.quota.json
-client/.coach.json
-client/service.log
+.env
+.quota.json
+.coach.json
+service.log
 assets
 tests
 deploy

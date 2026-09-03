@@ -242,7 +242,7 @@ Seed it before the first start:
 
 ```bash
 docker compose -f deploy/docker/compose.yaml run --rm --entrypoint sh proxy \
-  -c 'cat > /data/.env' < client/.env.example
+  -c 'cat > /data/.env' < .env.example
 ```
 
 ## 3. Windows

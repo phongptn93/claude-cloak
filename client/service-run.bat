@@ -5,7 +5,7 @@
 ::
 :: To run manually for testing:   service-run.bat
 
-cd /d "%~dp0"
+cd /d "%~dp0.."
 set DEPLOY_MODE=server
 
 :: uv is installed per-user by default, so the SYSTEM account may not see it

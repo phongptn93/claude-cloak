@@ -11,7 +11,7 @@
 :: every other device.
 
 setlocal EnableDelayedExpansion
-cd /d "%~dp0"
+cd /d "%~dp0.."
 
 set FORCE_WIZARD=0
 if /i "%~1"=="--reconfigure" set FORCE_WIZARD=1

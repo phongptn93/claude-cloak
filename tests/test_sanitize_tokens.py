@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 from claude_cloak import sanitize, settings, tokens
 
@@ -48,7 +49,7 @@ def test_cache_breakpoints_are_counted_and_capped(monkeypatch):
     }
     assert tokens._count_cache_breakpoints(data) == 2
 
-    full = {
+    full: dict[str, Any] = {
         "system": [
             {"type": "text", "text": str(i), "cache_control": {"type": "ephemeral"}}
             for i in range(4)
@@ -61,7 +62,8 @@ def test_cache_breakpoints_are_counted_and_capped(monkeypatch):
     upgraded, _ = tokens._apply_cache_breakpoints(full)
     assert upgraded == 4
     assert tokens._count_cache_breakpoints(full) == 4
-    assert all(b["cache_control"]["ttl"] == settings.CACHE_TTL_LONG for b in full["system"])
+    blocks: list[dict[str, Any]] = full["system"]
+    assert all(b["cache_control"]["ttl"] == settings.CACHE_TTL_LONG for b in blocks)
 
 
 def test_optimize_tokens_is_a_noop_off_the_messages_path():

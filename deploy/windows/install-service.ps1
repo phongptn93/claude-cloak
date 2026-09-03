@@ -42,7 +42,7 @@ if ($LASTEXITCODE -ne 0) { throw "uv sync failed ($LASTEXITCODE)" }
 
 $envFile = Join-Path $DataDir '.env'
 if (-not (Test-Path $envFile)) {
-    Copy-Item (Join-Path $repo 'client\.env.example') $envFile
+    Copy-Item (Join-Path $repo '.env.example') $envFile
     Write-Host "Created $envFile from the template - edit it before starting."
 }
 

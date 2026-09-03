@@ -5,7 +5,7 @@
 :: Code to use it. For a shared VM deployment use start-server.bat instead,
 :: and on the clients use setup-remote.bat (no local proxy needed).
 
-cd /d "%~dp0"
+cd /d "%~dp0.."
 
 echo ============================================================
 echo   Claude Cloak - LOCAL MODE

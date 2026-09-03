@@ -71,3 +71,32 @@ def test_env_int_survives_an_empty_value(monkeypatch):
     """The original `int(os.getenv(...))` raised at import; a default is safer."""
     monkeypatch.setenv("CLOAK_T_EMPTY_INT", "")
     assert env.env_int("CLOAK_T_EMPTY_INT", 42) == 42
+
+
+def _resolve_in(monkeypatch, cwd: Path, repo_root: Path) -> Path:
+    """Resolve with CLAUDE_CLOAK_ENV unset and both anchors redirected."""
+    monkeypatch.delenv("CLAUDE_CLOAK_ENV", raising=False)
+    monkeypatch.setattr(env.Path, "cwd", staticmethod(lambda: cwd))
+    monkeypatch.setattr(env, "__file__", str(repo_root / "src" / "claude_cloak" / "env.py"))
+    return env.resolve_env_path()
+
+
+def test_root_env_wins_over_the_legacy_client_copy(tmp_path, monkeypatch):
+    """A stale client/.env must never shadow the root file it was migrated to."""
+    (tmp_path / "client").mkdir()
+    (tmp_path / "client" / ".env").write_text("LOCAL_PORT=1\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("LOCAL_PORT=2\n", encoding="utf-8")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    assert _resolve_in(monkeypatch, elsewhere, tmp_path) == (tmp_path / ".env").resolve()
+
+
+def test_legacy_client_env_is_still_read_and_reported(tmp_path, monkeypatch, capsys):
+    """Pre-move installs keep working, loudly."""
+    (tmp_path / "client").mkdir()
+    legacy = tmp_path / "client" / ".env"
+    legacy.write_text("LOCAL_PORT=1\n", encoding="utf-8")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    assert _resolve_in(monkeypatch, elsewhere, tmp_path) == legacy.resolve()
+    assert "legacy" in capsys.readouterr().err

@@ -1,20 +1,21 @@
 """`.env` discovery, loading, and in-place key updates.
 
-The proxy used to live at ``client/proxy.py`` and anchored ``.env`` to its own
-directory. The package now lives elsewhere, so the file is resolved in this
-order — existing installs keep using the very same ``client/.env``:
+Configuration lives at the repository root. Resolution order:
 
-1. ``$CLAUDE_CLOAK_ENV`` (explicit override, wins always)
-2. ``./.env`` relative to the current working directory — every launcher
-   script ``cd``s into ``client/`` before starting the proxy
-3. ``<repo>/client/.env`` next to the installed source tree
-4. ``./.env`` (created on demand) when none of the above exist
+1. ``$CLAUDE_CLOAK_ENV`` (explicit override, wins always) — every packaged
+   deployment sets it, so none of the steps below apply there
+2. ``./.env`` relative to the current working directory
+3. ``<repo>/.env`` next to the installed source tree
+4. ``<repo>/client/.env`` — legacy location, used only when nothing above
+   exists, and reported on stderr so it gets moved
+5. ``./.env`` (created on demand) when none of the above exist
 """
 
 from __future__ import annotations
 
 import os
 import re
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -23,13 +24,19 @@ ENV_FILENAME = ".env"
 ENV_PATH_VAR = "CLAUDE_CLOAK_ENV"
 
 
+# Pre-0.3 installs kept .env under client/. Still honoured, but last, so a
+# stale copy there can never shadow the root file it was migrated to.
+LEGACY_ENV_DIR = "client"
+
+
 def _candidate_paths() -> list[Path]:
-    candidates = [Path.cwd() / ENV_FILENAME]
-    # <site-packages|src>/claude_cloak/env.py -> repo root -> client/.env
+    # <site-packages|src>/claude_cloak/env.py -> repo root
     repo_root = Path(__file__).resolve().parents[2]
-    candidates.append(repo_root / "client" / ENV_FILENAME)
-    candidates.append(repo_root / ENV_FILENAME)
-    return candidates
+    return [
+        Path.cwd() / ENV_FILENAME,
+        repo_root / ENV_FILENAME,
+        repo_root / LEGACY_ENV_DIR / ENV_FILENAME,
+    ]
 
 
 def resolve_env_path() -> Path:
@@ -38,6 +45,12 @@ def resolve_env_path() -> Path:
         return Path(override).expanduser().resolve()
     for candidate in _candidate_paths():
         if candidate.is_file():
+            if candidate.parent.name == LEGACY_ENV_DIR:
+                print(
+                    f"[claude-cloak] using legacy {candidate} — move it to "
+                    f"{candidate.parent.parent / ENV_FILENAME}",
+                    file=sys.stderr,
+                )
             return candidate.resolve()
     return (Path.cwd() / ENV_FILENAME).resolve()
 

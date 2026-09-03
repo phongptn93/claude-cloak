@@ -9,7 +9,7 @@
 :: Does NOT start a local proxy — Claude Code talks to the VM directly.
 
 setlocal EnableDelayedExpansion
-cd /d "%~dp0"
+cd /d "%~dp0.."
 
 set REMOTE_URL=%~1
 set CLOAK_USER=%~2

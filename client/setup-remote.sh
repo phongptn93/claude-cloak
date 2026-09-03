@@ -13,7 +13,7 @@
 #   ./setup-remote.sh http://10.0.0.5:9999              (prompts for username)
 #   ./setup-remote.sh http://10.0.0.5:9999 phong        (no prompts)
 set -euo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 REMOTE_URL="${1:-}"
 CLOAK_USER="${2:-}"

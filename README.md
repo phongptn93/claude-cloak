@@ -666,7 +666,10 @@ If `service.log` shows `'uv' is not recognized`, the SYSTEM account can't see uv
 ## Project Structure
 
 ```
-client/
+.env.example               # Config template with all captured header fields
+.env                       # Captured identity + config (git-ignored)
+.quota.json                # Persisted quota/cost counters (git-ignored, auto-managed)
+client/                    # Launchers and backwards-compatible shims
 ├── proxy.py               # Shim → claude_cloak.cli (keeps `python proxy.py` and old shortcuts working)
 ├── setup_claude.py        # Shim → claude_cloak.setup_claude
 ├── tray_app.py            # Shim → claude_cloak.tray_app
@@ -680,11 +683,11 @@ client/
 ├── install-service.bat    # Windows: register auto-start service (run as Administrator)
 ├── uninstall-service.bat  # Windows: remove the auto-start service
 ├── install.bat            # Windows dependency installer
-├── grafana-dashboard.json # Importable Grafana dashboard for Loki-shipped events
-├── .env.example           # Config template with all captured header fields
-├── .env                   # Captured identity + config (git-ignored)
-└── .quota.json            # Persisted quota/cost counters (git-ignored, auto-managed)
+└── grafana-dashboard.json # Importable Grafana dashboard for Loki-shipped events
 ```
+
+Every launcher `cd`s to the repository root before starting the proxy, so the
+`.env` they create and the `.env` the package reads are always the same file.
 
 The proxy itself is a package:
 
@@ -778,7 +781,7 @@ production — no request reaches Anthropic.
 ### Configuration
 
 Everything is read from `.env` — there are no tunable literals left in the code.
-`client/.env.example` documents every key, including an **Advanced** section for
+`.env.example` documents every key, including an **Advanced** section for
 values that were previously hardcoded (cache beta id, buffer caps, retry
 backoff, cookie name, …). Static tables (telemetry paths, sanitized body fields,
 header policies, coach tool names) take `<NAME>_EXTRA` to append entries or

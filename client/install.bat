@@ -1,6 +1,6 @@
 @echo off
 echo === Cai dat AI Proxy ===
-cd /d "%~dp0"
+cd /d "%~dp0.."
 :: ── Ensure uv is available ────────────────────────────────────────────────
 where uv >nul 2>&1
 if errorlevel 1 (

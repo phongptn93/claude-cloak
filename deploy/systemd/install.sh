@@ -73,7 +73,7 @@ elif [ -f "$ROOT/pyproject.toml" ] && [ -f "$ROOT/uv.lock" ]; then
     cp "$ROOT/pyproject.toml" "$ROOT/uv.lock" "$ROOT/README.md" "$APP_DIR/"
     cp -r "$ROOT/src" "$APP_DIR/"
     UV_COMPILE_BYTECODE=1 uv sync --project "$APP_DIR" --locked --no-dev --no-editable
-    ENV_TEMPLATE="$ROOT/client/.env.example"
+    ENV_TEMPLATE="$ROOT/.env.example"
 else
     echo "neither a release bundle nor a source tree found in $ROOT" >&2
     exit 1

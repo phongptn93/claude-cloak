@@ -11,7 +11,7 @@
 # auto-captures that device's identity headers and locks them in .env for
 # every other device.
 set -euo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 FORCE_WIZARD=0
 case "${1:-}" in

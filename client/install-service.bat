@@ -5,7 +5,7 @@
 :: REQUIRES ADMINISTRATOR. Right-click this file -> Run as administrator.
 
 setlocal
-cd /d "%~dp0"
+cd /d "%~dp0.."
 set TASK_NAME=ClaudeCloakServer
 set RUN_SCRIPT=%~dp0service-run.bat
 
@@ -79,7 +79,7 @@ echo   Task name:   %TASK_NAME%
 echo   Trigger:     At system startup (no login required)
 echo   Account:     SYSTEM (full local privileges)
 echo   Restart:     Automatic, 5s after each crash (loop in service-run.bat)
-echo   Logs:        %~dp0service.log
+echo   Logs:        %~dp0..\service.log
 echo.
 echo   Useful commands:
 echo     schtasks /query /tn %TASK_NAME%     - status

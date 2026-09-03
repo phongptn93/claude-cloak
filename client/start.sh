@@ -5,7 +5,7 @@
 # Code to use it. For a shared VM deployment use start-server.sh instead,
 # and on the clients use setup-remote.sh (no local proxy needed).
 set -euo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 echo "============================================================"
 echo "  Claude Cloak — LOCAL MODE"
