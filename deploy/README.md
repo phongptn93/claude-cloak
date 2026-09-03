@@ -96,24 +96,57 @@ sudo certbot certonly --standalone -d <label>.<region>.cloudapp.azure.com \
      --agree-tos -m you@example.com --no-eff-email
 ```
 
-Certificates land in `/etc/letsencrypt/live/<fqdn>/`.
+Certificates land in `/etc/letsencrypt/live/<fqdn>/`. Publish them to the
+service and start it:
 
-### Step 4 — renew without downtime
+```bash
+sudo /etc/letsencrypt/renewal-hooks/deploy/claude-cloak.sh \
+     /etc/letsencrypt/live/<fqdn>
+```
 
-Once the proxy runs with `HTTP_REDIRECT_PORT=80` and `ACME_WEBROOT` set, it
-serves the challenge itself, so renewals need no stop:
+### Step 4 — switch renewal to webroot, so it never needs downtime
+
+**This step is not optional.** The first issue above used `--standalone`,
+and certbot records that in the renewal config. Standalone needs port 80 to
+itself, which the running proxy now holds — so every future automatic
+renewal would fail, quietly, until the certificate expires and every client
+drops at once. Re-issue once through the webroot to rewrite that config:
 
 ```bash
 sudo certbot certonly --webroot -w /var/lib/claude-cloak/acme \
      -d <label>.<region>.cloudapp.azure.com --cert-name <fqdn> --force-renewal
-sudo install -m 755 deploy/systemd/certbot-deploy-hook.sh \
-     /etc/letsencrypt/renewal-hooks/deploy/claude-cloak.sh
-sudo certbot renew --dry-run
+grep authenticator /etc/letsencrypt/renewal/<fqdn>.conf     # must say: webroot
 ```
 
-certbot's own timer handles renewal from then on; the deploy hook restarts the
-proxy (about a second) only when a certificate actually changed — uvicorn
-reads the certificate once at startup.
+The proxy serves `/.well-known/acme-challenge/` itself from `ACME_WEBROOT`,
+so from here renewals happen with the service running.
+
+### Step 5 — verify the automation
+
+certbot ships its own scheduled renewal; installing it is not something you
+need to do. Confirm it is armed and that a renewal actually succeeds against
+the running proxy:
+
+```bash
+systemctl list-timers certbot.timer      # ExecStart=/usr/bin/certbot -q renew
+sudo certbot renew --dry-run             # proxy stays up throughout
+```
+
+`certbot renew` is safe to run at any frequency: as of certbot 4.0 it only
+acts when less than a third of the certificate's lifetime remains (30 days
+of a 90-day certificate; earlier versions used a fixed 30 days). The deploy
+hook fires only when a certificate really changed.
+
+Renewal is the part of this deployment most likely to break silently, so the
+proxy reports what it is actually serving:
+
+```bash
+curl -s https://<fqdn>/health | jq .tls
+# {"enabled":true,"status":"ok","expires_at":"...","days_remaining":89.9}
+```
+
+`status` goes to `warning` under 21 days and `critical` under 7 — both mean
+automatic renewal has already missed a window and needs looking at.
 
 ---
 
@@ -137,8 +170,8 @@ LOCAL_PORT=443
 HTTP_REDIRECT_PORT=80
 ACME_WEBROOT=/var/lib/claude-cloak/acme
 PUBLIC_HOSTNAME=<label>.<region>.cloudapp.azure.com
-TLS_CERTFILE=/etc/letsencrypt/live/<fqdn>/fullchain.pem
-TLS_KEYFILE=/etc/letsencrypt/live/<fqdn>/privkey.pem
+TLS_CERTFILE=/var/lib/claude-cloak/tls/fullchain.pem
+TLS_KEYFILE=/var/lib/claude-cloak/tls/privkey.pem
 
 ALLOWED_IPS=203.0.113.5,198.51.100.0/24
 ADMIN_TOKEN=<openssl rand -hex 32>
@@ -146,13 +179,16 @@ SESSION_SECRET=<openssl rand -hex 32>   # pin it, or admin sessions drop on rest
 ```
 
 The unit binds 80 and 443 as an unprivileged user through
-`AmbientCapabilities=CAP_NET_BIND_SERVICE`, and reads the certificates
-read-only. `certbot` keeps `/etc/letsencrypt` root-owned; the service user
-needs read access to the `live` and `archive` trees:
+`AmbientCapabilities=CAP_NET_BIND_SERVICE`. It never reads
+`/etc/letsencrypt`: the deploy hook copies the certificate into
+`/var/lib/claude-cloak/tls/` with the right ownership, which is what
+`TLS_CERTFILE`/`TLS_KEYFILE` point at.
 
-```bash
-sudo setfacl -Rm u:claude-cloak:rX /etc/letsencrypt/live /etc/letsencrypt/archive
-```
+Do **not** try to grant the service user access to the letsencrypt tree
+instead. It appears to work and then fails on the first renewal — certbot
+writes a new `privkey<N>.pem` into `archive/` each time, and a plain
+`setfacl -Rm` only covers the files that existed when it ran. The service
+then crash-loops on a key it cannot read, unattended, two months later.
 
 To deploy a new revision: `sudo deploy/systemd/install.sh main`. `.env` and the
 persisted counters are never touched.
