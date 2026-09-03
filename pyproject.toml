@@ -1,0 +1,66 @@
+[project]
+name = "claude-cloak"
+version = "0.2.0"
+description = "Multi-device anonymity proxy for Claude Code — identity locking, token saver, quota tracking, dashboard"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+dependencies = [
+    "fastapi>=0.141.1",
+    "httpx>=0.28.1",
+    "python-dotenv>=1.2.3",
+    "uvicorn>=0.52.4",
+]
+
+[project.optional-dependencies]
+tray = [
+    "pillow>=12.3.0",
+    "pystray>=0.19.5",
+]
+
+[project.scripts]
+claude-cloak = "claude_cloak.cli:main"
+claude-cloak-setup = "claude_cloak.setup_claude:main"
+claude-cloak-tray = "claude_cloak.tray_app:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/claude_cloak"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.2",
+    "pytest-asyncio>=1.2.0",
+    "ruff>=0.14.0",
+    "ty>=0.0.1a21",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = [
+    "E501",    # line length is handled by the formatter
+    "B008",    # FastAPI dependency defaults
+    "RUF001",  # ambiguous unicode in the banner / box-drawing art
+    "RUF002",
+    "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-q"
+
+[tool.ty.environment]
+python-version = "3.11"

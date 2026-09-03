@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Claude Cloak — Configuration</title>
+<style>
+  :root {
+    --bg-0:#0a0a0d; --bg-1:#111118; --bg-2:#1a1a24; --bg-3:#232330;
+    --border:#2a2a3a; --text:#ebebf0; --text-soft:#b8b8c4; --muted:#7c7c8c;
+    --accent:#c084fc; --accent-2:#67e8f9; --ok:#4ade80; --warn:#fbbf24; --danger:#f87171;
+    --radius:10px; --radius-sm:6px;
+    --font-sans:-apple-system,BlinkMacSystemFont,"Inter","Segoe UI",Roboto,system-ui,sans-serif;
+    --font-mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+  }
+  *,*::before,*::after{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{background:var(--bg-0);color:var(--text);font:14px/1.5 var(--font-sans);
+       -webkit-font-smoothing:antialiased;min-height:100vh}
+  code,.num{font-family:var(--font-mono)}
+  a{color:var(--accent-2);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .topbar{position:sticky;top:0;z-index:10;display:flex;align-items:center;gap:16px;
+          padding:14px 28px;background:rgba(10,10,13,.85);backdrop-filter:blur(8px);
+          border-bottom:1px solid var(--border)}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:600}
+  .brand-mark{width:22px;height:22px;border-radius:5px;
+              background:linear-gradient(135deg,var(--accent),var(--accent-2));
+              box-shadow:0 0 12px rgba(192,132,252,.35)}
+  .brand-tag{color:var(--muted);font-weight:500;font-size:12px;margin-left:4px}
+  .spacer{flex:1}
+  .pill{display:inline-flex;align-items:center;gap:6px;padding:5px 11px;background:var(--bg-2);
+        border:1px solid var(--border);border-radius:999px;font-size:12px;color:var(--text-soft)}
+  .pill.ok{color:var(--ok)} .pill.warn{color:var(--warn)}
+  main{max-width:1080px;margin:0 auto;padding:28px}
+  .note{background:var(--bg-1);border:1px solid var(--border);border-left:3px solid var(--accent);
+        border-radius:var(--radius);padding:14px 18px;margin-bottom:22px;color:var(--text-soft)}
+  .note strong{color:var(--text)}
+  .note.warn{border-left-color:var(--warn)}
+  .note.danger{border-left-color:var(--danger)}
+  h2{font-size:15px;margin:26px 0 12px;letter-spacing:.02em}
+  .panel{background:var(--bg-1);border:1px solid var(--border);border-radius:var(--radius);
+         overflow:hidden}
+  .row{display:grid;grid-template-columns:minmax(220px,1fr) minmax(200px,320px);gap:18px;
+       padding:14px 18px;border-bottom:1px solid var(--border)}
+  .row:last-child{border-bottom:none}
+  .row-key{font-family:var(--font-mono);font-size:13px;color:var(--text);
+           display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .row-desc{color:var(--muted);font-size:12.5px;margin-top:4px}
+  .row-ctl{display:flex;align-items:flex-start;justify-content:flex-end}
+  .badge{font-size:10.5px;padding:2px 7px;border-radius:999px;border:1px solid var(--border);
+         background:var(--bg-2);color:var(--muted);letter-spacing:.03em;text-transform:uppercase}
+  .badge.live{color:var(--ok);border-color:rgba(74,222,128,.3)}
+  .badge.restart{color:var(--warn);border-color:rgba(251,191,36,.3)}
+  .badge.locked{color:var(--danger);border-color:rgba(248,113,113,.3)}
+  input[type=text],input[type=number],input[type=password],select{
+    width:100%;background:var(--bg-2);color:var(--text);border:1px solid var(--border);
+    border-radius:var(--radius-sm);padding:8px 10px;font:13px/1.4 var(--font-mono)}
+  input:disabled,select:disabled{opacity:.55;cursor:not-allowed}
+  input:focus,select:focus{outline:none;border-color:var(--accent)}
+  .dirty input,.dirty select{border-color:var(--accent);box-shadow:0 0 0 2px rgba(192,132,252,.15)}
+  .toggle{display:inline-flex;gap:6px}
+  .toggle button{background:var(--bg-2);border:1px solid var(--border);color:var(--muted);
+                 padding:7px 16px;border-radius:var(--radius-sm);cursor:pointer;font:13px var(--font-sans)}
+  .toggle button.on{background:rgba(74,222,128,.12);border-color:rgba(74,222,128,.4);color:var(--ok)}
+  .toggle button:disabled{cursor:not-allowed;opacity:.55}
+  .btn{background:var(--accent);color:#1a1022;border:none;padding:9px 18px;border-radius:var(--radius-sm);
+       font:600 13px var(--font-sans);cursor:pointer}
+  .btn:disabled{opacity:.5;cursor:not-allowed}
+  .btn.ghost{background:var(--bg-2);color:var(--text-soft);border:1px solid var(--border)}
+  .savebar{position:sticky;bottom:0;display:flex;align-items:center;gap:14px;padding:14px 18px;
+           margin-top:22px;background:rgba(17,17,24,.96);border:1px solid var(--border);
+           border-radius:var(--radius);backdrop-filter:blur(8px)}
+  .savebar .msg{flex:1;color:var(--text-soft);font-size:13px}
+  .login{max-width:420px;margin:60px auto;background:var(--bg-1);border:1px solid var(--border);
+         border-radius:var(--radius);padding:26px}
+  .login h1{font-size:17px;margin:0 0 6px}
+  .login p{color:var(--muted);font-size:13px;margin:0 0 18px}
+  .login .err{color:var(--danger);font-size:13px;margin-top:12px;min-height:18px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:9px 18px;border-bottom:1px solid var(--border)}
+  th{color:var(--muted);font-weight:500;font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+  td.num{font-family:var(--font-mono);text-align:right}
+  th.num{text-align:right}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <div class="brand"><div class="brand-mark"></div>
+    <span>Claude Cloak</span><span class="brand-tag">configuration</span></div>
+  <div class="spacer"></div>
+  <span class="pill" id="auth-pill">checking…</span>
+  <a href="/dashboard">Dashboard</a>
+  <button class="btn ghost" id="logout" style="display:none">Sign out</button>
+</div>
+
+<main id="main"><div class="note">Loading configuration…</div></main>
+
+<script>
+let VIEW = null;
+const pending = {};
+
+const esc = (s) => String(s).replace(/[&<>"']/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+async function load() {
+  const r = await fetch('/config/data', {credentials:'same-origin'});
+  VIEW = await r.json();
+  render();
+}
+
+function render() {
+  const pill = document.getElementById('auth-pill');
+  const logout = document.getElementById('logout');
+  if (!VIEW.auth_configured) {
+    pill.textContent = 'read-only · no ADMIN_TOKEN';
+    pill.className = 'pill warn';
+  } else if (VIEW.authenticated) {
+    pill.textContent = 'signed in';
+    pill.className = 'pill ok';
+    logout.style.display = '';
+  } else {
+    pill.textContent = 'locked';
+    pill.className = 'pill warn';
+  }
+
+  const main = document.getElementById('main');
+  if (VIEW.auth_configured && !VIEW.authenticated) { main.innerHTML = loginHtml(); wireLogin(); return; }
+
+  let html = '';
+  if (!VIEW.auth_configured) {
+    html += `<div class="note warn"><strong>Read-only.</strong> No <code>ADMIN_TOKEN</code> is set,
+      so nothing here can be changed from the browser. Add <code>ADMIN_TOKEN=&lt;a long random string&gt;</code>
+      to <code>${esc(VIEW.env_path)}</code> and restart to enable editing. Reaching this page at all
+      already requires an IP in <code>ADMIN_IPS</code>.</div>`;
+  } else {
+    html += `<div class="note"><strong>Signed in.</strong> Changes are written to
+      <code>${esc(VIEW.env_path)}</code>. <span class="badge live">live</span> applies immediately,
+      <span class="badge restart">restart</span> is saved but needs a proxy restart, and
+      <span class="badge locked">locked</span> settings are never writable from the web — they decide
+      who may authenticate, so editing them here would turn one leaked token into permanent access.</div>`;
+  }
+
+  for (const sec of VIEW.sections) {
+    html += `<h2>${esc(sec.name)}</h2><div class="panel">`;
+    for (const s of sec.settings) html += rowHtml(s);
+    html += `</div>`;
+  }
+
+  html += `<h2>Model pricing (USD per million tokens)</h2>
+    <div class="note">Read-only here on purpose — a mistyped rate silently corrupts every cost number
+    that follows. Override with <code>PRICING_&lt;MODEL&gt;_&lt;TIER&gt;</code> in
+    <code>.env</code>. Model ids matching no row are costed at the
+    <code>PRICING_FALLBACK_*</code> rate and listed as <code>unpriced_models</code> in
+    <a href="/quota">/quota</a>.</div>
+    <div class="panel"><table><thead><tr><th>Model</th><th class="num">Input</th>
+    <th class="num">Output</th><th class="num">Cache write 5m</th><th class="num">Cache write 1h</th>
+    <th class="num">Cache read</th></tr></thead><tbody>`;
+  for (const p of VIEW.pricing) {
+    html += `<tr><td><code>${esc(p.model)}</code></td><td class="num">$${p.input.toFixed(2)}</td>
+      <td class="num">$${p.output.toFixed(2)}</td><td class="num">$${p.cache_write_5m.toFixed(2)}</td>
+      <td class="num">$${p.cache_write_1h.toFixed(2)}</td><td class="num">$${p.cache_read.toFixed(2)}</td></tr>`;
+  }
+  html += `</tbody></table></div>`;
+
+  html += `<div class="savebar"><span class="msg" id="save-msg">No pending changes.</span>
+    <button class="btn ghost" id="reset" disabled>Discard</button>
+    <button class="btn" id="save" disabled>Save changes</button></div>`;
+
+  main.innerHTML = html;
+  wireRows();
+}
+
+function rowHtml(s) {
+  const locked = s.scope === 'locked' || !VIEW.editable;
+  const val = esc(s.value ?? '');
+  let ctl;
+  if (s.secret) {
+    ctl = `<input type="text" value="${s.value ? '•••••••• set' : 'not set'}" disabled>`;
+  } else if (locked && !s.value) {
+    // An empty disabled box reads as an editable field the user forgot to
+    // fill in; say plainly that nothing is configured.
+    ctl = `<input type="text" value="not set" disabled>`;
+  } else if (s.type === 'bool') {
+    const on = s.value === 'true';
+    ctl = `<div class="toggle" data-key="${esc(s.key)}">
+      <button data-val="true" class="${on ? 'on' : ''}" ${locked ? 'disabled' : ''}>On</button>
+      <button data-val="false" class="${!on ? 'on' : ''}" ${locked ? 'disabled' : ''}>Off</button></div>`;
+  } else if (s.choices) {
+    ctl = `<select data-key="${esc(s.key)}" ${locked ? 'disabled' : ''}>` +
+      s.choices.map(c => `<option ${c === s.value ? 'selected' : ''}>${esc(c)}</option>`).join('') +
+      `</select>`;
+  } else if (s.type === 'int' || s.type === 'float') {
+    ctl = `<input type="number" step="${s.type === 'int' ? '1' : 'any'}"
+      ${s.min !== null && s.min !== undefined ? `min="${s.min}"` : ''}
+      ${s.max !== null && s.max !== undefined ? `max="${s.max}"` : ''}
+      data-key="${esc(s.key)}" value="${val}" ${locked ? 'disabled' : ''}>`;
+  } else {
+    ctl = `<input type="text" data-key="${esc(s.key)}" value="${val}" ${locked ? 'disabled' : ''}>`;
+  }
+  return `<div class="row" id="row-${esc(s.key)}">
+    <div><div class="row-key"><span>${esc(s.key)}</span>
+      <span class="badge ${esc(s.scope)}">${esc(s.scope)}</span></div>
+      <div class="row-desc">${esc(s.desc)}</div></div>
+    <div class="row-ctl">${ctl}</div></div>`;
+}
+
+function markDirty(key, value) {
+  pending[key] = value;
+  const row = document.getElementById('row-' + key);
+  if (row) row.classList.add('dirty');
+  const n = Object.keys(pending).length;
+  document.getElementById('save-msg').textContent =
+    n ? `${n} pending change${n > 1 ? 's' : ''}.` : 'No pending changes.';
+  document.getElementById('save').disabled = !n;
+  document.getElementById('reset').disabled = !n;
+}
+
+function wireRows() {
+  document.querySelectorAll('input[data-key],select[data-key]').forEach(el => {
+    el.addEventListener('change', () => markDirty(el.dataset.key, el.value));
+  });
+  document.querySelectorAll('.toggle').forEach(t => {
+    t.querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
+      if (b.disabled) return;
+      t.querySelectorAll('button').forEach(x => x.classList.remove('on'));
+      b.classList.add('on');
+      markDirty(t.dataset.key, b.dataset.val);
+    }));
+  });
+  document.getElementById('reset').addEventListener('click', () => { load(); for (const k in pending) delete pending[k]; });
+  document.getElementById('save').addEventListener('click', save);
+  const lo = document.getElementById('logout');
+  if (lo) lo.onclick = async () => {
+    await fetch('/config/logout', {method:'POST', credentials:'same-origin'});
+    location.reload();
+  };
+}
+
+async function save() {
+  const btn = document.getElementById('save');
+  btn.disabled = true;
+  const r = await fetch('/config/apply', {
+    method:'POST', credentials:'same-origin',
+    headers:{'content-type':'application/json'},
+    body: JSON.stringify({changes: pending}),
+  });
+  const res = await r.json();
+  const msg = document.getElementById('save-msg');
+  if (r.status === 401) {
+    msg.textContent = res.error || 'not authenticated';
+    location.reload();
+    return;
+  }
+  const parts = [];
+  if (Object.keys(res.applied || {}).length) parts.push(`saved ${Object.keys(res.applied).length}`);
+  for (const [k, why] of Object.entries(res.rejected || {})) parts.push(`${k}: ${why}`);
+  if ((res.restart_required || []).length) parts.push(`restart needed for ${res.restart_required.join(', ')}`);
+  msg.textContent = parts.join(' · ') || 'nothing changed';
+  for (const k in pending) delete pending[k];
+  await load();
+  document.getElementById('save-msg').textContent = parts.join(' · ') || 'nothing changed';
+}
+
+function loginHtml() {
+  return `<div class="login"><h1>Sign in</h1>
+    <p>Enter <code>ADMIN_TOKEN</code> to change settings. Your IP is already allowed by
+    <code>ADMIN_IPS</code>; this proves who you are.</p>
+    <input type="password" id="tok" placeholder="admin token" autocomplete="current-password">
+    <div class="err" id="login-err"></div>
+    <div style="margin-top:14px"><button class="btn" id="do-login">Sign in</button></div></div>`;
+}
+
+function wireLogin() {
+  const go = async () => {
+    const err = document.getElementById('login-err');
+    err.textContent = '';
+    const r = await fetch('/config/login', {
+      method:'POST', credentials:'same-origin',
+      headers:{'content-type':'application/json'},
+      body: JSON.stringify({token: document.getElementById('tok').value}),
+    });
+    const res = await r.json();
+    if (res.ok) { load(); } else { err.textContent = res.error || 'sign in failed'; }
+  };
+  document.getElementById('do-login').addEventListener('click', go);
+  document.getElementById('tok').addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
+}
+
+load();
+</script>
+</body>
+</html>

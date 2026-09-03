@@ -38,11 +38,23 @@ for /f "tokens=5" %%a in ('netstat -ano ^| findstr :%LOCAL_PORT% ^| findstr LIST
     taskkill /PID %%a /F >nul 2>&1
 )
 
-:: Auto-install dependencies if missing
-python -c "import httpx" >nul 2>&1 || python -m pip install -r requirements.txt
+:: ── Ensure uv is available ────────────────────────────────────────────────
+where uv >nul 2>&1
+if errorlevel 1 (
+    echo uv not found - installing from https://astral.sh/uv ...
+    powershell -ExecutionPolicy Bypass -c "irm https://astral.sh/uv/install.ps1 | iex"
+    set "PATH=%USERPROFILE%\.local\bin;%PATH%"
+)
+where uv >nul 2>&1
+if errorlevel 1 (
+    echo uv install failed. See https://docs.astral.sh/uv/getting-started/installation/
+    pause
+    exit /b 1
+)
+uv sync --quiet
 
 :: Auto-config Claude Code proxy URL (local)
-python setup_claude.py
+uv run claude-cloak-setup
 
-python proxy.py
+uv run claude-cloak
 pause

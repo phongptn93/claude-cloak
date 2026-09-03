@@ -4,7 +4,8 @@
 
 **Use Claude Code on multiple Windows devices — all appearing as a single machine to Anthropic.**
 
-[![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)](https://python.org)
+[![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)](https://python.org)
+[![uv](https://img.shields.io/badge/managed%20by-uv-DE5FE9?logo=astral&logoColor=white)](https://docs.astral.sh/uv/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
 [![License](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
 
@@ -51,8 +52,15 @@ The proxy captures the device fingerprint (23 headers) from the first request, s
 
 ```bash
 cd client
-install.bat       # Install dependencies
+install.bat       # Installs uv (if missing) + syncs the locked dependencies
 start.bat         # Start proxy + auto-config Claude Code
+```
+
+On macOS / Linux use `./start.sh`. To run it directly without the launcher:
+
+```bash
+uv run claude-cloak            # start the proxy
+uv run claude-cloak-setup      # point Claude Code at it
 ```
 
 Open Claude Code in VS Code and **log in normally**. The proxy captures the device fingerprint automatically and saves it to `.env`.
@@ -61,7 +69,7 @@ Open Claude Code in VS Code and **log in normally**. The proxy captures the devi
 
 ```bash
 cd client
-install.bat       # Install dependencies
+install.bat       # Installs uv + syncs dependencies
 ```
 
 Copy the **`.env` file** from the first device, then:
@@ -559,7 +567,7 @@ setup-remote.bat http://VM_IP:9999 phong         # Windows
 # Run with no args to be prompted for both URL and username.
 
 # Equivalent: call the Python script directly
-python client/setup_claude.py --remote http://VM_IP:9999/u/phong
+uv run claude-cloak-setup --remote http://VM_IP:9999/u/phong
 
 # Equivalent: per-shell env var (no settings.json change)
 export ANTHROPIC_BASE_URL=http://VM_IP:9999/u/phong
@@ -621,7 +629,7 @@ What `install-service.bat` does:
 2. Registers a Scheduled Task **`ClaudeCloakServer`**:
    - Trigger: **At system startup** — runs without anyone logged in
    - Account: **SYSTEM** — survives logoff and RDP disconnect
-   - Action: launches `service-run.bat`, which loops `python proxy.py` forever and restarts 5 s after any exit
+   - Action: launches `service-run.bat`, which loops `uv run claude-cloak` forever and restarts 5 s after any exit
 3. Starts the task immediately so you don't need to reboot to test
 
 After install:
@@ -634,7 +642,7 @@ After install:
 | `type service.log` | View proxy stdout / stderr |
 | `powershell Get-Content service.log -Wait -Tail 50` | Live tail logs |
 
-If `service.log` shows `'python' is not recognized` or `'py' is not recognized`, the SYSTEM account can't find your Python install. Reinstall Python with the official installer and tick **"Install launcher for all users"** — this puts `py.exe` in `C:\Windows` which is on the SYSTEM PATH.
+If `service.log` shows `'uv' is not recognized`, the SYSTEM account can't see uv: it installs per-user by default. `service-run.bat` already falls back to `%USERPROFILE%\.local\bin\uv.exe` and `%LOCALAPPDATA%\Programs\uv\uv.exe` — if uv lives somewhere else, either add that directory to the *system* PATH or edit `UVBIN` at the top of `service-run.bat`.
 
 ### Security notes
 
@@ -659,9 +667,9 @@ If `service.log` shows `'python' is not recognized` or `'py' is not recognized`,
 
 ```
 client/
-├── proxy.py               # Main proxy server (FastAPI) — anonymity layers, token saver, quota tracking, dashboard, Loki shipping
-├── setup_claude.py        # Auto-config Claude Code → proxy URL (reads LOCAL_PORT from .env)
-├── tray_app.py            # Optional Windows system tray app
+├── proxy.py               # Shim → claude_cloak.cli (keeps `python proxy.py` and old shortcuts working)
+├── setup_claude.py        # Shim → claude_cloak.setup_claude
+├── tray_app.py            # Shim → claude_cloak.tray_app
 ├── start.bat              # Windows: LOCAL mode (per-device proxy on 127.0.0.1)
 ├── start.sh               # macOS / Linux: LOCAL mode (per-device proxy)
 ├── start-server.bat       # Windows: SERVER mode (shared VM, IP whitelist + wizard)
@@ -675,8 +683,28 @@ client/
 ├── grafana-dashboard.json # Importable Grafana dashboard for Loki-shipped events
 ├── .env.example           # Config template with all captured header fields
 ├── .env                   # Captured identity + config (git-ignored)
-├── .quota.json            # Persisted quota/cost counters (git-ignored, auto-managed)
-└── requirements.txt   # Python dependencies
+└── .quota.json            # Persisted quota/cost counters (git-ignored, auto-managed)
+```
+
+The proxy itself is a package:
+
+```
+pyproject.toml             # uv project: deps, entry points, ruff/ty/pytest config
+uv.lock                    # pinned, reproducible dependency set
+src/claude_cloak/
+├── cli.py  app.py         # entry point; FastAPI factory + lifespan
+├── settings.py            # every operator-tunable value, read from .env
+├── state.py               # all mutable runtime state (no module globals)
+├── env.py                 # .env discovery, typed readers, save_to_env
+├── terminal.py constants.py
+├── access.py identity.py sanitize.py tokens.py pricing.py
+├── coach.py loki.py upstream.py middleware.py admin.py config_console.py
+├── echo.py                # DEV_ECHO_MODE synthetic upstream
+├── banner.py
+├── quota/                 # persist.py usage.py users.py tap.py
+├── routes/                # health quota coach config admin pages passthrough
+└── web/                   # dashboard.html, config.html
+tests/                     # pytest suite + golden endpoint snapshots
 ```
 
 ## Endpoints
@@ -701,14 +729,56 @@ client/
 
 ## Requirements
 
-- **Python** 3.10+
-- **Windows** 10/11
+- **[uv](https://docs.astral.sh/uv/)** — the launcher scripts install it automatically if missing
+- **Python** 3.11+ (uv provisions it for you if the system Python is older)
+- **Windows** 10/11, macOS or Linux
 - **Claude Code** (VS Code extension or CLI)
+
+Dependencies are pinned in `uv.lock`; `uv sync` reproduces the exact environment.
+There is no `requirements.txt` and no `pip` step any more.
+
+## Development
+
+```bash
+uv sync                  # create/refresh the environment from uv.lock
+uv run pytest            # test suite
+uv run ruff check src tests && uv run ruff format src tests
+uv run ty check src      # type check
+```
+
+### Offline echo mode
+
+`DEV_ECHO_MODE=true` makes the proxy answer `/v1/*` itself with a synthetic
+Anthropic-shaped response (SSE when the request streams) instead of calling any
+upstream. Identity locking, body sanitization, the token saver, quota/cost
+recording and the coach all still run, so the whole pipeline is exercisable with
+no API key, no network and no spend.
+
+```bash
+DEV_ECHO_MODE=true uv run claude-cloak
+curl -s localhost:9999/v1/messages -H 'content-type: application/json' \
+  -d '{"model":"claude-opus-5","messages":[{"role":"user","content":"hi"}]}'
+curl -s localhost:9999/quota        # cost/token counters moved
+```
+
+To forward to a different upstream instead (a local echo server, a corporate
+gateway), set `ANTHROPIC_UPSTREAM_URL`. Never enable `DEV_ECHO_MODE` in
+production — no request reaches Anthropic.
+
+### Configuration
+
+Everything is read from `.env` — there are no tunable literals left in the code.
+`client/.env.example` documents every key, including an **Advanced** section for
+values that were previously hardcoded (cache beta id, buffer caps, retry
+backoff, cookie name, …). Static tables (telemetry paths, sanitized body fields,
+header policies, coach tool names) take `<NAME>_EXTRA` to append entries or
+`<NAME>_OVERRIDE` to replace them, so no table needs a code change either.
 
 ## Troubleshooting
 
 | Problem | Solution |
 |---------|----------|
+| `uv: command not found` after install | Open a new shell, or add `~/.local/bin` (Windows: `%USERPROFILE%\.local\bin`) to PATH |
 | Port 9999 already in use | `start.bat` auto-kills old process. Or change `LOCAL_PORT` in `.env` |
 | 401 Unauthorized | Your Claude Code auth token expired. Re-login in Claude Code on that device |
 | 429 Rate Limited | Too many requests — wait and retry. The proxy logs this in the console |

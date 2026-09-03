@@ -42,7 +42,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-python setup_claude.py --remote "%FULL_URL%"
+uv run claude-cloak-setup --remote "%FULL_URL%"
 
 echo.
 if not "%CLOAK_USER%"=="" (

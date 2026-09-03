@@ -45,14 +45,20 @@ elif command -v fuser &>/dev/null; then
     fuser -k "${LOCAL_PORT}/tcp" 2>/dev/null || true
 fi
 
-# ── Auto-install dependencies if missing ─────────────────────────────────────
-if ! python3 -c "import httpx" 2>/dev/null; then
-    echo "Installing dependencies…"
-    python3 -m pip install -r requirements.txt
+# ── Ensure uv is available ────────────────────────────────────────────────────
+if ! command -v uv &>/dev/null; then
+    echo "uv not found — installing (https://astral.sh/uv)…"
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    export PATH="$HOME/.local/bin:$PATH"
 fi
+if ! command -v uv &>/dev/null; then
+    echo "uv install failed. Install it manually: https://docs.astral.sh/uv/getting-started/installation/" >&2
+    exit 1
+fi
+uv sync --quiet
 
 # ── Configure Claude Code ─────────────────────────────────────────────────────
-python3 setup_claude.py
+uv run claude-cloak-setup
 
 # ── Launch proxy ──────────────────────────────────────────────────────────────
-python3 proxy.py
+uv run claude-cloak

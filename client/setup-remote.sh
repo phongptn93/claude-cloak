@@ -38,7 +38,7 @@ if [ -n "$CLOAK_USER" ]; then
     FULL_URL="$REMOTE_URL/u/$CLOAK_USER"
 fi
 
-python3 setup_claude.py --remote "$FULL_URL"
+uv run claude-cloak-setup --remote "$FULL_URL"
 
 echo
 if [ -n "$CLOAK_USER" ]; then
