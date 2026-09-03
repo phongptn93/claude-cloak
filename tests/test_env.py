@@ -57,3 +57,17 @@ def test_typed_readers(monkeypatch):
     assert env.env_bool("CLOAK_T_BOOL", False) is True
     assert env.env_bool("CLOAK_T_MISSING", True) is True
     assert env.env_list("CLOAK_T_LIST") == ["a", "b", "c"]
+
+
+def test_env_bool_treats_an_empty_value_as_false_not_as_the_default(monkeypatch):
+    """`TIMING_JITTER=` in a .env means off — matching the pre-refactor code."""
+    monkeypatch.setenv("CLOAK_T_EMPTY", "")
+    assert env.env_bool("CLOAK_T_EMPTY", True) is False
+    monkeypatch.delenv("CLOAK_T_EMPTY")
+    assert env.env_bool("CLOAK_T_EMPTY", True) is True
+
+
+def test_env_int_survives_an_empty_value(monkeypatch):
+    """The original `int(os.getenv(...))` raised at import; a default is safer."""
+    monkeypatch.setenv("CLOAK_T_EMPTY_INT", "")
+    assert env.env_int("CLOAK_T_EMPTY_INT", 42) == 42

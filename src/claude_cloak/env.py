@@ -82,6 +82,8 @@ def env_str(key: str, default: str = "") -> str:
 
 
 def env_int(key: str, default: int) -> int:
+    """Unparseable or empty falls back to the default instead of crashing at
+    import time, which is what the original ``int(os.getenv(...))`` calls did."""
     try:
         return int(os.getenv(key, str(default)).strip())
     except (TypeError, ValueError):
@@ -96,8 +98,13 @@ def env_float(key: str, default: float) -> float:
 
 
 def env_bool(key: str, default: bool) -> bool:
+    """``true`` (any case) is the only truthy spelling.
+
+    An empty value is False, not the default — ``TIMING_JITTER=`` in a .env
+    means off, exactly as it did before the settings were centralised.
+    """
     raw = os.getenv(key)
-    if raw is None or not raw.strip():
+    if raw is None:
         return default
     return raw.strip().lower() == "true"
 
