@@ -42,9 +42,10 @@ MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 # Identity capture writes CAPTURED_* back into .env, and the quota/coach
-# counters persist next to it. Certificates are read-only.
+# counters persist next to it. Certificates are published into the same
+# directory by the certbot deploy hook, so /etc/letsencrypt stays out of
+# reach of the service entirely.
 ReadWritePaths=/var/lib/claude-cloak
-ReadOnlyPaths=/etc/letsencrypt
 
 StandardOutput=journal
 StandardError=journal

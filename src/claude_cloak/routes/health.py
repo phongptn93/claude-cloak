@@ -6,6 +6,7 @@ from fastapi import APIRouter
 
 from .. import settings, state
 from ..constants import STRIP_REQUEST_HEADERS
+from ..tls import certificate_view
 from ..upstream import _stream_health_view
 
 router = APIRouter()
@@ -49,6 +50,7 @@ async def health():
             "unpriced_models": state.quota_stats["unpriced_models"],
         },
         "stream": _stream_health_view(),
+        "tls": certificate_view(),
         "deploy": {
             "mode": settings.DEPLOY_MODE,
             "bind_host": settings.LOCAL_HOST,
