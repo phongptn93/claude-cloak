@@ -1,0 +1,14 @@
+.git
+.venv
+.ruff_cache
+.pytest_cache
+.ty_cache
+__pycache__
+*.pyc
+.env
+.quota.json
+.coach.json
+service.log
+assets
+tests
+deploy

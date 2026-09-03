@@ -11,7 +11,7 @@
 # auto-captures that device's identity headers and locks them in .env for
 # every other device.
 set -euo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 FORCE_WIZARD=0
 case "${1:-}" in
@@ -153,10 +153,17 @@ elif command -v fuser &>/dev/null; then
 fi
 
 # ── Auto-install dependencies if missing ──────────────────────────────────
-if ! python3 -c "import httpx" 2>/dev/null; then
-    echo "Installing dependencies…"
-    python3 -m pip install -r requirements.txt
+# ── Ensure uv is available ────────────────────────────────────────────────────
+if ! command -v uv &>/dev/null; then
+    echo "uv not found — installing (https://astral.sh/uv)…"
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    export PATH="$HOME/.local/bin:$PATH"
 fi
+if ! command -v uv &>/dev/null; then
+    echo "uv install failed. Install it manually: https://docs.astral.sh/uv/getting-started/installation/" >&2
+    exit 1
+fi
+uv sync --quiet
 
 echo "Starting Claude Cloak in SERVER mode on port $LOCAL_PORT…"
 echo "Whitelisted: $ALLOWED_IPS"
@@ -164,4 +171,4 @@ echo
 echo "The first request from a whitelisted device will auto-capture its"
 echo "identity headers and lock them in .env for all other devices."
 echo
-python3 proxy.py
+uv run claude-cloak

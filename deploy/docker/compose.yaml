@@ -1,0 +1,48 @@
+# Container deployment. TLS terminates inside the proxy, so there is no
+# reverse proxy hop and every IP gate still sees the real client address.
+#
+#   docker compose -f deploy/docker/compose.yaml up -d --build
+#
+# Certificates come from certbot on the host (see deploy/README.md) and are
+# mounted read-only; the container publishes 443 and 80.
+services:
+  proxy:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    image: claude-cloak:latest
+    # Single instance is a hard requirement: quota, coach and identity state
+    # live in this process's memory. A second replica splits every counter.
+    deploy:
+      replicas: 1
+    ports:
+      - "443:9999"
+      - "80:8080"
+    environment:
+      # Bound ports inside the container; the publish map above puts them on
+      # the privileged ports without the container needing capabilities.
+      LOCAL_PORT: 9999
+      LOCAL_HOST: 0.0.0.0
+      HTTP_REDIRECT_PORT: 8080
+      PUBLIC_HTTPS_PORT: 443
+      ACME_WEBROOT: /acme
+      TLS_CERTFILE: /etc/letsencrypt/live/${CLOAK_DOMAIN:?set CLOAK_DOMAIN}/fullchain.pem
+      TLS_KEYFILE: /etc/letsencrypt/live/${CLOAK_DOMAIN:?set CLOAK_DOMAIN}/privkey.pem
+      PUBLIC_HOSTNAME: ${CLOAK_DOMAIN:?set CLOAK_DOMAIN}
+      CLAUDE_CLOAK_ENV: /data/.env
+    volumes:
+      # .env is read-write on purpose: identity capture writes CAPTURED_*
+      # back into it, and .quota.json/.coach.json live beside it.
+      - cloak-data:/data
+      - cloak-acme:/acme
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+    restart: unless-stopped
+    # The lifespan hook flushes quota and coach counters on shutdown.
+    stop_grace_period: 20s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+volumes:
+  cloak-data:
+  cloak-acme:

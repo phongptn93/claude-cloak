@@ -1,0 +1,88 @@
+name: ci
+
+# Every push and pull request. release.yml only fires on a tag, so without
+# this a change could sit on main for weeks before anything checked it — and
+# the first thing to notice would be a release build.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A new push supersedes the run it interrupted.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both ends of requires-python. The floor is what a distro host
+        # actually ships, so it is the one that breaks in the field.
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.0.1  # no floating v10 tag is published
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+      # --locked: a lockfile that drifted from pyproject.toml fails here.
+      - run: uv sync --locked
+      - run: uv run ruff check src tests
+      - run: uv run ruff format --check src tests
+      # Whole project, not just src/ — the test suite is where the fixtures
+      # that mirror upstream response shapes live.
+      - run: uv run ty check
+      - run: uv run pytest
+
+  scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # The install and launcher scripts are the part of this repo with no
+      # test suite, and they run as root on a host. shellcheck is the only
+      # gate they get.
+      - run: shellcheck -S warning $(git ls-files '*.sh')
+
+  bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.0.1  # no floating v10 tag is published
+        with:
+          enable-cache: true
+      - run: deploy/build-release.sh
+      # Install the artifact the way a host does: no uv, no git, no compiler,
+      # only the distro python. This tests the consumer's copy rather than
+      # the build environment, which is where packaging bugs actually show up.
+      - name: Install the bundle in a bare container
+        run: |
+          docker run --rm -v "$PWD/dist:/dist:ro" ubuntu:24.04 bash -euc '
+            apt-get update -qq && apt-get install -y -qq python3-venv >/dev/null
+            printf "#!/bin/sh\nexit 0\n" > /usr/bin/systemctl && chmod +x /usr/bin/systemctl
+            cd /tmp && tar xzf /dist/claude-cloak-*.tar.gz && cd claude-cloak-*/
+            ./deploy/systemd/install.sh
+            PY=/opt/claude-cloak/.venv/bin/python
+            $PY -c "import claude_cloak.app; print(\"bundle installs and imports\")"
+            $PY -c "
+          from httpx._decoders import SUPPORTED_DECODERS as d
+          assert {\"br\", \"zstd\"} <= set(d), d
+          print(\"br/zstd decoders present\")"
+            test -f /var/lib/claude-cloak/.env
+            echo "the root .env.example reached the installed data dir"
+          '
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # The Dockerfile is a second, independent install path; it breaks on
+      # its own schedule.
+      - run: docker build -f deploy/docker/Dockerfile -t claude-cloak:ci .
+      - run: docker run --rm claude-cloak:ci python -c "import claude_cloak.app; print('image imports')"
