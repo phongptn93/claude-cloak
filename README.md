@@ -472,7 +472,7 @@ The proxy can forward structured events to a [Grafana Loki](https://grafana.com/
 Enable by setting `LOKI_URL` in `.env`:
 
 ```env
-LOKI_URL=http://192.168.15.120:3100/loki/api/v1/push
+LOKI_URL=http://192.168.1.100:3100/loki/api/v1/push
 LOKI_JOB=claude-cloak           # default
 LOKI_HOST=                      # default: socket.gethostname()
 LOKI_USER_EMAIL=                # optional, becomes a Loki label if set
