@@ -335,6 +335,15 @@ matching public IP:
 LOCAL_HOST=10.0.0.4          # primary IP config
 ```
 
+Under Docker, `LOCAL_HOST` stays `0.0.0.0` — that is the address *inside* the
+container. The interface is chosen by the publish map instead:
+
+```yaml
+    ports:
+      - "10.0.0.4:443:9999"
+      - "10.0.0.4:80:8080"
+```
+
 ```caddy
 # /etc/caddy/Caddyfile — Caddy fronts ONLY the second service, and obtains
 # its own certificate for the second label. claude-cloak is untouched.
