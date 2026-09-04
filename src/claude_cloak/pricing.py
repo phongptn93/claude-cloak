@@ -12,6 +12,8 @@ import os
 # Tiers: input, output, cache_write_5m, cache_write_1h, cache_read.
 # Cache tiers follow Anthropic's standard multipliers on the input price:
 #   5m write = 1.25x, 1h write = 2x, read = 0.1x.
+# Exception: Fable 5.1 and Mythos 5.1 read at 0.025x ($0.25/MTok), a quarter of
+# the 5.0 rate — keep those rows separate from `fable-5` / `mythos-5`.
 # Model key is matched by substring against the response `model` field;
 # longer keys win, so `opus-4.8` is picked over the legacy `opus-4` entry.
 #
@@ -20,6 +22,20 @@ import os
 # billed at 3x its real cost.
 PRICING_DEFAULTS: dict[str, dict[str, float]] = {
     # ---- Claude 5 family ----
+    "fable-5.1": {
+        "input": 10.00,
+        "output": 50.00,
+        "cache_write_5m": 12.50,
+        "cache_write_1h": 20.00,
+        "cache_read": 0.25,
+    },
+    "mythos-5.1": {
+        "input": 10.00,
+        "output": 50.00,
+        "cache_write_5m": 12.50,
+        "cache_write_1h": 20.00,
+        "cache_read": 0.25,
+    },
     "fable-5": {
         "input": 10.00,
         "output": 50.00,
@@ -42,11 +58,11 @@ PRICING_DEFAULTS: dict[str, dict[str, float]] = {
         "cache_read": 0.50,
     },
     "sonnet-5": {
-        "input": 3.00,
-        "output": 15.00,
-        "cache_write_5m": 3.75,
-        "cache_write_1h": 6.00,
-        "cache_read": 0.30,
+        "input": 2.00,
+        "output": 10.00,
+        "cache_write_5m": 2.50,
+        "cache_write_1h": 4.00,
+        "cache_read": 0.20,
     },
     # ---- Opus 4.x (4.5+ moved to the $5/$25 tier) ----
     "opus-4.8": {
