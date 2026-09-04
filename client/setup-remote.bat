@@ -9,7 +9,7 @@
 :: Does NOT start a local proxy — Claude Code talks to the VM directly.
 
 setlocal EnableDelayedExpansion
-cd /d "%~dp0"
+cd /d "%~dp0.."
 
 set REMOTE_URL=%~1
 set CLOAK_USER=%~2
@@ -42,7 +42,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-python setup_claude.py --remote "%FULL_URL%"
+uv run claude-cloak-setup --remote "%FULL_URL%"
 
 echo.
 if not "%CLOAK_USER%"=="" (

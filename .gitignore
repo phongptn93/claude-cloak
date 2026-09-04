@@ -9,3 +9,7 @@ service.log
 *.egg-info/
 dist/
 build/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.ty_cache/

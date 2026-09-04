@@ -1,0 +1,6 @@
+.default_cap_usd:float
+.enabled:bool
+.hard_limit:bool
+.period:str
+.reset_in_seconds:NoneType
+.users[]
