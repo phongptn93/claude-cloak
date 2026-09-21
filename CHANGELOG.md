@@ -8,6 +8,14 @@ Notable changes to Claude Cloak. Format follows
 
 ### Fixed
 
+- **Two model prices were wrong, both in the direction of over-reporting
+  spend.** Claude Sonnet 5 carried the Sonnet 4.x rate of $3/$15 per MTok
+  instead of its list price of $2/$10, inflating every Sonnet 5 line by 50%
+  across all five tiers. Claude Fable 5.1 and Mythos 5.1 had no rows of their
+  own, so they matched `fable-5`/`mythos-5` and read cache at $1.00/MTok
+  rather than $0.25 — the only models that price cache reads at 0.025x the
+  input rate instead of the usual 0.1x. Both now have their own rows, and the
+  multiplier test carries an explicit exception list.
 - **The `/config` console offered quota periods the code rejects.**
   `USER_QUOTA_PERIOD` listed `day`/`week`/`month` while `settings.py` accepts
   only `daily`/`monthly` and normalises everything else to monthly. All three
