@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Claude Cloak — Proxy Keys</title>
+<style>
+  :root {
+    --bg-0:#0a0a0d; --bg-1:#111118; --bg-2:#1a1a24; --bg-3:#232330;
+    --border:#2a2a3a; --text:#ebebf0; --text-soft:#b8b8c4; --muted:#7c7c8c;
+    --accent:#c084fc; --accent-2:#67e8f9; --ok:#4ade80; --warn:#fbbf24; --danger:#f87171;
+    --radius:10px; --radius-sm:6px;
+    --font-sans:-apple-system,BlinkMacSystemFont,"Inter","Segoe UI",Roboto,system-ui,sans-serif;
+    --font-mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+  }
+  *,*::before,*::after{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{background:var(--bg-0);color:var(--text);font:14px/1.5 var(--font-sans);
+       -webkit-font-smoothing:antialiased;min-height:100vh}
+  code,.num{font-family:var(--font-mono)}
+  a{color:var(--accent-2);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .topbar{position:sticky;top:0;z-index:10;display:flex;align-items:center;gap:16px;
+          padding:14px 28px;background:rgba(10,10,13,.85);backdrop-filter:blur(8px);
+          border-bottom:1px solid var(--border)}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:600}
+  .brand-mark{width:22px;height:22px;border-radius:5px;
+              background:linear-gradient(135deg,var(--accent),var(--accent-2));
+              box-shadow:0 0 12px rgba(192,132,252,.35)}
+  .brand-tag{color:var(--muted);font-weight:500;font-size:12px;margin-left:4px}
+  .spacer{flex:1}
+  .pill{display:inline-flex;align-items:center;gap:6px;padding:5px 11px;background:var(--bg-2);
+        border:1px solid var(--border);border-radius:999px;font-size:12px;color:var(--text-soft)}
+  .pill.ok{color:var(--ok)} .pill.warn{color:var(--warn)} .pill.danger{color:var(--danger)}
+  main{max-width:1080px;margin:0 auto;padding:28px}
+  .note{background:var(--bg-1);border:1px solid var(--border);border-left:3px solid var(--accent);
+        border-radius:var(--radius);padding:14px 18px;margin-bottom:22px;color:var(--text-soft)}
+  .note strong{color:var(--text)}
+  .note.warn{border-left-color:var(--warn)}
+  .note.danger{border-left-color:var(--danger)}
+  .note.ok{border-left-color:var(--ok)}
+  h2{font-size:15px;margin:26px 0 12px;letter-spacing:.02em}
+  h2 .sub{color:var(--muted);font-weight:400;font-size:12.5px;margin-left:8px}
+  .panel{background:var(--bg-1);border:1px solid var(--border);border-radius:var(--radius);
+         overflow:hidden}
+  .panel.pad{padding:18px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px;
+        align-items:end}
+  label.fld{display:block;font-size:12px;color:var(--muted);margin-bottom:6px;
+            text-transform:uppercase;letter-spacing:.04em}
+  input[type=text],input[type=number],input[type=password],select{
+    width:100%;background:var(--bg-2);color:var(--text);border:1px solid var(--border);
+    border-radius:var(--radius-sm);padding:8px 10px;font:13px/1.4 var(--font-mono)}
+  input:disabled,select:disabled{opacity:.55;cursor:not-allowed}
+  input:focus,select:focus{outline:none;border-color:var(--accent)}
+  .btn{background:var(--accent);color:#1a1022;border:none;padding:9px 18px;border-radius:var(--radius-sm);
+       font:600 13px var(--font-sans);cursor:pointer}
+  .btn:disabled{opacity:.5;cursor:not-allowed}
+  .btn.ghost{background:var(--bg-2);color:var(--text-soft);border:1px solid var(--border)}
+  .btn.sm{padding:5px 11px;font-size:12px}
+  .btn.danger{background:rgba(248,113,113,.14);border:1px solid rgba(248,113,113,.4);color:var(--danger)}
+  .badge{font-size:10.5px;padding:2px 7px;border-radius:999px;border:1px solid var(--border);
+         background:var(--bg-2);color:var(--muted);letter-spacing:.03em;text-transform:uppercase}
+  .badge.active{color:var(--ok);border-color:rgba(74,222,128,.3)}
+  .badge.disabled{color:var(--warn);border-color:rgba(251,191,36,.3)}
+  .badge.expired{color:var(--danger);border-color:rgba(248,113,113,.3)}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:9px 18px;border-bottom:1px solid var(--border);vertical-align:middle}
+  tr:last-child td{border-bottom:none}
+  th{color:var(--muted);font-weight:500;font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+  td.num{font-family:var(--font-mono);text-align:right}
+  th.num{text-align:right}
+  td.actions{text-align:right;white-space:nowrap}
+  td.actions .btn{margin-left:6px}
+  .user-head{display:flex;align-items:center;gap:10px;padding:12px 18px;background:var(--bg-2);
+             border-bottom:1px solid var(--border);font-weight:600}
+  .user-head .spend{font:12px var(--font-mono);color:var(--text-soft);font-weight:400}
+  .secret{background:#101a14;border:1px solid rgba(74,222,128,.35);border-radius:var(--radius);
+          padding:16px 18px;margin:18px 0}
+  .secret h3{margin:0 0 6px;font-size:14px;color:var(--ok)}
+  .secret p{margin:0 0 10px;color:var(--text-soft);font-size:13px}
+  .secret .val{display:flex;gap:8px;align-items:center;margin-bottom:8px}
+  .secret .val input{font-size:12.5px}
+  .secret pre{background:var(--bg-0);border:1px solid var(--border);border-radius:var(--radius-sm);
+              padding:10px 12px;margin:0;overflow-x:auto;font:12.5px var(--font-mono);color:var(--text-soft)}
+  .empty{padding:22px 18px;color:var(--muted);font-size:13px}
+  .msg{color:var(--text-soft);font-size:13px;min-height:18px;margin-top:10px}
+  .msg.err{color:var(--danger)}
+  .login{max-width:420px;margin:60px auto;background:var(--bg-1);border:1px solid var(--border);
+         border-radius:var(--radius);padding:26px}
+  .login h1{font-size:17px;margin:0 0 6px}
+  .login p{color:var(--muted);font-size:13px;margin:0 0 18px}
+  .login .err{color:var(--danger);font-size:13px;margin-top:12px;min-height:18px}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <div class="brand"><div class="brand-mark"></div>
+    <span>Claude Cloak</span><span class="brand-tag">proxy keys</span></div>
+  <div class="spacer"></div>
+  <span class="pill" id="auth-pill">checking…</span>
+  <a href="/config">Configuration</a>
+  <a href="/dashboard">Dashboard</a>
+  <button class="btn ghost" id="logout" style="display:none">Sign out</button>
+</div>
+
+<main id="main"><div class="note">Loading keys…</div></main>
+
+<script>
+let VIEW = null;
+let LAST_ISSUED = null;   // {secret, key} — held in memory only, never re-fetched
+
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+const money = (n) => '$' + Number(n || 0).toFixed(2);
+
+function when(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return isNaN(d) ? esc(iso) : d.toLocaleString();
+}
+
+function baseUrl() { return location.origin; }
+
+async function load() {
+  const r = await fetch('/keys/data', {credentials:'same-origin'});
+  VIEW = await r.json();
+  render();
+}
+
+function render() {
+  const pill = document.getElementById('auth-pill');
+  const logout = document.getElementById('logout');
+  logout.style.display = 'none';
+  if (!VIEW.auth_configured) {
+    pill.textContent = 'read-only · no ADMIN_TOKEN'; pill.className = 'pill warn';
+  } else if (VIEW.authenticated) {
+    pill.textContent = 'signed in'; pill.className = 'pill ok'; logout.style.display = '';
+  } else {
+    pill.textContent = 'locked'; pill.className = 'pill warn';
+  }
+
+  const main = document.getElementById('main');
+  if (VIEW.auth_configured && !VIEW.authenticated) { main.innerHTML = loginHtml(); wireLogin(); return; }
+
+  let html = notesHtml();
+  if (VIEW.editable) html += issueHtml();
+  if (LAST_ISSUED) html += secretHtml(LAST_ISSUED);
+  html += keysHtml();
+  main.innerHTML = html;
+  wire();
+}
+
+function notesHtml() {
+  const seg = esc(VIEW.url_segment);
+  let html = `<div class="note"><strong>A proxy key is the door for clients whose IP moves.</strong>
+    Give a user a key and their Claude Code points at
+    <code>${esc(baseUrl())}/${seg}/&lt;key&gt;</code> instead of the bare proxy URL — the request is
+    admitted from any address and billed to that user's label. Keys never open
+    <code>/config</code>, <code>/keys</code> or <code>/admin</code>: those stay restricted to
+    <code>ADMIN_IPS</code>. The key is shown once, when you create it; only its SHA-256 is stored
+    in <code>${esc(VIEW.keys_path)}</code>.</div>`;
+
+  if (!VIEW.keys_enabled) {
+    html += `<div class="note danger"><strong>Keys are not being accepted yet.</strong>
+      <code>PROXY_KEYS_ENABLED</code> is off, so a request carrying a key is refused with 403.
+      You can still issue keys here; set <code>PROXY_KEYS_ENABLED=true</code> in
+      <code>${esc(VIEW.env_path)}</code> and restart the proxy to turn the door on. It is an
+      <code>.env</code> decision on purpose — it widens who can reach the proxy.</div>`;
+  } else if (!VIEW.bypass_ip_allowlist) {
+    html += `<div class="note warn"><strong>Keys identify but do not admit.</strong>
+      <code>PROXY_KEY_BYPASS_IP_ALLOWLIST=false</code>, so a key names the user while
+      <code>ALLOWED_IPS</code> still decides who gets in. Set it to <code>true</code> for the
+      dynamic-IP case this feature exists for.</div>`;
+  } else {
+    html += `<div class="note ok"><strong>Keys are live.</strong> A valid key is admitted from any
+      address${VIEW.deploy_mode === 'server' ? '' : ' (this proxy is in local mode, where no IP whitelist applies anyway)'}.
+      Header form also works: <code>${esc(VIEW.header_name)}: &lt;key&gt;</code>.</div>`;
+  }
+
+  if (location.protocol !== 'https:' && !['localhost','127.0.0.1','::1'].includes(location.hostname)) {
+    html += `<div class="note danger"><strong>This page is not on HTTPS.</strong> A key travels in
+      the URL, so over plain HTTP every hop on the path can read it — and replay it. Terminate TLS
+      (<code>TLS_CERTFILE</code>/<code>TLS_KEYFILE</code>, or a reverse proxy listed in
+      <code>TRUSTED_PROXY_IPS</code>) before handing keys out.</div>`;
+  }
+  return html;
+}
+
+function issueHtml() {
+  const labels = (VIEW.known_labels || []).map(l => `<option value="${esc(l)}">`).join('');
+  return `<h2>Issue a key</h2>
+    <div class="panel pad">
+      <div class="grid">
+        <div>
+          <label class="fld" for="f-label">User label</label>
+          <input type="text" id="f-label" list="known-labels" placeholder="phong" autocomplete="off">
+          <datalist id="known-labels">${labels}</datalist>
+        </div>
+        <div>
+          <label class="fld" for="f-note">Note (optional)</label>
+          <input type="text" id="f-note" placeholder="laptop 4G" autocomplete="off">
+        </div>
+        <div>
+          <label class="fld" for="f-exp">Expires</label>
+          <select id="f-exp">
+            <option value="0">never</option>
+            <option value="7">in 7 days</option>
+            <option value="30">in 30 days</option>
+            <option value="90" selected>in 90 days</option>
+            <option value="365">in 365 days</option>
+          </select>
+        </div>
+        <div><button class="btn" id="do-create">Create key</button></div>
+      </div>
+      <div class="msg" id="create-msg"></div>
+    </div>`;
+}
+
+function secretHtml(issued) {
+  const url = `${baseUrl()}/${VIEW.url_segment}/${issued.secret}`;
+  return `<div class="secret">
+    <h3>Key for ${esc(issued.key.label)} — copy it now</h3>
+    <p>This is the only time the key is shown. If it is lost, delete it and issue another.</p>
+    <div class="val"><input type="text" id="issued-url" value="${esc(url)}" readonly>
+      <button class="btn sm" id="copy-url">Copy</button></div>
+    <pre># what the user runs, once
+uv run claude-cloak-setup --remote ${esc(url)}
+
+# or, per shell
+export ANTHROPIC_BASE_URL=${esc(url)}
+
+# check it works
+curl ${esc(url)}/whoami</pre>
+  </div>`;
+}
+
+function keysHtml() {
+  const keys = VIEW.keys || [];
+  if (!keys.length) {
+    return `<h2>Issued keys</h2><div class="panel"><div class="empty">No keys yet.
+      ${VIEW.editable ? 'Issue one above.' : 'Sign in to issue one.'}</div></div>`;
+  }
+  const spendByLabel = Object.fromEntries((VIEW.users || []).map(u => [u.label, u]));
+  const byLabel = {};
+  for (const k of keys) (byLabel[k.label] = byLabel[k.label] || []).push(k);
+
+  let html = `<h2>Issued keys <span class="sub">${keys.length} across ${Object.keys(byLabel).length} user(s)</span></h2>`;
+  for (const label of Object.keys(byLabel).sort()) {
+    const u = spendByLabel[label] || {};
+    let spend = '';
+    if (VIEW.user_quota_enabled) {
+      const pct = u.cost_pct === null || u.cost_pct === undefined ? '' : ` · ${u.cost_pct}% of cap`;
+      spend = `${money(u.cost_usd)} this ${esc(VIEW.quota_period === 'daily' ? 'day' : 'month')}` +
+        (u.cap_usd > 0 ? ` of ${money(u.cap_usd)}${pct}` : ' (no cap)');
+    } else {
+      spend = `${money(u.cost_usd)} tracked · ${u.requests || 0} request(s)`;
+    }
+    html += `<div class="panel" style="margin-bottom:16px">
+      <div class="user-head"><span>${esc(label)}</span><span class="spacer"></span>
+        <span class="spend">${esc(spend)}</span></div>
+      <table><thead><tr>
+        <th>Key</th><th>Note</th><th>Status</th><th>Created</th><th>Expires</th>
+        <th>Last used</th><th class="num">Uses</th><th></th>
+      </tr></thead><tbody>`;
+    for (const k of byLabel[label]) {
+      html += `<tr>
+        <td><code>${esc(k.prefix)}…</code></td>
+        <td>${esc(k.note) || '<span style="color:var(--muted)">—</span>'}</td>
+        <td><span class="badge ${esc(k.status)}">${esc(k.status)}</span></td>
+        <td>${when(k.created_at)}</td>
+        <td>${k.expires_at ? when(k.expires_at) : 'never'}</td>
+        <td>${when(k.last_used_at)}${k.last_used_ip ? ` <span style="color:var(--muted)">from ${esc(k.last_used_ip)}</span>` : ''}</td>
+        <td class="num">${k.use_count}</td>
+        <td class="actions">${VIEW.editable ? `
+          <button class="btn ghost sm" data-toggle="${esc(k.id)}" data-enabled="${k.enabled}">
+            ${k.enabled ? 'Disable' : 'Enable'}</button>
+          <button class="btn danger sm" data-delete="${esc(k.id)}">Delete</button>` : ''}</td>
+      </tr>`;
+    }
+    html += `</tbody></table></div>`;
+  }
+  return html;
+}
+
+async function post(path, body) {
+  const r = await fetch(path, {
+    method:'POST', credentials:'same-origin',
+    headers:{'content-type':'application/json'},
+    body: JSON.stringify(body || {}),
+  });
+  let data = {};
+  try { data = await r.json(); } catch (e) { /* empty body */ }
+  return {status: r.status, data};
+}
+
+function wire() {
+  const create = document.getElementById('do-create');
+  if (create) create.onclick = async () => {
+    const msg = document.getElementById('create-msg');
+    msg.className = 'msg';
+    msg.textContent = 'creating…';
+    const {status, data} = await post('/keys/create', {
+      label: document.getElementById('f-label').value,
+      note: document.getElementById('f-note').value,
+      expires_in_days: Number(document.getElementById('f-exp').value),
+    });
+    if (status === 401) { LAST_ISSUED = null; await load(); return; }
+    if (!data.ok) { msg.className = 'msg err'; msg.textContent = data.error || 'could not create key'; return; }
+    LAST_ISSUED = {secret: data.secret, key: data.key};
+    await load();
+    document.getElementById('issued-url').select();
+  };
+
+  const copy = document.getElementById('copy-url');
+  if (copy) copy.onclick = async () => {
+    const input = document.getElementById('issued-url');
+    input.select();
+    try { await navigator.clipboard.writeText(input.value); copy.textContent = 'Copied'; }
+    catch (e) { document.execCommand('copy'); copy.textContent = 'Copied'; }
+    setTimeout(() => { copy.textContent = 'Copy'; }, 1500);
+  };
+
+  document.querySelectorAll('[data-toggle]').forEach(b => b.onclick = async () => {
+    b.disabled = true;
+    const {status} = await post('/keys/update',
+      {id: b.dataset.toggle, enabled: b.dataset.enabled !== 'true'});
+    if (status === 401) LAST_ISSUED = null;
+    await load();
+  });
+
+  document.querySelectorAll('[data-delete]').forEach(b => b.onclick = async () => {
+    if (!confirm('Delete this key? Any client still using it stops working immediately.')) return;
+    b.disabled = true;
+    const {status} = await post('/keys/delete', {id: b.dataset.delete});
+    if (status === 401) LAST_ISSUED = null;
+    if (LAST_ISSUED && LAST_ISSUED.key.id === b.dataset.delete) LAST_ISSUED = null;
+    await load();
+  });
+
+  const lo = document.getElementById('logout');
+  if (lo) lo.onclick = async () => {
+    await fetch('/config/logout', {method:'POST', credentials:'same-origin'});
+    LAST_ISSUED = null;
+    location.reload();
+  };
+}
+
+function loginHtml() {
+  return `<div class="login"><h1>Sign in</h1>
+    <p>Enter <code>ADMIN_TOKEN</code> to issue or revoke keys. Your IP is already allowed by
+    <code>ADMIN_IPS</code>; this proves who you are.</p>
+    <input type="password" id="tok" placeholder="admin token" autocomplete="current-password">
+    <div class="err" id="login-err"></div>
+    <div style="margin-top:14px"><button class="btn" id="do-login">Sign in</button></div></div>`;
+}
+
+function wireLogin() {
+  const go = async () => {
+    const err = document.getElementById('login-err');
+    err.textContent = '';
+    const {data} = await post('/config/login', {token: document.getElementById('tok').value});
+    if (data.ok) { load(); } else { err.textContent = data.error || 'sign in failed'; }
+  };
+  document.getElementById('do-login').addEventListener('click', go);
+  document.getElementById('tok').addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
+}
+
+load();
+</script>
+</body>

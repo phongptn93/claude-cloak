@@ -44,6 +44,7 @@ The proxy captures the device fingerprint (23 headers) from the first request, s
 | **Error Masking** | Internal errors never leak proxy details upstream |
 | **Auto-Config** | Automatically sets `ANTHROPIC_BASE_URL` in Claude Code settings |
 | **System Tray** | Optional Windows system tray app for background operation |
+| **Proxy Keys** | Per-user access keys carried in the URL (`/k/<key>/`) — admits clients whose IP is dynamic, issued and revoked from the `/keys` console |
 | **Coding Coach** | Privacy-safe "how you code" insights (tool mix, anti-patterns, reliability, cache/model fit, practice score) — counts only, no content stored |
 | **Zero Config** | Just run `start.bat` — everything else is automatic |
 
@@ -541,7 +542,7 @@ Instead of running one proxy per device, deploy a single proxy on a VM and point
    All get saved to `.env`. Re-runs skip the wizard unless `ALLOWED_IPS` is empty or you pass `--reconfigure`.
 4. **First request from a whitelisted device** auto-captures that device's identity headers (user-agent, `x-stainless-*`, etc.) and locks them in `.env`. Every subsequent request — from any device — has those headers injected, so Anthropic sees one device.
 
-> **Safety guard:** if `DEPLOY_MODE=server` and `ALLOWED_IPS` is empty, the proxy aborts at startup. Since identity auto-capture only fires from inside the access-control middleware, only whitelisted callers can ever set the fingerprint.
+> **Safety guard:** if `DEPLOY_MODE=server` and `ALLOWED_IPS` is empty, the proxy aborts at startup — unless proxy keys are enabled and at least one active key exists, which is the one other way a client can be admitted. Since identity auto-capture only fires from inside the access-control middleware, only whitelisted callers can ever set the fingerprint.
 
 Want to bypass the wizard? Edit `.env` directly:
 
@@ -581,7 +582,7 @@ Claude Code then sends `/u/phong/v1/messages`. The VM strips the `/u/phong/` pre
 
 A single source IP can be 20 people behind one office NAT, or one person whose 4G IP changes every hour. `IP_LABELS` is brittle in both cases. The `/u/<name>/` prefix means each user identifies themselves to the proxy — independent of network topology — so the dashboard / quota cap always lands on the right person.
 
-Trust model: this is **identification, not authentication**. Anyone whose source IP is in `ALLOWED_IPS` can claim any username. That's fine inside a trusted team (`ALLOWED_IPS` is already the network-level gate); if you need cryptographic guarantees, layer a reverse proxy with mTLS in front.
+Trust model: this is **identification, not authentication**. Anyone whose source IP is in `ALLOWED_IPS` can claim any username. That's fine inside a trusted team (`ALLOWED_IPS` is already the network-level gate). When you need the user to *prove* who they are — or their IP moves and there is no whitelist entry to give them — issue a [proxy key](#proxy-access-keys-clients-with-a-dynamic-ip) instead: it authenticates and labels in one step.
 
 Verify your client setup at any time:
 ```bash
@@ -590,6 +591,57 @@ curl http://VM_IP:9999/u/phong/whoami
 ```
 
 The original `start.bat` / `start.sh` workflow still works unchanged for anyone who wants the **local** per-device proxy instead — server mode is purely additive.
+
+### Proxy Access Keys (clients with a dynamic IP)
+
+`ALLOWED_IPS` is the right gate for an office with a fixed egress address and the wrong one for a laptop on 4G, a partner on a home line, or anyone whose address changes through the day. A **proxy key** is the second door: a high-entropy secret the client carries in its base URL, admitted from any address.
+
+```env
+# VM-side, in .env — off by default, because it widens who can reach the proxy
+PROXY_KEYS_ENABLED=true
+# ALLOWED_IPS can stay as it is; keys are additive, not a replacement
+```
+
+Then open **`http://VM_IP:9999/keys`** from an `ADMIN_IPS` address, sign in with `ADMIN_TOKEN`, and issue a key per user:
+
+| The console shows | Why it's there |
+|---|---|
+| Key prefix (`pGv3K9…`) | Tells a user's two keys apart. The full key is shown **once**, at creation |
+| Note | "laptop 4G", "máy ở nhà" — which device this key lives on |
+| Status | `active` / `disabled` / `expired`, with a one-click disable |
+| Created, expires, last used (+ from which IP), uses | Is this key still in use, and by whom |
+| Spend against cap, grouped per user | The same per-user quota the dashboard shows |
+
+The user then points Claude Code at the key URL — nothing else changes on their side:
+
+```bash
+uv run claude-cloak-setup --remote https://VM_IP:9999/k/<key>
+# or, per shell
+export ANTHROPIC_BASE_URL=https://VM_IP:9999/k/<key>
+
+# self-check: who am I to this proxy, and what is my cap?
+curl https://VM_IP:9999/k/<key>/whoami
+# → { "label": "phong", "authenticated_by": "proxy_key", "bucket": { "cap_usd": 50.0, ... } }
+```
+
+Claude Code sends `/k/<key>/v1/messages`; the proxy authenticates the key, strips the segment, attributes the spend to that key's user label, and forwards `/v1/messages` upstream. A client that can set headers but not the base path can send `x-cloak-key: <key>` instead.
+
+**What a key does and does not do**
+
+- **Does** admit its holder from any source address (`PROXY_KEY_BYPASS_IP_ALLOWLIST=true`, the default). Set it to `false` to keep `ALLOWED_IPS` as the only gate and use keys purely for attribution.
+- **Does** name its user, and it outranks a `/u/<label>/` prefix — a key holder cannot bill their traffic to someone else's bucket. Per-user caps in `USER_QUOTA_CAPS` apply exactly as they do for a whitelisted IP.
+- **Does not** open `/config`, `/keys` or `/admin/*`. Those stay restricted to `ADMIN_IPS` — a key is access to the proxy, never to its administration.
+- **Does not** reach upstream. The key header is stripped from forwarded requests and the URL segment is removed before the path is built, so Anthropic never sees a stable per-user identifier and neither do the logs.
+
+**Operating notes**
+
+- **Serve keys over TLS.** The key travels in the URL; over plain HTTP every hop can read it and replay it. Set `TLS_CERTFILE`/`TLS_KEYFILE`, or front the proxy with a terminator listed in `TRUSTED_PROXY_IPS`.
+- **Storage**: `.keys.json` next to `.env` (`PROXY_KEYS_PATH`), holding SHA-256 digests only, written `0600` where the OS supports it. Losing a key means issuing a new one — there is nothing to read back.
+- **Revocation is immediate**: disable or delete in the console and the next request carrying that key gets a 403.
+- **Expiry** is per key (7 / 30 / 90 / 365 days, or never). An expired key is refused, not silently renewed.
+- **Rejections are logged** with the reason and the first four characters only — enough to correlate two attempts, never enough to use.
+- **Keys-only deployments** are allowed: with `PROXY_KEYS_ENABLED=true` and at least one active key, server mode boots with an empty `ALLOWED_IPS` instead of aborting.
+- Keys do **not** bypass `STATS_PRIVATE`. Dashboard and `/quota` stay gated to `STATS_VIEW_IPS`; `/whoami` stays open so a keyed client can still self-check.
 
 ### Per-User Quota
 
@@ -609,6 +661,8 @@ Period rolls over automatically at the start of each `daily` / `monthly` boundar
 | `GET /quota/users` | All users + cap usage |
 | `GET /quota/users/{label}` | Detail for one user |
 | `POST /admin/quota/reset/{label}` | Manually zero a user's counters. Caller must come from `ADMIN_IPS` (default loopback only) |
+| `GET /keys` | Proxy-key console: issue, disable and revoke per-user access keys. `ADMIN_IPS` + `ADMIN_TOKEN` |
+| `GET /whoami` | Self-check for a keyed client — the label it will be billed as |
 
 The dashboard at `/dashboard` auto-renders a **Per-User Quota** table when the feature is on, with colour-coded cap-usage badges (green / amber / red).
 
@@ -647,13 +701,14 @@ If `service.log` shows `'uv' is not recognized`, the SYSTEM account can't see uv
 
 ### Security notes
 
-- The whitelist matches the raw TCP source (`request.client.host`), not any `X-Forwarded-For` header — there's no reverse proxy in this setup, so spoofing isn't possible.
+- The whitelist matches the raw TCP source (`request.client.host`), not any `X-Forwarded-For` header — there's no reverse proxy in this setup, so spoofing isn't possible. (Behind one, list it in `TRUSTED_PROXY_IPS`.)
 - All identity sanitization layers still apply, so even though many clients now share one VM, Anthropic still sees a single device.
-- The `.env` on the VM contains the captured fingerprint + `SESSION_SECRET`. Treat it like a credential — anyone who reads it can impersonate that device pool. Same goes for `.quota.json` if you care about hiding spend history.
+- The `.env` on the VM contains the captured fingerprint + `SESSION_SECRET`, and `.keys.json` lists every user who may reach the proxy. Treat them like credentials — anyone who reads it can impersonate that device pool. Same goes for `.quota.json` if you care about hiding spend history.
 - Defence in depth: pair `ALLOWED_IPS` with an OS firewall rule (ufw / iptables / cloud security group) for the same CIDR. If a code bug ever opens up the app-level whitelist, the firewall still holds.
 - **Stats visibility**: by default any whitelisted client can `GET /quota` or open `/dashboard` and see the whole team's spend, including per-user breakdowns. Set `STATS_PRIVATE=true` (and optionally `STATS_VIEW_IPS`) to restrict those endpoints. `/u/<label>/whoami` stays open so each client can still self-check.
 - **First-capture race**: whoever sends the first `/v1/messages` after a fresh boot locks the device fingerprint for the whole pool. If you care which machine that is, set `CAPTURE_LOCK_FROM_IP` to that machine's source IP — every other request that arrives before will be allowed through but won't trigger capture.
-- **Trust model for `/u/<label>/`**: the URL prefix is *identification*, not *authentication*. Any whitelisted user can claim any username. Inside a trusted team that's fine (the IP whitelist is the actual gate); if you need cryptographic guarantees, put nginx + mTLS in front.
+- **Trust model for `/u/<label>/`**: the URL prefix is *identification*, not *authentication*. Any whitelisted user can claim any username. Inside a trusted team that's fine (the IP whitelist is the actual gate); for a client that must prove who it is, or whose address is dynamic, issue a proxy key — it authenticates and cannot be relabelled by its holder.
+- **Proxy keys are bearer credentials**: whoever holds the URL is that user, from any address. Serve them over TLS, give one key per device so a single revocation is surgical, and set an expiry. They never open `/config`, `/keys` or `/admin/*`.
 
 ## What It Does NOT Do
 
@@ -703,12 +758,13 @@ src/claude_cloak/
 ├── env.py                 # .env discovery, typed readers, save_to_env
 ├── terminal.py constants.py
 ├── access.py identity.py sanitize.py tokens.py pricing.py
+├── proxy_keys.py          # access-key store: issue, verify, persist
 ├── coach.py loki.py upstream.py middleware.py admin.py config_console.py
 ├── echo.py                # DEV_ECHO_MODE synthetic upstream
 ├── banner.py
 ├── quota/                 # persist.py usage.py users.py tap.py
-├── routes/                # health quota coach config admin pages passthrough
-└── web/                   # dashboard.html, config.html
+├── routes/                # health quota coach config keys admin pages passthrough
+└── web/                   # dashboard.html, config.html, keys.html
 tests/                     # pytest suite + golden endpoint snapshots
 ```
 
@@ -720,9 +776,16 @@ tests/                     # pytest suite + golden endpoint snapshots
 | `GET /quota` | Compact quota + cost summary (see Quota & Cost Tracking section) |
 | `GET /quota/users` | All per-user buckets + cap usage (server mode) |
 | `GET /quota/users/{label}` | Detail for one user |
-| `GET /u/{label}/whoami` | Client self-check: confirms IP is whitelisted + label is parsed + cap is what the operator set |
+| `GET /u/{label}/whoami` | Client self-check: confirms the caller is admitted + the label is parsed + the cap is what the operator set. `label` is the label that will actually be billed (a proxy key outranks the URL prefix); `url_label` echoes what was asked |
+| `GET /whoami` | Same self-check without a label — answers for whoever the caller turned out to be. Handy behind a key: `curl https://vm/k/<key>/whoami` |
 | `POST /admin/quota/reset/{label}` | Reset a user's counters (loopback / `ADMIN_IPS` only) |
 | `* /u/{label}/{path}` | Same as `* /{path}` but accounts the request to `<label>` regardless of source IP |
+| `* /k/{key}/{path}` | Same as `* /{path}`, authenticated by a proxy key: admitted from any address and accounted to the key's user (`PROXY_KEYS_ENABLED`) |
+| `GET /keys` | Proxy-key console — `ADMIN_IPS` only; read-only until you sign in with `ADMIN_TOKEN` |
+| `GET /keys/data` | Issued keys as JSON (digests and secrets never included), plus each user's spend against their cap |
+| `POST /keys/create` | Issue a key for a user label. The plaintext is in this response and nowhere else |
+| `POST /keys/update` | Enable, disable, relabel, re-note or re-date one key |
+| `POST /keys/delete` | Destroy a key — the next request carrying it gets a 403 |
 | `GET /dashboard` | Web UI rendering `/quota` as charts (Chart.js, dark theme, auto-refresh 5s) + Coaching section |
 | `GET /coach` | Privacy-safe coaching insights JSON (see Coding Coach section) |
 | `GET /config` | Config console — `ADMIN_IPS` only; read-only until you sign in with `ADMIN_TOKEN` |

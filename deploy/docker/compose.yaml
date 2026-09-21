@@ -32,7 +32,7 @@ services:
       CLAUDE_CLOAK_ENV: /data/.env
     volumes:
       # .env is read-write on purpose: identity capture writes CAPTURED_*
-      # back into it, and .quota.json/.coach.json live beside it.
+      # back into it, and .quota.json/.coach.json/.keys.json live beside it.
       - cloak-data:/data
       - cloak-acme:/acme
       - /etc/letsencrypt:/etc/letsencrypt:ro

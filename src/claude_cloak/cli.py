@@ -10,6 +10,7 @@ import uvicorn
 from . import settings, state
 from .acme import acme_app
 from .app import app
+from .proxy_keys import active_key_count, load_keys
 from .terminal import BG_RED, BOLD, CYAN, DIM, RED, RESET, YELLOW, enable_windows_ansi
 
 
@@ -18,10 +19,12 @@ def _abort_without_whitelist() -> None:
     print()
     print(f"  {BG_RED}{BOLD} BOOT ABORTED {RESET}")
     print(
-        f"  {RED}DEPLOY_MODE=server but ALLOWED_IPS is empty.{RESET}\n"
+        f"  {RED}DEPLOY_MODE=server but ALLOWED_IPS is empty and no proxy key can let anyone in.{RESET}\n"
         f"  {YELLOW}Set ALLOWED_IPS in .env, e.g.:{RESET}\n"
         f"    {CYAN}ALLOWED_IPS=203.0.113.5,198.51.100.0/24{RESET}\n"
-        f"  {YELLOW}Refusing to bind {settings.LOCAL_HOST}:{settings.LOCAL_PORT} with no whitelist.{RESET}"
+        f"  {YELLOW}Or run key-only: set PROXY_KEYS_ENABLED=true, then issue a key at "
+        f"/keys from an ADMIN_IPS address.{RESET}\n"
+        f"  {YELLOW}Refusing to bind {settings.LOCAL_HOST}:{settings.LOCAL_PORT} with no way to admit a client.{RESET}"
     )
     print()
     sys.exit(1)
@@ -50,7 +53,17 @@ def main() -> None:
     enable_windows_ansi()
 
     if settings.DEPLOY_MODE == "server" and not settings.ALLOWED_NETWORKS:
-        _abort_without_whitelist()
+        # An empty whitelist is only survivable when something else can admit
+        # a client. Proxy keys are that something — but only keys that exist
+        # and still work, so load the store before deciding.
+        load_keys()
+        keyed = settings.PROXY_KEYS_ENABLED and active_key_count()
+        if not keyed:
+            _abort_without_whitelist()
+        print(
+            f"  {YELLOW}server mode with no ALLOWED_IPS: access is by proxy key only "
+            f"({active_key_count()} active).{RESET}"
+        )
 
     if settings.DEPLOY_MODE == "server" and not state.runtime.identity_captured:
         _warn_identity_unlocked()

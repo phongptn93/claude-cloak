@@ -140,7 +140,11 @@ def warn_unknown_headers(request: Request):
     """Cảnh báo khi gặp header lạ chưa có trong danh sách đã biết."""
 
     req_headers = {k.lower() for k in request.headers}
-    new_unknown = req_headers - KNOWN_HEADERS - state.warned_unknown_headers
+    # The proxy key header is ours, and the warning prints header values —
+    # so it must never be treated as an unknown header to report.
+    new_unknown = (
+        req_headers - KNOWN_HEADERS - state.warned_unknown_headers - {settings.PROXY_KEY_HEADER}
+    )
 
     for h in sorted(new_unknown):
         state.warned_unknown_headers.add(h)

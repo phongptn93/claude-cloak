@@ -8,6 +8,7 @@ __pycache__
 .env
 .quota.json
 .coach.json
+.keys.json
 service.log
 assets
 tests

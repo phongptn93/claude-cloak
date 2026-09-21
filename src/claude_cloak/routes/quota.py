@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 from .. import settings, state
 from ..access import seconds_until_user_period_reset
@@ -197,19 +197,47 @@ async def quota_user(label: str):
     return _user_bucket_view(b)
 
 
+@router.get("/whoami")
+async def whoami_self(request: Request):
+    """Self-check for a client that authenticates with a proxy key.
+
+    ``curl https://vm/k/<key>/whoami`` answers the three questions a new
+    client has: was I let in, who am I to this proxy, and what is my cap.
+    The key itself is stripped by the access middleware before routing, so
+    it never appears here.
+    """
+    label = getattr(request.state, "user_label", "") or "unknown"
+    key_id = getattr(request.state, "proxy_key_id", None)
+    bucket = get_or_create_user_bucket(label) if settings.USER_QUOTA_ENABLED else None
+    return {
+        "label": label,
+        "authenticated_by": "proxy_key" if key_id else "ip",
+        "proxy_key_id": key_id or "",
+        "user_quota_enabled": settings.USER_QUOTA_ENABLED,
+        "bucket": _user_bucket_view(bucket) if bucket else None,
+    }
+
+
 @router.get("/u/{label}/whoami")
-async def whoami(label: str):
+async def whoami(label: str, request: Request):
     """Client setup verification: returns the bucket for the URL-prefix label.
 
     Hitting GET http://vm:9999/u/phong/whoami from a whitelisted client
     confirms (a) the IP is allowed, (b) the label is parsed correctly,
     (c) the cap is what the operator configured.
+
+    `label` is the label the proxy will actually bill. A proxy key names its
+    own user and outranks the URL prefix, so a keyed client asking about
+    /u/huy/ is told the key's label instead of being quietly misinformed;
+    `url_label` still echoes what was asked.
     """
     if not settings.USER_LABEL_RE.match(label):
         raise HTTPException(status_code=400, detail="invalid label")
-    b = get_or_create_user_bucket(label) if settings.USER_QUOTA_ENABLED else None
+    effective = getattr(request.state, "user_label", "") or label
+    b = get_or_create_user_bucket(effective) if settings.USER_QUOTA_ENABLED else None
     return {
-        "label": label,
+        "label": effective,
+        "url_label": label,
         "user_quota_enabled": settings.USER_QUOTA_ENABLED,
         "bucket": _user_bucket_view(b) if b else None,
     }

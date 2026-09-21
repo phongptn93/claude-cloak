@@ -14,8 +14,9 @@ from .coach import _load_coach_stats, _save_coach_stats
 from .env import ENV_PATH, save_to_env
 from .loki import _loki_flush_once, _loki_flusher_loop
 from .middleware import AccessControlMiddleware
+from .proxy_keys import load_keys, save_keys
 from .quota.persist import _load_quota_stats, _save_quota_stats
-from .routes import admin, coach, config, health, pages, passthrough, quota
+from .routes import admin, coach, config, health, keys, pages, passthrough, quota
 from .terminal import RESET, YELLOW, log
 
 
@@ -78,6 +79,7 @@ async def lifespan(app: FastAPI):
     state.runtime.telemetry_client = build_telemetry_client()
     _load_quota_stats()
     _load_coach_stats()
+    load_keys()
     print_banner()
     print_status()
     if settings.LOKI_ENABLED:
@@ -98,6 +100,7 @@ async def lifespan(app: FastAPI):
                     break
         _save_quota_stats(force=True)
         _save_coach_stats(force=True)
+        save_keys(force=True)
         if state.runtime.http_client is not None:
             await state.runtime.http_client.aclose()
         if state.runtime.telemetry_client is not None:
@@ -107,7 +110,7 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     application = FastAPI(title="Claude Cloak", lifespan=lifespan)
     application.add_middleware(AccessControlMiddleware)
-    for module in (health, pages, config, coach, quota, admin):
+    for module in (health, pages, config, keys, coach, quota, admin):
         application.include_router(module.router)
     # Catch-all last: it matches every remaining path.
     application.include_router(passthrough.router)

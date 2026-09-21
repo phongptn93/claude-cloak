@@ -38,8 +38,8 @@ ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     CLAUDE_CLOAK_ENV=/data/.env
 
-# /data holds .env (identity capture writes back to it), .quota.json and
-# .coach.json. Mount it; nothing valuable lives in the image layer.
+# /data holds .env (identity capture writes back to it), .quota.json,
+# .coach.json and .keys.json (proxy-key digests). Mount it; nothing valuable lives in the image layer.
 VOLUME ["/data"]
 WORKDIR /data
 USER cloak

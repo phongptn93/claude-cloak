@@ -28,7 +28,7 @@ import copy  # noqa: E402
 
 import pytest  # noqa: E402
 
-from claude_cloak import state  # noqa: E402
+from claude_cloak import access, settings, state  # noqa: E402, F401
 
 _PRISTINE = {
     name: copy.deepcopy(getattr(state, name))
@@ -37,6 +37,7 @@ _PRISTINE = {
         "stream_stats",
         "coach_stats",
         "token_saver_stats",
+        "proxy_keys",
         "captured_identity",
         "warned_unknown_headers",
         "loki_buffer",
@@ -44,6 +45,13 @@ _PRISTINE = {
     )
 }
 _PRISTINE_RUNTIME = copy.copy(state.runtime)
+
+# access.py replaces settings.USER_LABEL_RE with a bare-label pattern when it is
+# imported, and several tests reload the settings module — which puts the
+# path-shaped original back and silently breaks every label check that follows.
+# Importing access above guarantees the clobber has happened; this captures the
+# result so the fixture can restore it.
+_PRISTINE_LABEL_RE = settings.USER_LABEL_RE
 
 
 @pytest.fixture(autouse=True)
@@ -66,3 +74,4 @@ def isolated_state():
             container.update(restored)
     for field, value in vars(_PRISTINE_RUNTIME).items():
         setattr(state.runtime, field, value)
+    settings.USER_LABEL_RE = _PRISTINE_LABEL_RE

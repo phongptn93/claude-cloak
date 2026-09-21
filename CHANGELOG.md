@@ -6,6 +6,31 @@ Notable changes to Claude Cloak. Format follows
 
 ## [0.2.1] — Unreleased
 
+### Added
+
+- **Proxy access keys** — a second door beside `ALLOWED_IPS`, for clients whose
+  address is dynamic. A key is a high-entropy secret the client carries in its
+  base URL (`ANTHROPIC_BASE_URL=https://vm:9999/k/<key>`) or in
+  `PROXY_KEY_HEADER`; it admits the caller from any address and names the user,
+  so per-user attribution and caps work exactly as they do for a whitelisted IP.
+  Off by default (`PROXY_KEYS_ENABLED`) — it widens who can reach the proxy, so
+  it is an `.env` decision rather than a web-console one.
+  - **`/keys` console** to issue, disable, re-date and revoke keys per user,
+    with each user's spend against their cap. Same two gates as `/config`: an
+    IP in `ADMIN_IPS`, then `ADMIN_TOKEN`. Only the SHA-256 of a key is stored
+    (`.keys.json`, `0600`); the plaintext is shown once, at creation.
+  - A key never opens `/config`, `/keys` or `/admin/*`, never reaches upstream
+    (URL segment stripped before routing, header stripped before forwarding),
+    and never appears in a log line — a rejection records four characters and
+    the reason.
+  - A key outranks a `/u/<label>/` prefix, so its holder cannot bill traffic to
+    someone else's bucket.
+  - `GET /whoami` answers "who am I to this proxy, and what is my cap" for a
+    keyed client. `GET /u/<label>/whoami` now reports the label that will
+    actually be billed, with the requested one alongside as `url_label`.
+  - Server mode now boots with an empty `ALLOWED_IPS` when keys are enabled and
+    at least one is active, instead of aborting.
+
 ### Fixed
 
 - **Two model prices were wrong, both in the direction of over-reporting
