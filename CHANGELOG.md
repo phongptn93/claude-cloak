@@ -33,6 +33,23 @@ Notable changes to Claude Cloak. Format follows
 
 ### Fixed
 
+- **One vanishing client could stop the proxy accepting connections, on
+  Windows.** asyncio's default loop there is the proactor, and CPython treats
+  any `accept()` error as fatal for the *listening* socket — it calls the
+  exception handler and then `sock.close()`. A client that disappears between
+  the TCP handshake and accept (`[WinError 64] The specified network name is
+  no longer available`), which a port open to the internet sees daily, was
+  therefore enough to leave the process up, the dashboard answering on
+  already-open connections, and every new client refused until a restart. The
+  proxy now serves on the selector loop on Windows, which logs a failed accept
+  and keeps going; `WINDOWS_EVENT_LOOP=proactor` restores the stdlib choice.
+- **Console noise from a public port.** A dropped connection printed a
+  multi-frame `Task exception was never retrieved` traceback, and each
+  non-HTTP request a bare `Invalid HTTP request received.` — a scanner buried
+  the request log in both. Both are now one rate-limited line
+  (`NETWORK_NOISE_WARN_INTERVAL`) that names the likely cause, with running
+  totals in `listener` in `/health`. The commonest cause is a client using
+  `https://` against a plain-HTTP listener, which the message now says.
 - **The `/config` console offered quota periods the code rejects.**
   `USER_QUOTA_PERIOD` listed `day`/`week`/`month` while `settings.py` accepts
   only `daily`/`monthly` and normalises everything else to monthly. All three

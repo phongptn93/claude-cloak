@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter
 
 from .. import settings, state
@@ -50,6 +52,16 @@ async def health():
             "unpriced_models": state.quota_stats["unpriced_models"],
         },
         "stream": _stream_health_view(),
+        # What never became a request: connections dropped before HTTP began,
+        # and bytes that were not HTTP at all. Non-zero here with a healthy
+        # `stream` means the port is being probed, or a client is pointed at
+        # the wrong scheme — not that the proxy is failing.
+        "listener": {
+            "event_loop": type(asyncio.get_running_loop()).__name__,
+            "aborted_connections": state.runtime.aborted_connections,
+            "invalid_http_requests": state.runtime.invalid_http_requests,
+            "last_event": state.runtime.last_listener_event,
+        },
         "tls": certificate_view(),
         "deploy": {
             "mode": settings.DEPLOY_MODE,

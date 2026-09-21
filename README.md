@@ -615,6 +615,9 @@ Then open **`http://VM_IP:9999/keys`** from an `ADMIN_IPS` address, sign in with
 The user then points Claude Code at the key URL — nothing else changes on their side:
 
 ```bash
+# https:// only if the proxy terminates TLS (TLS_CERTFILE/TLS_KEYFILE) or sits
+# behind a TLS terminator — otherwise use http://, or the handshake fails and
+# the console logs "Invalid HTTP request received".
 uv run claude-cloak-setup --remote https://VM_IP:9999/k/<key>
 # or, per shell
 export ANTHROPIC_BASE_URL=https://VM_IP:9999/k/<key>
@@ -877,6 +880,8 @@ header policies, coach tool names) take `<NAME>_EXTRA` to append entries or
 | Unknown header warning | Proxy detected a new header not in its known list. Check console and decide if it should be captured |
 | Timing jitter too slow | Reduce `TIMING_JITTER_MAX_MS` in `.env` or set `TIMING_JITTER=false` |
 | Empty response from API | Check proxy console for error status codes |
+| `[WinError 64] The specified network name is no longer available`, `Accept failed on a socket` | A client vanished mid-handshake. Harmless in itself — but on asyncio's default Windows loop it **closes the listener**, so the proxy stays up while accepting nothing. Fixed by serving on the selector loop (`WINDOWS_EVENT_LOOP=selector`, the default). If you see it again, check `listener.event_loop` in `/health` |
+| `Invalid HTTP request received.` | Non-HTTP bytes on the port. Almost always a client using `https://` against a plain-HTTP listener (configure `TLS_CERTFILE`/`TLS_KEYFILE`, or use `http://`), or an internet port scan. The count is in `listener.invalid_http_requests` in `/health`; the console summarises rather than repeats |
 
 ---
 

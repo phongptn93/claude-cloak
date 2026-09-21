@@ -118,6 +118,17 @@ class Runtime:
     last_coach_save_at: float = 0.0
     last_keys_save_at: float = 0.0
 
+    # Listener health. A public port attracts scanners and half-open
+    # connections; these count what was dropped before HTTP ever started, so
+    # "the proxy is quiet" can be told apart from "the proxy is being probed".
+    aborted_connections: int = 0
+    reported_aborted_connections: int = 0
+    last_listener_event: str = ""
+    last_listener_warn_at: float = 0.0
+    invalid_http_requests: int = 0
+    reported_invalid_requests: int = 0
+    last_invalid_request_warn_at: float = 0.0
+
     loki_dropped_count: int = 0
     loki_last_warn_at: float = 0.0
     loki_flusher_task: asyncio.Task | None = None

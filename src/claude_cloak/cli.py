@@ -7,7 +7,7 @@ import sys
 
 import uvicorn
 
-from . import settings, state
+from . import eventloop, settings, state
 from .acme import acme_app
 from .app import app
 from .proxy_keys import active_key_count, load_keys
@@ -91,7 +91,10 @@ def main() -> None:
     )
 
     if settings.HTTP_REDIRECT_PORT <= 0:
-        uvicorn.Server(main_config).run()
+        # Server.run() would pick the event loop for us — on Windows that is
+        # the proactor, where one vanished client closes the listener. Drive
+        # serve() under our own loop instead (see eventloop.py).
+        eventloop.run(uvicorn.Server(main_config).serve())
         return
 
     side_config = uvicorn.Config(
@@ -115,7 +118,7 @@ def main() -> None:
             uvicorn.Server(side_config).serve(),
         )
 
-    asyncio.run(serve_both())
+    eventloop.run(serve_both())
 
 
 if __name__ == "__main__":

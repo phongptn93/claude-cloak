@@ -27,8 +27,9 @@ GOLDEN = Path(__file__).parent / "golden"
 # prefix; everything under it is treated as new surface rather than drift.
 ADDED_SINCE_BASELINE = {
     # TLS certificate expiry, so a renewal that stops working is visible
-    # before it becomes an outage.
-    "health": [".tls"],
+    # before it becomes an outage; and listener counters, which separate
+    # "quiet" from "being probed" when connections die before HTTP starts.
+    "health": [".tls", ".listener"],
 }
 
 ENDPOINTS = {

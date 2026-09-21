@@ -121,6 +121,24 @@ PUBLIC_HOSTNAME = env_str("PUBLIC_HOSTNAME")
 PUBLIC_HTTPS_PORT = env_int("PUBLIC_HTTPS_PORT", 0)
 
 # ============================================================
+# LISTENER / EVENT LOOP
+# asyncio's default loop on Windows (proactor) closes the LISTENING socket
+# when an accept() fails — and a client that vanishes mid-handshake, which a
+# public port sees daily, is such a failure. The process then stays up
+# accepting nothing. The selector loop logs and carries on, so that is the
+# default here; "proactor" restores the stdlib choice for anyone who needs
+# it (it scales past the ~512 sockets Windows' select() can watch).
+# Ignored everywhere except Windows.
+# ============================================================
+WINDOWS_EVENT_LOOP = env_str("WINDOWS_EVENT_LOOP", "selector").lower()
+if WINDOWS_EVENT_LOOP not in ("selector", "proactor"):
+    WINDOWS_EVENT_LOOP = "selector"
+
+# Seconds between summaries of dropped connections / non-HTTP requests. One
+# scanner can produce thousands; 0 reports every single one.
+NETWORK_NOISE_WARN_INTERVAL = env_float("NETWORK_NOISE_WARN_INTERVAL", 60)
+
+# ============================================================
 # TRUSTED REVERSE PROXIES
 # Every IP gate in this proxy (ALLOWED_IPS, ADMIN_IPS, STATS_VIEW_IPS,
 # per-user labels) reads the TCP peer address. Behind a reverse proxy that
