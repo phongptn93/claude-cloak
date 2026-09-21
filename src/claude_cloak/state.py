@@ -75,6 +75,13 @@ token_saver_stats: dict[str, Any] = {
     "beta_runtime_disabled": False,
 }
 
+# Proxy access keys, loaded from PROXY_KEYS_PATH at startup. `by_hash` is the
+# lookup every request goes through; `keys` is the record store keyed by id.
+proxy_keys: dict[str, Any] = {
+    "keys": {},  # key_id -> {label, hash, prefix, enabled, expires_at, ...}
+    "by_hash": {},  # sha256(secret) -> key_id
+}
+
 # Buffer of (ts_ns: str, labels: dict, fields: dict). Single-process,
 # single-event-loop FastAPI => no lock needed (list ops are atomic in CPython).
 loki_buffer: list[tuple[str, dict, dict]] = []
@@ -109,6 +116,7 @@ class Runtime:
 
     last_quota_save_at: float = 0.0
     last_coach_save_at: float = 0.0
+    last_keys_save_at: float = 0.0
 
     loki_dropped_count: int = 0
     loki_last_warn_at: float = 0.0

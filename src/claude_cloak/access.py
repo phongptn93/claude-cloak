@@ -93,6 +93,33 @@ def parse_user_prefix(path: str) -> tuple[str | None, str]:
     return None, path
 
 
+def is_valid_label(label: str) -> bool:
+    """True when `label` is a user label the URL prefix would also accept."""
+    return bool(label) and bool(settings.USER_LABEL_RE.match(label))
+
+
+def parse_key_prefix(path: str) -> tuple[str | None, str]:
+    """Strip a leading `/k/<key>/...` from path.
+
+    Returns (key, remaining_path), or (None, original_path) when the request
+    carries no key segment. The key itself is NOT validated here — a malformed
+    one is still returned so the caller can refuse the request outright rather
+    than forward a path shaped like a key attempt to Anthropic.
+
+    Client config example:
+        ANTHROPIC_BASE_URL=https://vm:9999/k/AbC123...
+    Claude Code then sends /k/AbC123.../v1/messages, which authenticates the
+    caller and is forwarded as /v1/messages.
+    """
+    segment = settings.PROXY_KEY_URL_SEGMENT
+    stripped = path.lstrip("/")
+    parts = stripped.split("/", 2)
+    if len(parts) >= 2 and parts[0] == segment and parts[1]:
+        rest = parts[2] if len(parts) > 2 else ""
+        return parts[1], "/" + rest
+    return None, path
+
+
 def current_user_period_key() -> str:
     """Period key used to detect roll-over: 'YYYY-MM' or 'YYYY-MM-DD'."""
     if settings.USER_QUOTA_PERIOD == "daily":

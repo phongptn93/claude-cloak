@@ -7,6 +7,7 @@ import sys
 from . import settings, state
 from .constants import BLOCKED_PATH_PATTERNS, SANITIZE_BODY_FIELDS, STRIP_REQUEST_HEADERS
 from .identity import _identity_age_days
+from .proxy_keys import active_key_count
 from .terminal import BOLD, CYAN, DIM, GREEN, MAGENTA, RESET, WHITE, YELLOW, mask_value
 
 
@@ -106,6 +107,17 @@ def print_status():
         quota_status = f"{YELLOW}OFF{RESET}"
     print(f"  {CYAN} Quota Track {RESET}{quota_status}")
     print(f"  {CYAN} User Quota  {RESET}{uq_status}")
+    if settings.PROXY_KEYS_ENABLED:
+        total = len(state.proxy_keys["keys"])
+        active = active_key_count()
+        gate = "bypasses ALLOWED_IPS" if settings.PROXY_KEY_BYPASS_IP_ALLOWLIST else "label only"
+        keys_status = (
+            f"{GREEN}ON{RESET} {DIM}({active} active of {total}, "
+            f"/{settings.PROXY_KEY_URL_SEGMENT}/<key>/ · {gate}){RESET}"
+        )
+    else:
+        keys_status = f"{YELLOW}OFF{RESET}"
+    print(f"  {CYAN} Proxy Keys  {RESET}{keys_status}")
     if settings.QUOTA_TRACKING_ENABLED:
         print(
             f"  {CYAN} Dashboard   {RESET}{WHITE}http://localhost:{settings.LOCAL_PORT}/dashboard{RESET}"

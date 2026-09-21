@@ -29,6 +29,12 @@ def build_request_headers(request: Request) -> dict[str, str]:
         if kl == "cookie":
             continue
 
+        # The proxy key authenticates the client TO THIS PROXY. Forwarding it
+        # would hand Anthropic a stable per-user identifier — exactly what
+        # every other layer here exists to remove.
+        if kl == settings.PROXY_KEY_HEADER:
+            continue
+
         headers[k] = v
 
     # Override identity headers với giá trị đã lock

@@ -21,3 +21,7 @@ def dashboard_html() -> str:
 
 def config_html() -> str:
     return page("config.html")
+
+
+def keys_html() -> str:
+    return page("keys.html")

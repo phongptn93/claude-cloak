@@ -134,6 +134,55 @@ TRUSTED_PROXY_IPS_RAW = env_str("TRUSTED_PROXY_IPS")
 TRUSTED_PROXY_NETWORKS = parse_allowed_networks(TRUSTED_PROXY_IPS_RAW)
 
 # ============================================================
+# PROXY ACCESS KEYS
+# A second door beside ALLOWED_IPS, for clients whose address moves: the
+# client carries a secret in its base URL (``/k/<key>``) or in
+# PROXY_KEY_HEADER, and the proxy admits it from any address. Keys are
+# issued and revoked from the /keys console; only their SHA-256 is stored.
+# Opt-in on purpose — turning this on widens who can reach the proxy, so it
+# is an .env decision, never a web-console one.
+# ============================================================
+PROXY_KEYS_ENABLED = env_bool("PROXY_KEYS_ENABLED", False)
+PROXY_KEYS_PATH = data_path(".keys.json", env_str("PROXY_KEYS_PATH"))
+PROXY_KEYS_PERSIST_INTERVAL_SECONDS = env_int("PROXY_KEYS_PERSIST_INTERVAL", 30)
+PROXY_KEYS_SCHEMA_VERSION = 1
+
+# A valid key admits the caller even when its address is not whitelisted —
+# which is the whole point. Set false to require BOTH (a key then only
+# labels the user, and ALLOWED_IPS still decides who gets in).
+PROXY_KEY_BYPASS_IP_ALLOWLIST = env_bool("PROXY_KEY_BYPASS_IP_ALLOWLIST", True)
+
+# URL segment that introduces a key: /<segment>/<key>/v1/messages. Anything
+# colliding with a real route would shadow it, so those names are refused.
+_RESERVED_URL_SEGMENTS = {
+    "u",
+    "v1",
+    "admin",
+    "config",
+    "keys",
+    "quota",
+    "health",
+    "dashboard",
+    "coach",
+    "whoami",
+}
+PROXY_KEY_URL_SEGMENT = env_str("PROXY_KEY_URL_SEGMENT", "k").strip("/") or "k"
+if PROXY_KEY_URL_SEGMENT in _RESERVED_URL_SEGMENTS or "/" in PROXY_KEY_URL_SEGMENT:
+    print(
+        f"  [WARN] PROXY_KEY_URL_SEGMENT={PROXY_KEY_URL_SEGMENT!r} collides with a "
+        f"built-in route — falling back to 'k'",
+        file=sys.stderr,
+    )
+    PROXY_KEY_URL_SEGMENT = "k"
+
+# Header alternative to the URL form, for clients that can set headers but
+# not the base path. Never forwarded upstream and never logged.
+PROXY_KEY_HEADER = (env_str("PROXY_KEY_HEADER", "x-cloak-key") or "x-cloak-key").lower()
+
+# Entropy of a new key, in bytes (token_urlsafe -> ~4/3 that many chars).
+PROXY_KEY_BYTES = min(64, max(16, env_int("PROXY_KEY_BYTES", 24)))
+
+# ============================================================
 # IDENTITY
 # ============================================================
 # When set, only this exact IP may lock the device identity on the first
