@@ -160,9 +160,20 @@ def _score(discipline, reliability, cache) -> int | None:
     return round(sum(v * weights[k] for k, v in have.items()) / sum(weights[k] for k in have))
 
 
+def _add_model(models: dict, key: str, m: dict) -> None:
+    agg = models.setdefault(key, {"requests": 0, "cost_usd": 0.0, **_tokens({})})
+    agg["requests"] += m.get("requests", 0) or 0
+    agg["cost_usd"] += m.get("cost_usd", 0.0) or 0.0
+    for f, n in _tokens(m).items():
+        agg[f] += n
+
+
+def _window_start() -> str:
+    return (datetime.now().date() - timedelta(days=WINDOW_DAYS - 1)).isoformat()
+
+
 def unit_stats() -> list[dict]:
-    today = datetime.now().date()
-    since = (today - timedelta(days=WINDOW_DAYS - 1)).isoformat()
+    since = _window_start()
     units: dict[str, dict] = {}
 
     def unit(label: str) -> dict:
@@ -197,6 +208,11 @@ def unit_stats() -> list[dict]:
             u["requests"] += row.get("requests", 0) or 0
             for f, n in _tokens(row).items():
                 u[f] += n
+            # Model mix over the same window. Days recorded before the
+            # per-model split existed simply contribute nothing here.
+            for key, m in (row.get("models") or {}).items():
+                if isinstance(m, dict):
+                    _add_model(u["models"], key, m)
     for day, by_sid in state.quota_stats["by_day_session"].items():
         if day < since:
             continue
@@ -207,19 +223,6 @@ def unit_stats() -> list[dict]:
             u = unit(label)
             u["sessions"].add(sid)
             u["session_cost"] += s.get("cost_usd", 0.0) or 0.0
-    # Model mix comes from the per-user buckets, which cover the current
-    # quota period rather than the rolling window.
-    for label, b in state.quota_stats["by_user"].items():
-        for key, m in (b.get("models") or {}).items():
-            if not isinstance(m, dict):
-                continue
-            u = unit(label)
-            u["users"].add(label)
-            agg = u["models"].setdefault(key, {"requests": 0, "cost_usd": 0.0, **_tokens({})})
-            agg["requests"] += m.get("requests", 0) or 0
-            agg["cost_usd"] += m.get("cost_usd", 0.0) or 0.0
-            for f, n in _tokens(m).items():
-                agg[f] += n
     for label, c in state.coach_stats.get("by_user", {}).items():
         u = unit(label)
         u["users"].add(label)
@@ -294,8 +297,21 @@ def recommendations(units: list[dict], weeks: list[dict]) -> list[dict]:
     recs: list[dict] = []
     who = "nhóm" if settings.USER_GROUPS else "người dùng"
 
-    # 1. A cheaper model in the same tier (whole team, current period).
-    for key, m in state.quota_stats["by_model"].items():
+    # 1. A cheaper model in the same tier (whole team, same window).
+    team: dict[str, dict] = {}
+    per_user: dict[str, dict[str, float]] = {}
+    since = _window_start()
+    for day, by_label in state.quota_stats["by_day_user"].items():
+        if day < since:
+            continue
+        for label, row in by_label.items():
+            for key, m in (row.get("models") or {}).items():
+                if not isinstance(m, dict):
+                    continue
+                _add_model(team, key, m)
+                spent = per_user.setdefault(key, {})
+                spent[label] = spent.get(label, 0.0) + (m.get("cost_usd", 0.0) or 0.0)
+    for key, m in team.items():
         alt = SUCCESSOR.get(key)
         if not alt or alt not in PRICING or key not in PRICING:
             continue
@@ -304,14 +320,7 @@ def recommendations(units: list[dict], weeks: list[dict]) -> list[dict]:
         saving = now - then
         if saving < 0.5:
             continue
-        users = sorted(
-            (
-                (label, (b.get("models") or {}).get(key, {}).get("cost_usd", 0.0))
-                for label, b in state.quota_stats["by_user"].items()
-            ),
-            key=lambda x: x[1],
-            reverse=True,
-        )
+        users = sorted(per_user.get(key, {}).items(), key=lambda x: x[1], reverse=True)
         top = [label for label, c in users if c > 0][:3]
         recs.append(
             {
@@ -321,11 +330,12 @@ def recommendations(units: list[dict], weeks: list[dict]) -> list[dict]:
                 "target": key,
                 "title": f"Chuyển {key} → {alt}: cùng hạng, rẻ hơn {round(saving / now * 100)}%",
                 "detail": (
-                    f"Kỳ này tiêu {_money(now)} trên {key}. Cùng lượng token đó trên {alt} là "
-                    f"{_money(then)}." + (f" Dùng nhiều nhất: {', '.join(top)}." if top else "")
+                    f"{WINDOW_DAYS} ngày qua tiêu {_money(now)} trên {key}. Cùng lượng token đó "
+                    f"trên {alt} là {_money(then)}."
+                    + (f" Dùng nhiều nhất: {', '.join(top)}." if top else "")
                 ),
                 "savings_usd": round(saving, 2),
-                "savings_window": "kỳ hiện tại",
+                "savings_window": f"{WINDOW_DAYS} ngày",
             }
         )
 
@@ -358,7 +368,7 @@ def recommendations(units: list[dict], weeks: list[dict]) -> list[dict]:
                     "Giữ Opus/Fable cho thiết kế và debug khó."
                 ),
                 "savings_usd": round(saving, 2),
-                "savings_window": "kỳ hiện tại",
+                "savings_window": f"{WINDOW_DAYS} ngày",
             }
         )
 

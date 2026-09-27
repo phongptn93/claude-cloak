@@ -297,7 +297,8 @@ CHARS_PER_TOKEN = env_int("CHARS_PER_TOKEN", 4)
 # ============================================================
 QUOTA_TRACKING_ENABLED = env_bool("QUOTA_TRACKING", True)
 QUOTA_MAX_SESSIONS = env_int("QUOTA_MAX_SESSIONS", 100)
-QUOTA_MAX_DAYS = env_int("QUOTA_MAX_DAYS", 30)
+# 90 days keeps ~13 ISO weeks, enough for the 8-week trend in Insights.
+QUOTA_MAX_DAYS = env_int("QUOTA_MAX_DAYS", 90)
 # Sessions kept per day in by_day_session (oldest-active dropped first).
 QUOTA_MAX_DAY_SESSIONS = env_int("QUOTA_MAX_DAY_SESSIONS", 500)
 QUOTA_MONTHLY_RESET = env_bool("QUOTA_MONTHLY_RESET", True)

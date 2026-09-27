@@ -163,3 +163,49 @@ def test_insights_are_empty_without_traffic():
     assert view["recommendations"] == []
     assert view["groups"] == []
     assert view["group_by"] == "user"
+
+
+def test_daily_user_bucket_keeps_a_per_model_split():
+    _record("phong", "s1", model="claude-opus-5")
+    _record("phong", "s1", model="claude-sonnet-5")
+    today = datetime.now().strftime("%Y-%m-%d")
+    models = state.quota_stats["by_day_user"][today]["phong"]["models"]
+    assert set(models) == {"opus-5", "sonnet-5"}
+    assert models["opus-5"]["requests"] == 1
+    assert sum(m["cost_usd"] for m in models.values()) == pytest.approx(
+        state.quota_stats["by_day_user"][today]["phong"]["cost_usd"]
+    )
+
+
+def test_model_mix_uses_the_same_30_day_window_as_the_other_columns():
+    usage = {"input_tokens": 1_000_000, "output_tokens": 400_000, "cache_read_input_tokens": 0}
+    _record("phong", "s1", model="claude-opus-5", usage=usage)
+    # A quota-period rollover empties the per-user buckets; the comparison
+    # must not lose its model mix with them.
+    state.quota_stats["by_user"]["phong"]["models"] = {}
+    # A day outside the window must not count, even with a model split.
+    old = (datetime.now() - timedelta(days=45)).strftime("%Y-%m-%d")
+    state.quota_stats["by_day_user"][old] = {
+        "phong": {
+            "requests": 1,
+            "cost_usd": 99.0,
+            "models": {"sonnet-5": {"requests": 1, "cost_usd": 99.0}},
+        }
+    }
+    unit = next(u for u in coach_insights()["groups"] if u["unit"] == "phong")
+    assert unit["top_tier_cost_share"] == 1.0
+    recs = coach_insights()["recommendations"]
+    successor = next(r for r in recs if r["target"] == "opus-5")
+    assert successor["savings_window"] == "30 ngày"
+
+
+def test_history_retention_covers_the_eight_week_trend():
+    assert settings.QUOTA_MAX_DAYS >= 8 * 7
+
+
+def test_caps_hint_matches_the_format_the_parser_reads():
+    from claude_cloak.config_console import CONFIG_SPECS
+
+    spec = next(s for s in CONFIG_SPECS if s["key"] == "USER_QUOTA_CAPS")
+    assert "phong:50" in spec["desc"]
+    assert "=" not in spec["desc"]

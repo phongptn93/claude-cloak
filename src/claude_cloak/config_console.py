@@ -209,7 +209,7 @@ CONFIG_SPECS: list[dict] = [
         "section": "Quota & cost",
         "min": 1,
         "max": 3650,
-        "desc": "Days of history kept for the trend chart.",
+        "desc": "Days of per-day history kept (trend chart, Activity, 8-week Insights trend).",
     },
     {
         "key": "QUOTA_MONTHLY_RESET",
@@ -280,7 +280,7 @@ CONFIG_SPECS: list[dict] = [
         "type": "str",
         "scope": "restart",
         "section": "Per-user quota",
-        "desc": "Per-user overrides, e.g. phong=50,nam=20.",
+        "desc": "Per-user overrides, e.g. phong:50,nam:20.",
     },
     {
         "key": "USER_GROUPS",

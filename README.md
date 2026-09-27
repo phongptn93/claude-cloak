@@ -432,12 +432,12 @@ Session counts per day come from `by_day_session` (quota schema v5). Days record
 
 The proxy reads `x-claude-code-session-id` from each **incoming** request (before the proxy rewrites it to the locked identity) and groups stats per session. So even though every device sends the same locked session-id outbound, the dashboard shows each device's own session distinctly.
 
-Daily buckets use **local time** (`datetime.now()`). The dashboard shows the most recent 15 days; the proxy keeps up to `QUOTA_MAX_DAYS` (default 30) on disk.
+Daily buckets use **local time** (`datetime.now()`). The dashboard shows the most recent 15 days; the proxy keeps up to `QUOTA_MAX_DAYS` (default 90) on disk, which is what the Activity view, the 30-day comparison and the 8-week trend read from.
 
 | Cap | Default | Behavior when exceeded |
 |---|---|---|
 | `QUOTA_MAX_SESSIONS` | 100 | Oldest session (by `last_seen`) evicted |
-| `QUOTA_MAX_DAYS`     | 30  | Oldest date evicted |
+| `QUOTA_MAX_DAYS`     | 90  | Oldest date evicted (with its per-user and per-session buckets) |
 
 ### Persistence
 
@@ -446,7 +446,7 @@ Counters are persisted to `.quota.json` next to `.env` so totals survive proxy r
 ```env
 QUOTA_PERSIST_INTERVAL=30      # Write at most every N seconds
 QUOTA_MAX_SESSIONS=100         # Cap on per-session buckets
-QUOTA_MAX_DAYS=30              # Cap on per-day buckets
+QUOTA_MAX_DAYS=90              # Cap on per-day buckets
 # QUOTA_PERSIST_PATH=          # Override location (default: .quota.json next to .env)
 ```
 
@@ -517,12 +517,12 @@ These roll up into a **practice score (0–100)** — a weighted blend of discip
 The coach also keeps its counters **per ISO week and per user** (`by_week`, `by_user` in `.coach.json`, schema v2). It combines them with the quota data into three things:
 
 - **Weekly trend** — for each of the last 8 weeks: spend, change vs the previous week, requests, sessions, $/session, $/request, cache hit rate, tool-error rate and reads per edit. The current week is marked as in progress.
-- **Comparison** — per group when `USER_GROUPS` is set, otherwise per user, over the last 30 days: spend, sessions, $/session, $/request, cache hit rate, share of spend on Opus/Fable, tool-error rate, reads per edit and a score. The dashboard marks the best and weakest value in each column.
+- **Comparison** — per group when `USER_GROUPS` is set, otherwise per user. Every column, the model mix included, covers the same last 30 days: spend, sessions, $/session, $/request, cache hit rate, share of spend on Opus/Fable, tool-error rate, reads per edit and a score. The dashboard marks the best and weakest value in each column.
 - **Recommendations**, sorted by estimated savings. Each is computed from the tokens actually sent and the live price table:
 
 | Advice | Fires when | Savings estimate |
 |---|---|---|
-| Same-tier cheaper model (e.g. `opus-4.8` → `opus-5.5`, `sonnet-4.6` → `sonnet-5`) | the older model has spend this period | the same tokens repriced at the successor's rates |
+| Same-tier cheaper model (e.g. `opus-4.8` → `opus-5.5`, `sonnet-4.6` → `sonnet-5`) | the older model has spend in the last 30 days | the same tokens repriced at the successor's rates |
 | Move routine work off Opus/Fable | ≥ 60% of a user's or group's spend is top-tier | 30% of that traffic repriced at `sonnet-5` |
 | Raise cache hit rate | ≥ 2 M input tokens and hit rate ≥ 10 points under the team median (at least 60%) | the extra cached tokens × (input − cache-read rate) |
 | Cache written but rarely read | cache writes ≥ 1 M tokens and more than cache reads | the write premium paid |

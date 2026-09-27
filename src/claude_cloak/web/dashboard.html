@@ -2735,7 +2735,7 @@
     const byGroup = c.group_by === 'group';
     $('cmp-title').textContent = byGroup ? 'Compare groups' : 'Compare users';
     $('cmp-first').textContent = byGroup ? 'Group' : 'User';
-    $('cmp-hint').textContent = `Last ${c.window_days || 30} days (model mix: current period). Green marks the best value in a column, amber the weakest`
+    $('cmp-hint').textContent = `Last ${c.window_days || 30} days for every column. Green marks the best value in a column, amber the weakest`
       + (byGroup ? '' : ' — set USER_GROUPS to compare teams');
     const units = sortRows(c.groups || [], sortState.cmp);
     $('cmp-empty').hidden = units.length > 0;

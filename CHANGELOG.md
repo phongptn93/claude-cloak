@@ -37,6 +37,13 @@ Notable changes to Claude Cloak. Format follows
     of the same file.
   - `GET /pricing`, `POST /admin/pricing/refresh`, and a price table on the
     dashboard.
+- `QUOTA_MAX_DAYS` now defaults to **90** (was 30), so the 8-week trend in
+  Insights has 8 weeks of data. Evicting a day also drops its per-user and
+  per-session buckets.
+- The per-user daily bucket (`by_day_user`) now carries a per-model split.
+  The Insights comparison and recommendations read their model mix from the
+  same 30 days as every other column. Previously it came from the current
+  quota period, which a rollover emptied.
 - **Dashboard shell** — the top tabs are replaced by a sidebar console with page
   headers, a mobile menu and a loading state.
 
@@ -84,6 +91,9 @@ Notable changes to Claude Cloak. Format follows
 
 ### Fixed
 
+- The `/config` hint for `USER_QUOTA_CAPS` showed `phong=50,nam=20`, but the
+  parser reads `label:usd` (`phong:50,nam:20`). An entry typed from the hint
+  was silently ignored.
 - `claude-opus-5-5` was billed at the Opus 5 rate ($5/$25) instead of its own
   $4/$20 with $0.20 cache reads, because no `opus-5.5` key existed and the id
   contains `opus-5`. A test now lists every served model id and fails if any

@@ -233,6 +233,25 @@ def _record_usage(
         dub["cache_read_input_tokens"] += cr_t
         dub["cache_creation_input_tokens"] += cw_t
         dub["cost_usd"] += cost
+        # Per-model split, so model mix can be read over any window of days
+        # rather than only over the current quota period.
+        dm = dub.setdefault("models", {}).setdefault(
+            model_key,
+            {
+                "requests": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cost_usd": 0.0,
+            },
+        )
+        dm["requests"] += 1
+        dm["input_tokens"] += in_t
+        dm["output_tokens"] += out_t
+        dm["cache_read_input_tokens"] += cr_t
+        dm["cache_creation_input_tokens"] += cw_t
+        dm["cost_usd"] += cost
         # Cap dates the same way by_day is capped, so the two stay in lockstep.
         _evict_by_day_user_to_match_by_day()
 
