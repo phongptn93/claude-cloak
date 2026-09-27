@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager, suppress
 import httpx
 from fastapi import FastAPI
 
-from . import settings, state
+from . import pricing, settings, state
 from .banner import print_banner, print_status
 from .coach import _load_coach_stats, _save_coach_stats
 from .env import ENV_PATH, save_to_env
@@ -17,6 +17,7 @@ from .middleware import AccessControlMiddleware
 from .proxy_keys import load_keys, save_keys
 from .quota.persist import _load_quota_stats, _save_quota_stats
 from .routes import admin, coach, config, health, keys, pages, passthrough, quota
+from .routes import pricing as pricing_routes
 from .terminal import RESET, YELLOW, log
 
 
@@ -80,13 +81,21 @@ async def lifespan(app: FastAPI):
     _load_quota_stats()
     _load_coach_stats()
     load_keys()
+    pricing.load_cached_remote()
     print_banner()
     print_status()
     if settings.LOKI_ENABLED:
         state.runtime.loki_flusher_task = asyncio.create_task(_loki_flusher_loop())
+    if pricing.PRICING_REMOTE_URL:
+        state.runtime.pricing_sync_task = asyncio.create_task(pricing.remote_pricing_loop())
     try:
         yield
     finally:
+        sync = state.runtime.pricing_sync_task
+        if sync is not None:
+            sync.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await sync
         task = state.runtime.loki_flusher_task
         if task is not None:
             task.cancel()
@@ -110,7 +119,7 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     application = FastAPI(title="Claude Cloak", lifespan=lifespan)
     application.add_middleware(AccessControlMiddleware)
-    for module in (health, pages, config, keys, coach, quota, admin):
+    for module in (health, pages, config, keys, coach, quota, pricing_routes, admin):
         application.include_router(module.router)
     # Catch-all last: it matches every remaining path.
     application.include_router(passthrough.router)

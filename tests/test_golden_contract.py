@@ -29,6 +29,9 @@ ADDED_SINCE_BASELINE = {
     # TLS certificate expiry, so a renewal that stops working is visible
     # before it becomes an outage.
     "health": [".tls"],
+    # Coach insights: weekly trend, per-group/user comparison and
+    # recommendations priced from real usage.
+    "coach": [".group_by", ".groups", ".recommendations", ".weekly", ".window_days"],
 }
 
 ENDPOINTS = {

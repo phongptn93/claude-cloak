@@ -237,6 +237,18 @@ for _pair in env_str("USER_QUOTA_CAPS").split(","):
     except ValueError:
         print(f"  [WARN] Invalid USER_QUOTA_CAPS entry ignored: {_pair!r}", file=sys.stderr)
 
+# Reporting groups (team, project, …) for the dashboard and coach, e.g.
+# USER_GROUPS=phong:backend,huy:backend,linh:frontend. Same label:value shape
+# as USER_QUOTA_CAPS. A user with no entry is reported as ungrouped.
+USER_GROUPS: dict[str, str] = {}
+for _pair in env_str("USER_GROUPS").split(","):
+    _pair = _pair.strip()
+    if ":" not in _pair:
+        continue
+    _label, _group = _pair.split(":", 1)
+    if _label.strip() and _group.strip():
+        USER_GROUPS[_label.strip()] = _group.strip()
+
 # Allowed character set for URL-prefix user labels — restricted so a label
 # cannot inject path traversal or query strings into the upstream URL.
 USER_LABEL_PATTERN = env_str("USER_LABEL_PATTERN", r"[A-Za-z0-9._-]{1,64}")
@@ -286,11 +298,13 @@ CHARS_PER_TOKEN = env_int("CHARS_PER_TOKEN", 4)
 QUOTA_TRACKING_ENABLED = env_bool("QUOTA_TRACKING", True)
 QUOTA_MAX_SESSIONS = env_int("QUOTA_MAX_SESSIONS", 100)
 QUOTA_MAX_DAYS = env_int("QUOTA_MAX_DAYS", 30)
+# Sessions kept per day in by_day_session (oldest-active dropped first).
+QUOTA_MAX_DAY_SESSIONS = env_int("QUOTA_MAX_DAY_SESSIONS", 500)
 QUOTA_MONTHLY_RESET = env_bool("QUOTA_MONTHLY_RESET", True)
 
 QUOTA_PERSIST_PATH = data_path(".quota.json", env_str("QUOTA_PERSIST_PATH"))
 QUOTA_PERSIST_INTERVAL_SECONDS = env_int("QUOTA_PERSIST_INTERVAL", 30)
-QUOTA_SCHEMA_VERSION = 4  # v1=base, v2 +by_session+by_day, v3 +by_user, v4 +by_day_user+user.models
+QUOTA_SCHEMA_VERSION = 5  # v1=base, v2 +by_session+by_day, v3 +by_user, v4 +by_day_user+user.models, v5 +by_day_session
 QUOTA_SCHEMA_MIN_LOAD = 1  # accept v1+ files for forward migration
 
 # Cap on how many bytes the usage extractor buffers per response, so a
@@ -355,7 +369,7 @@ if LOKI_LABELS_RAW:
 # ============================================================
 COACH_ENABLED = env_bool("COACH_ENABLED", True)
 COACH_PERSIST_PATH = data_path(".coach.json", env_str("COACH_PERSIST_PATH"))
-COACH_SCHEMA_VERSION = 1
+COACH_SCHEMA_VERSION = 2  # v2 +by_week +by_user
 
 # ============================================================
 # CONFIG CONSOLE (/config)

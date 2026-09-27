@@ -1,0 +1,165 @@
+"""Per-day session tracking, /quota/activity, /pricing and coach insights."""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta
+
+import httpx
+import pytest
+
+from claude_cloak import settings, state
+from claude_cloak.app import create_app
+from claude_cloak.coach import _coach_record_response
+from claude_cloak.coach_insights import coach_insights
+from claude_cloak.quota.usage import _record_usage
+
+USAGE = {"input_tokens": 1_000, "output_tokens": 500, "cache_read_input_tokens": 9_000}
+
+
+@pytest.fixture
+def client():
+    return httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=create_app()), base_url="http://testserver"
+    )
+
+
+def _record(user, session, model="claude-sonnet-5", usage=USAGE):
+    _record_usage(model, dict(usage), session_id=session, user_label=user)
+
+
+async def test_activity_counts_sessions_per_user_per_day(client):
+    _record("phong", "s1")
+    _record("phong", "s1")
+    _record("phong", "s2")
+    _record("huy", "s3")
+    async with client:
+        body = (await client.get("/quota/activity")).json()
+
+    today = body["days"][0]
+    assert today["date"] == body["today"]
+    assert today["sessions"] == 3
+    phong = next(u for u in today["users"] if u["user_label"] == "phong")
+    assert phong["sessions"] == 2
+    assert phong["requests"] == 3
+    assert phong["cost_per_session"] == pytest.approx(phong["cost_usd"] / 2)
+
+    summary = next(u for u in body["users"] if u["user_label"] == "phong")
+    assert summary["today"]["sessions"] == 2
+    assert summary["yesterday"]["sessions"] == 0
+    assert len(summary["daily_cost"]) == 14
+    assert summary["daily_cost"][-1] == pytest.approx(phong["cost_usd"])
+
+
+async def test_days_before_session_tracking_report_unknown_not_zero(client):
+    day = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
+    state.quota_stats["by_day"][day] = {
+        "date": day,
+        "requests": 4,
+        "input_tokens": 10,
+        "output_tokens": 10,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cost_usd": 1.0,
+    }
+    state.quota_stats["by_day_user"][day] = {
+        "phong": {
+            "date": day,
+            "user_label": "phong",
+            "requests": 4,
+            "input_tokens": 10,
+            "output_tokens": 10,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cost_usd": 1.0,
+        }
+    }
+    async with client:
+        body = (await client.get("/quota/activity")).json()
+        detail = (await client.get(f"/quota/activity/{day}")).json()
+    old = next(d for d in body["days"] if d["date"] == day)
+    assert old["sessions"] is None
+    assert old["users"][0]["sessions"] is None
+    assert old["users"][0]["cost_per_session"] is None
+    assert detail["tracked"] is False
+
+
+async def test_day_sessions_can_be_filtered_by_user(client):
+    _record("phong", "s1")
+    _record("huy", "s2")
+    today = datetime.now().strftime("%Y-%m-%d")
+    async with client:
+        body = (await client.get(f"/quota/activity/{today}", params={"user": "huy"})).json()
+        bad = await client.get("/quota/activity/27-09-2026")
+    assert [s["session_id"] for s in body["sessions"]] == ["s2"]
+    assert body["tracked"] is True
+    assert bad.status_code == 400
+
+
+async def test_groups_roll_users_up(client, monkeypatch):
+    monkeypatch.setattr(settings, "USER_GROUPS", {"phong": "backend", "huy": "backend"})
+    _record("phong", "s1")
+    _record("huy", "s2")
+    _record("linh", "s3")
+    async with client:
+        body = (await client.get("/quota/activity")).json()
+    assert body["groups_configured"] is True
+    groups = {g["group"]: g for g in body["groups"]}
+    assert groups["backend"]["users"] == 2
+    assert groups["backend"]["today"]["sessions"] == 2
+    assert groups[""]["users"] == 1
+
+
+def test_day_session_buckets_follow_by_day_eviction(monkeypatch):
+    monkeypatch.setattr(settings, "QUOTA_MAX_DAYS", 1)
+    old = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
+    state.quota_stats["by_day_session"][old] = {"x": {"session_id": "x"}}
+    state.quota_stats["by_day"][old] = {"date": old}
+    _record("phong", "s1")
+    assert old not in state.quota_stats["by_day_session"]
+
+
+async def test_pricing_endpoint_reports_the_table(client):
+    async with client:
+        body = (await client.get("/pricing")).json()
+    assert body["origin"] == "bundled"
+    models = {m["model"]: m for m in body["models"]}
+    assert models["opus-5.5"]["input"] == 4.0
+    assert "unpriced_models" in body
+
+
+async def test_pricing_refresh_needs_a_remote_url(client):
+    async with client:
+        r = await client.post("/admin/pricing/refresh")
+    assert r.status_code == 409
+
+
+def test_coach_tracks_weeks_and_users():
+    _coach_record_response({"Read": 2, "Edit": 1}, "end_turn", "phong")
+    week = next(iter(state.coach_stats["by_week"].values()))
+    assert week == {"turns": 1, "tool_results": 0, "tool_errors": 0, "reads": 2, "edits": 1}
+    assert state.coach_stats["by_user"]["phong"]["reads"] == 2
+
+
+def test_successor_recommendation_is_priced_from_real_tokens():
+    usage = {"input_tokens": 400_000, "output_tokens": 200_000, "cache_read_input_tokens": 0}
+    _record("phong", "s1", model="claude-opus-5", usage=usage)
+    recs = coach_insights()["recommendations"]
+    rec = next(r for r in recs if r["target"] == "opus-5" and r["kind"] == "model")
+    # $5/$25 -> $4/$20: 0.4M*$1 + 0.2M*$5 saved.
+    assert rec["savings_usd"] == pytest.approx(0.4 + 1.0, abs=0.01)
+
+
+def test_heavy_opus_use_suggests_moving_part_of_it():
+    usage = {"input_tokens": 1_000_000, "output_tokens": 400_000, "cache_read_input_tokens": 0}
+    _record("phong", "s1", model="claude-opus-5-5", usage=usage)
+    recs = coach_insights()["recommendations"]
+    rec = next(r for r in recs if r["scope"] == "user" and r["target"] == "phong")
+    # opus-5.5 $4/$20 vs sonnet-5 $2/$10 on the same tokens, 30% moved.
+    assert rec["savings_usd"] == pytest.approx(0.3 * (2.0 + 4.0), abs=0.01)
+
+
+def test_insights_are_empty_without_traffic():
+    view = coach_insights()
+    assert view["recommendations"] == []
+    assert view["groups"] == []
+    assert view["group_by"] == "user"

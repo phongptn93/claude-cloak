@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import re
+
 from fastapi import APIRouter, HTTPException, Request
 
 from .. import settings, state
 from ..access import seconds_until_user_period_reset
+from ..quota.activity import activity_view, day_sessions_view
 from ..quota.users import _user_bucket_view, get_or_create_user_bucket
 from ..upstream import _stream_health_view
 
 router = APIRouter()
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 @router.get("/quota")
@@ -163,6 +168,20 @@ async def quota():
         },
     }
     return summary
+
+
+@router.get("/quota/activity")
+async def quota_activity(days: int = 30):
+    """Per-day, per-user spend with session counts and today/yesterday/7-day windows."""
+    return activity_view(days)
+
+
+@router.get("/quota/activity/{day}")
+async def quota_activity_day(day: str, user: str | None = None):
+    """Sessions recorded on one day (YYYY-MM-DD), optionally for one user."""
+    if not _DATE_RE.match(day):
+        raise HTTPException(status_code=400, detail="day must be YYYY-MM-DD")
+    return day_sessions_view(day, user)
 
 
 @router.get("/quota/users")

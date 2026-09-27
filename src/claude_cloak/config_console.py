@@ -282,6 +282,13 @@ CONFIG_SPECS: list[dict] = [
         "section": "Per-user quota",
         "desc": "Per-user overrides, e.g. phong=50,nam=20.",
     },
+    {
+        "key": "USER_GROUPS",
+        "type": "str",
+        "scope": "restart",
+        "section": "Per-user quota",
+        "desc": "Reporting groups for the dashboard and coach, e.g. phong:backend,huy:backend,linh:frontend.",
+    },
     # ---- Coaching ----
     {
         "key": "COACH_ENABLED",

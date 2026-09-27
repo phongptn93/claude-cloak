@@ -159,7 +159,8 @@ class AccessControlMiddleware:
                 "/quota/users",
                 "/dashboard",
                 "/coach",
-            ) or raw_path.startswith("/quota/users/")
+                "/pricing",
+            ) or raw_path.startswith(("/quota/users/", "/quota/activity"))
             if is_stats and client_ip not in settings.STATS_VIEW_IPS:
                 await JSONResponse({"error": "forbidden"}, status_code=403)(scope, receive, send)
                 return

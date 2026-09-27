@@ -95,6 +95,15 @@ def _load_quota_stats() -> bool:
             if cleaned:
                 state.quota_stats["by_day_user"][date_str] = cleaned
 
+    # v5 — per-day per-session buckets (absent before v5, default empty).
+    bds = data.get("by_day_session")
+    if isinstance(bds, dict):
+        for date_str, by_sid in bds.items():
+            if isinstance(by_sid, dict):
+                cleaned = {sid: e for sid, e in by_sid.items() if isinstance(e, dict)}
+                if cleaned:
+                    state.quota_stats["by_day_session"][date_str] = cleaned
+
     _check_monthly_reset()
     return True
 
@@ -125,6 +134,7 @@ def _save_quota_stats(force: bool = False) -> None:
         "by_session": state.quota_stats["by_session"],
         "by_day": state.quota_stats["by_day"],
         "by_day_user": state.quota_stats["by_day_user"],
+        "by_day_session": state.quota_stats["by_day_session"],
         "by_user": state.quota_stats["by_user"],
         "period_month": state.quota_stats["period_month"],
     }
@@ -143,7 +153,8 @@ def _check_monthly_reset() -> None:
     """Auto-reset period totals when the calendar month rolls over.
 
     by_day history is always kept so the trend chart stays intact.
-    Only cost_usd_total, usage_total, by_model, and by_session are cleared.
+    Only cost_usd_total, usage_total, by_model, and by_session are cleared;
+    the per-day buckets (by_day, by_day_user, by_day_session) are kept.
     """
     if not settings.QUOTA_TRACKING_ENABLED or not settings.QUOTA_MONTHLY_RESET:
         return
@@ -168,16 +179,17 @@ def _check_monthly_reset() -> None:
 
 
 def _evict_by_day_user_to_match_by_day() -> None:
-    """Keep by_day_user's date set ⊆ by_day's date set.
+    """Keep by_day_user's and by_day_session's date sets ⊆ by_day's date set.
 
     by_day is the canonical date list (eviction-capped via _evict_oldest);
     by_day_user just adds the user dimension, so we drop any date that's
     no longer present in by_day to avoid orphan stats.
     """
     valid = set(state.quota_stats["by_day"].keys())
-    for d in list(state.quota_stats["by_day_user"].keys()):
-        if d not in valid:
-            del state.quota_stats["by_day_user"][d]
+    for field in ("by_day_user", "by_day_session"):
+        for d in list(state.quota_stats[field].keys()):
+            if d not in valid:
+                del state.quota_stats[field][d]
 
 
 def _evict_oldest(field: str, sort_key: str, max_entries: int) -> None:

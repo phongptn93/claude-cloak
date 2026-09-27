@@ -8,6 +8,38 @@ Notable changes to Claude Cloak. Format follows
 
 ### Added
 
+- **Activity view** in `/dashboard`, answering "who used Claude Code, how many
+  sessions, and what did each session cost":
+  - Range (today / yesterday / 7 / 30 days) and user-or-group filters.
+  - KPIs compared with the previous period of the same length.
+  - A per-user **today vs yesterday** table with sessions, spend and $/session
+    for each day, plus a 14-day sparkline.
+  - A users × days **heatmap**; clicking a cell opens that day's sessions in a
+    side panel.
+  - A **breakdown** grouped by day, ISO week, user or group.
+  - Backed by a new per-day session bucket (`by_day_session`, quota schema v5)
+    and by `GET /quota/activity` and `GET /quota/activity/{day}`.
+- **`USER_GROUPS`** (`label:group,…`), which rolls users up into teams across
+  the dashboard and the coach.
+- **Coach insights** (`/coach`, and the **Insights** view):
+  - Counters per ISO week and per user (`.coach.json` schema v2).
+  - An 8-week trend.
+  - A per-user or per-group comparison.
+  - Recommendations priced from the tokens actually sent: a same-tier cheaper
+    model, moving routine work off Opus/Fable, cache hit rate, cache writes
+    that are never read back, expensive sessions, tool errors, and week-over-week
+    spend jumps.
+- **Price table as data**:
+  - Prices moved from code to `data/pricing.json`, with per-model
+    `effective_from` dates so a known change can be scheduled.
+  - Optional `PRICING_REMOTE_URL` sync, validated before use and cached for
+    restarts. Anthropic has no pricing API, so this fetches a maintained copy
+    of the same file.
+  - `GET /pricing`, `POST /admin/pricing/refresh`, and a price table on the
+    dashboard.
+- **Dashboard shell** — the top tabs are replaced by a sidebar console with page
+  headers, a mobile menu and a loading state.
+
 - **Dashboard redesign** — `/dashboard` is now a tabbed management console
   (Overview, Users, Sessions, Usage & Models, Performance, Coaching). There are
   no API changes: it reads the same `/quota`, `/coach` and `/health`.
@@ -52,6 +84,10 @@ Notable changes to Claude Cloak. Format follows
 
 ### Fixed
 
+- `claude-opus-5-5` was billed at the Opus 5 rate ($5/$25) instead of its own
+  $4/$20 with $0.20 cache reads, because no `opus-5.5` key existed and the id
+  contains `opus-5`. A test now lists every served model id and fails if any
+  of them resolves to no price or to the wrong sibling.
 - **Two model prices were wrong, both in the direction of over-reporting
   spend.** Claude Sonnet 5 carried the Sonnet 4.x rate of $3/$15 per MTok
   instead of its list price of $2/$10, inflating every Sonnet 5 line by 50%

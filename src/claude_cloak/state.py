@@ -33,6 +33,7 @@ quota_stats: dict[str, Any] = {
     "by_session": {},  # session_id -> {requests, tokens, cost_usd, first_seen, last_seen}
     "by_day": {},  # YYYY-MM-DD -> {requests, tokens, cost_usd}
     "by_day_user": {},  # YYYY-MM-DD -> {user_label -> {requests, tokens, cost_usd}}
+    "by_day_session": {},  # YYYY-MM-DD -> {session_id -> {user_label, requests, tokens, cost_usd, ...}}
     "by_user": {},  # label -> {cap_usd, period_key, cost_usd, requests, tokens, blocked_count, models, ...}
     "messages_requests": 0,
     "last_request_at": None,
@@ -61,6 +62,8 @@ coach_stats: dict[str, Any] = {
     "assistant_turns": 0,  # /v1/messages responses processed
     "stop_reasons": {},  # stop_reason -> count
     "by_hour": {},  # "0".."23" -> assistant_turns (local time)
+    "by_week": {},  # ISO week "2026-W39" -> {turns, tool_results, tool_errors, reads, edits}
+    "by_user": {},  # user label -> same counters, for group comparison
     "first_seen": None,
     "last_seen": None,
 }
@@ -121,6 +124,7 @@ class Runtime:
     loki_dropped_count: int = 0
     loki_last_warn_at: float = 0.0
     loki_flusher_task: asyncio.Task | None = None
+    pricing_sync_task: asyncio.Task | None = None
 
     http_client: httpx.AsyncClient | None = None
     telemetry_client: httpx.AsyncClient | None = None
