@@ -8,6 +8,25 @@ Notable changes to Claude Cloak. Format follows
 
 ### Added
 
+- **Dashboard redesign** — `/dashboard` is now a tabbed management console
+  (Overview, Users, Sessions, Usage & Models, Performance, Coaching). There are
+  no API changes: it reads the same `/quota`, `/coach` and `/health`.
+  - An alerts strip for rate limits, users near or over their cap, upstream
+    stalls, pool saturation, unpriced models, TLS expiry and an identity that
+    has not been captured, with count badges on the tabs.
+  - New KPIs: today's cost vs yesterday, a projected month-end spend, active
+    users and sessions, and a proxy-status panel.
+  - The Users, Sessions and Models tables can be searched, filtered and sorted.
+    Users and Models rows expand to show details, Sessions is paginated, and
+    every table exports to CSV.
+  - A per-user **Reset** action that calls `POST /admin/quota/reset/<label>`
+    (`ADMIN_IPS` only).
+  - Light and dark themes, a configurable or paused auto-refresh that stops
+    while the tab is hidden, keyboard shortcuts, and navigation links to
+    `/keys` and `/config`.
+  - User labels, model names and tips are now HTML-escaped before they are
+    rendered.
+
 - **Proxy access keys** — a second door beside `ALLOWED_IPS`, for clients whose
   address is dynamic. A key is a high-entropy secret the client carries in its
   base URL (`ANTHROPIC_BASE_URL=https://vm:9999/k/<key>`) or in

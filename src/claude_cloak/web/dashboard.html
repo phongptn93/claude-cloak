@@ -1,29 +1,78 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Claude Cloak — Quota & Cost Dashboard</title>
+<title>Claude Cloak — Dashboard</title>
 <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<script>
+  // Apply the saved theme before first paint so the page never flashes.
+  try {
+    const t = localStorage.getItem('cc.theme');
+    if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+  } catch (e) {}
+</script>
 <style>
   /*  Design tokens  ------------------------------------------------------- */
-  :root {
+  :root, :root[data-theme="dark"] {
     --bg-0:        #0a0a0d;
     --bg-1:        #111118;
-    --bg-2:        #1a1a24;
+    --bg-2:        #181822;
     --bg-3:        #232330;
     --border:      #2a2a3a;
-    --border-soft: #1f1f2c;
+    --border-soft: #1d1d29;
     --text:        #ebebf0;
     --text-soft:   #b8b8c4;
     --muted:       #7c7c8c;
     --muted-2:     #555566;
     --accent:      #c084fc;
     --accent-2:    #67e8f9;
+    --accent-bg:   rgba(192,132,252,.12);
     --ok:          #4ade80;
+    --ok-bg:       rgba(74,222,128,.10);
     --warn:        #fbbf24;
+    --warn-bg:     rgba(251,191,36,.10);
     --danger:      #f87171;
+    --danger-bg:   rgba(248,113,113,.10);
+    --info:        #60a5fa;
+    --info-bg:     rgba(96,165,250,.10);
+    --topbar-bg:   rgba(10,10,13,.85);
     --shadow:      0 1px 3px rgba(0,0,0,.4), 0 1px 0 rgba(255,255,255,.02) inset;
+    --chart-grid:  #22222e;
+    --chart-tick:  #7c7c8c;
+    --chart-bg:    #111118;
+    color-scheme: dark;
+  }
+  :root[data-theme="light"] {
+    --bg-0:        #f5f5f8;
+    --bg-1:        #ffffff;
+    --bg-2:        #f1f1f5;
+    --bg-3:        #e5e5ec;
+    --border:      #dcdce4;
+    --border-soft: #e8e8ee;
+    --text:        #17171f;
+    --text-soft:   #3f3f4c;
+    --muted:       #6b6b7a;
+    --muted-2:     #9a9aa8;
+    --accent:      #8b3fd9;
+    --accent-2:    #0e8fa6;
+    --accent-bg:   rgba(139,63,217,.09);
+    --ok:          #15803d;
+    --ok-bg:       rgba(21,128,61,.09);
+    --warn:        #b45309;
+    --warn-bg:     rgba(180,83,9,.09);
+    --danger:      #dc2626;
+    --danger-bg:   rgba(220,38,38,.08);
+    --info:        #2563eb;
+    --info-bg:     rgba(37,99,235,.08);
+    --topbar-bg:   rgba(255,255,255,.88);
+    --shadow:      0 1px 2px rgba(20,20,40,.06);
+    --chart-grid:  #ececf2;
+    --chart-tick:  #6b6b7a;
+    --chart-bg:    #ffffff;
+    color-scheme: light;
+  }
+  :root {
     --radius:      10px;
     --radius-sm:   6px;
     --font-sans:   -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, system-ui, sans-serif;
@@ -42,659 +91,915 @@
     min-height: 100vh;
   }
   .num, code { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+  code { font-size: .92em; }
   a { color: var(--accent-2); text-decoration: none; }
   a:hover { text-decoration: underline; }
+  button, input, select { font: inherit; color: inherit; }
+  [hidden] { display: none !important; }
 
   /*  Top bar  ------------------------------------------------------------ */
   .topbar {
-    position: sticky; top: 0; z-index: 10;
-    display: flex; align-items: center; gap: 16px;
-    padding: 14px 28px;
-    background: rgba(10,10,13,.85);
-    backdrop-filter: blur(8px);
+    position: sticky; top: 0; z-index: 20;
+    background: var(--topbar-bg);
+    backdrop-filter: blur(10px);
     border-bottom: 1px solid var(--border);
   }
-  .brand {
-    display: flex; align-items: center; gap: 10px;
-    font-weight: 600; letter-spacing: 0.01em;
+  .topbar-row {
+    max-width: 1400px; margin: 0 auto;
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 28px;
   }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; white-space: nowrap; }
   .brand-mark {
-    width: 22px; height: 22px;
+    width: 22px; height: 22px; border-radius: 5px;
     background: linear-gradient(135deg, var(--accent), var(--accent-2));
-    border-radius: 5px;
     box-shadow: 0 0 12px rgba(192,132,252,.35);
   }
-  .brand-name { color: var(--text); }
-  .brand-tag  { color: var(--muted); font-weight: 500; font-size: 12px; margin-left: 4px; }
-  .topbar-spacer { flex: 1; }
+  .brand-tag { color: var(--muted); font-weight: 500; font-size: 12px; }
+  .app-nav { display: flex; gap: 2px; margin-left: 12px; }
+  .app-nav a {
+    padding: 5px 10px; border-radius: var(--radius-sm);
+    color: var(--muted); font-size: 13px; font-weight: 500;
+  }
+  .app-nav a:hover { color: var(--text); background: var(--bg-2); text-decoration: none; }
+  .app-nav a.current { color: var(--text); background: var(--bg-2); }
+  .spacer { flex: 1; }
   .pill {
     display: inline-flex; align-items: center; gap: 6px;
-    padding: 5px 11px;
+    padding: 4px 10px;
     background: var(--bg-2);
     border: 1px solid var(--border);
     border-radius: 999px;
-    font-size: 12px;
-    color: var(--text-soft);
+    font-size: 12px; color: var(--text-soft); white-space: nowrap;
   }
-  .pill.live   { color: var(--ok); }
-  .pill.error  { color: var(--danger); }
-  .pill .dot {
-    width: 7px; height: 7px; border-radius: 50%;
-    background: currentColor;
-    box-shadow: 0 0 0 0 currentColor;
-    animation: pulse 2s infinite;
-  }
-  .pill.error .dot { animation: none; }
+  .pill.live  { color: var(--ok); }
+  .pill.error { color: var(--danger); }
+  .pill.paused { color: var(--warn); }
+  .pill .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+  .pill.live .dot { animation: pulse 2s infinite; }
   @keyframes pulse {
     0%   { box-shadow: 0 0 0 0   rgba(74,222,128,.45); }
     70%  { box-shadow: 0 0 0 6px rgba(74,222,128,0); }
     100% { box-shadow: 0 0 0 0   rgba(74,222,128,0); }
   }
+  .ctrl {
+    display: inline-flex; align-items: center; gap: 6px;
+    height: 30px; padding: 0 10px;
+    background: var(--bg-2); border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    font-size: 12px; color: var(--text-soft);
+    cursor: pointer;
+  }
+  .ctrl:hover { border-color: var(--muted-2); color: var(--text); }
+  .ctrl:focus-visible, .tab:focus-visible, th.sortable:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  select.ctrl { padding-right: 6px; }
+  .ctrl.icon { width: 30px; padding: 0; justify-content: center; font-size: 14px; }
+
+  /*  Tabs  ---------------------------------------------------------------- */
+  .tabs {
+    max-width: 1400px; margin: 0 auto;
+    display: flex; gap: 4px; padding: 0 20px;
+    overflow-x: auto; scrollbar-width: none;
+  }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tab {
+    position: relative;
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 10px 12px 11px;
+    background: none; border: 0; cursor: pointer;
+    color: var(--muted); font-size: 13px; font-weight: 500; white-space: nowrap;
+  }
+  .tab:hover { color: var(--text); }
+  .tab[aria-selected="true"] { color: var(--text); }
+  .tab[aria-selected="true"]::after {
+    content: ""; position: absolute; left: 8px; right: 8px; bottom: -1px; height: 2px;
+    background: linear-gradient(90deg, var(--accent), var(--accent-2)); border-radius: 2px;
+  }
+  .tab .count {
+    min-width: 18px; padding: 0 6px; border-radius: 999px;
+    background: var(--bg-3); color: var(--text-soft);
+    font: 600 11px/18px var(--font-mono); text-align: center;
+  }
+  .tab .count.danger { background: var(--danger-bg); color: var(--danger); }
+  .tab .count.warn   { background: var(--warn-bg);   color: var(--warn); }
 
   /*  Layout  ------------------------------------------------------------- */
-  main {
-    max-width: 1320px; margin: 0 auto;
-    padding: 28px;
-  }
-  section { margin-bottom: 32px; }
-  .section-head {
-    display: flex; align-items: baseline; gap: 12px;
-    margin: 0 4px 14px;
-  }
+  main { max-width: 1400px; margin: 0 auto; padding: 24px 28px 8px; }
+  .view { display: none; }
+  .view.active { display: block; animation: fade .18s ease-out; }
+  @keyframes fade { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+  section { margin-bottom: 28px; }
+  .section-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin: 0 2px 12px; }
   .section-head h2 {
-    margin: 0;
-    font-size: 12px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.1em;
-    color: var(--muted);
+    margin: 0; font-size: 12px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .1em; color: var(--muted);
   }
-  .section-head .hint {
-    font-size: 12px;
-    color: var(--muted-2);
+  .section-head .hint { font-size: 12px; color: var(--muted-2); }
+  .section-head .spacer { flex: 1; }
+
+  /*  Alerts  -------------------------------------------------------------- */
+  .alerts { display: grid; gap: 8px; margin-bottom: 22px; }
+  .alert {
+    display: flex; align-items: flex-start; gap: 10px;
+    padding: 10px 14px;
+    border: 1px solid var(--border); border-left-width: 3px;
+    border-radius: var(--radius-sm);
+    background: var(--bg-1);
+    font-size: 13px; color: var(--text-soft);
   }
+  .alert .ic { font-weight: 700; width: 16px; text-align: center; flex: none; }
+  .alert strong { color: var(--text); font-weight: 600; }
+  .alert .go { margin-left: auto; font-size: 12px; white-space: nowrap; cursor: pointer; color: var(--accent-2); background: none; border: 0; padding: 0; }
+  .alert.danger { border-left-color: var(--danger); background: var(--danger-bg); }
+  .alert.danger .ic { color: var(--danger); }
+  .alert.warn   { border-left-color: var(--warn);   background: var(--warn-bg); }
+  .alert.warn .ic { color: var(--warn); }
+  .alert.info   { border-left-color: var(--info);   background: var(--info-bg); }
+  .alert.info .ic { color: var(--info); }
+  .alert.ok     { border-left-color: var(--ok); }
+  .alert.ok .ic { color: var(--ok); }
 
   /*  Cards  --------------------------------------------------------------- */
-  .grid-cards {
-    display: grid;
-    grid-template-columns: repeat(12, 1fr);
-    gap: 14px;
-  }
+  .grid-cards { display: grid; grid-template-columns: repeat(12, 1fr); gap: 14px; }
   .card {
     background: var(--bg-1);
     border: 1px solid var(--border-soft);
     border-radius: var(--radius);
-    padding: 18px 20px;
+    padding: 16px 18px;
     box-shadow: var(--shadow);
     grid-column: span 3;
-    transition: border-color .2s;
+    min-width: 0;
   }
-  .card:hover { border-color: var(--border); }
-  .card .card-label {
-    color: var(--muted);
-    font-size: 11px;
-    font-weight: 500;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    margin-bottom: 10px;
-    display: flex; align-items: center; gap: 6px;
+  .card.s2 { grid-column: span 2; }
+  .card.s4 { grid-column: span 4; }
+  .card-label {
+    color: var(--muted); font-size: 11px; font-weight: 500;
+    text-transform: uppercase; letter-spacing: .08em;
+    margin-bottom: 8px; display: flex; align-items: center; gap: 6px;
   }
-  .card .card-value {
-    font-family: var(--font-mono);
-    font-size: 22px;
-    font-weight: 600;
-    color: var(--text);
-    letter-spacing: -0.01em;
+  .card-value {
+    font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+    font-size: 22px; font-weight: 600; color: var(--text); letter-spacing: -.01em;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
-  .card .card-meta {
-    margin-top: 8px;
-    font-size: 12px;
-    color: var(--muted);
-  }
+  .card-meta { margin-top: 6px; font-size: 12px; color: var(--muted); }
   .card.hero {
-    grid-column: span 6;
+    grid-column: span 4;
     background:
-      radial-gradient(circle at 0% 0%, rgba(192,132,252,.10), transparent 50%),
-      radial-gradient(circle at 100% 100%, rgba(103,232,249,.06), transparent 50%),
+      radial-gradient(circle at 0% 0%, rgba(192,132,252,.12), transparent 55%),
+      radial-gradient(circle at 100% 100%, rgba(103,232,249,.07), transparent 55%),
       var(--bg-1);
     border-color: var(--border);
   }
   .card.hero .card-value {
-    font-size: 38px;
+    font-size: 34px;
     background: linear-gradient(135deg, var(--accent), var(--accent-2));
-    -webkit-background-clip: text;
-    background-clip: text;
+    -webkit-background-clip: text; background-clip: text;
     -webkit-text-fill-color: transparent;
   }
   .card.hero .card-meta { color: var(--text-soft); }
+  .card.st-ok     .card-value { color: var(--ok); }
+  .card.st-warn   .card-value { color: var(--warn); }
+  .card.st-danger .card-value { color: var(--danger); }
+  .delta { font-family: var(--font-mono); font-size: 12px; font-weight: 600; }
+  .delta.up   { color: var(--warn); }
+  .delta.down { color: var(--ok); }
+  .delta.flat { color: var(--muted); }
 
-  /*  Panel  --------------------------------------------------------------- */
+  /*  Panels  -------------------------------------------------------------- */
   .panel {
     background: var(--bg-1);
     border: 1px solid var(--border-soft);
     border-radius: var(--radius);
     box-shadow: var(--shadow);
+    min-width: 0;
   }
-  .panel-body { padding: 20px 22px; }
+  .panel-body { padding: 16px 20px; }
   .panel-title {
-    display: flex; align-items: baseline; gap: 10px;
-    padding: 14px 22px 12px;
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 12px 20px;
     border-bottom: 1px solid var(--border-soft);
   }
-  .panel-title h3 {
-    margin: 0;
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--text);
-    letter-spacing: 0.01em;
-  }
+  .panel-title h3 { margin: 0; font-size: 13px; font-weight: 600; color: var(--text); }
   .panel-title .sub { color: var(--muted); font-size: 12px; }
+  .panel-title .spacer { flex: 1; }
+  .grid-2   { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; }
+  .grid-2e  { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .grid-3   { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .stack    { display: grid; gap: 16px; }
+  .chart-wrap { position: relative; height: 280px; padding: 14px 12px 8px; }
+  .chart-wrap.short { height: 240px; }
+  .chart-off { display: none; padding: 40px 20px; text-align: center; color: var(--muted); font-size: 13px; }
+  .no-chart .chart-wrap { display: none; }
+  .no-chart .chart-off { display: block; }
 
-  /*  Bars  ---------------------------------------------------------------- */
-  .bar-row {
-    display: grid;
-    grid-template-columns: 160px 1fr auto;
-    align-items: center;
-    gap: 16px;
-    padding: 9px 0;
+  /*  Segmented control  --------------------------------------------------- */
+  .seg { display: inline-flex; background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 2px; }
+  .seg button {
+    border: 0; background: none; cursor: pointer;
+    padding: 3px 9px; border-radius: 4px;
+    font-size: 12px; color: var(--muted);
   }
-  .bar-row + .bar-row { border-top: 1px dashed var(--border-soft); }
-  .bar-label { color: var(--text-soft); font-size: 13px; }
-  .bar-track {
-    position: relative;
-    height: 8px; background: var(--bg-3);
-    border-radius: 4px; overflow: hidden;
+  .seg button.on { background: var(--bg-3); color: var(--text); }
+
+  /*  Toolbar  ------------------------------------------------------------- */
+  .toolbar {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    padding: 12px 16px; border-bottom: 1px solid var(--border-soft);
   }
-  .bar-fill {
-    height: 100%;
-    border-radius: 4px;
-    transition: width .5s cubic-bezier(.4,.0,.2,1), background-color .2s;
+  .search {
+    position: relative; flex: 1 1 220px; max-width: 340px;
   }
-  .bar-row.ok     .bar-fill { background: var(--ok); }
-  .bar-row.warn   .bar-fill { background: var(--warn); }
-  .bar-row.danger .bar-fill { background: var(--danger); }
-  .bar-value {
-    font-family: var(--font-mono);
-    font-size: 12px;
-    color: var(--text);
-    text-align: right;
-    min-width: 220px;
-  }
-  .bar-value .reset { color: var(--muted); margin-left: 6px; }
-  .empty-bars {
-    color: var(--muted);
-    font-size: 13px;
-    padding: 12px 0;
-    text-align: center;
-  }
-  .retry-banner {
-    margin-top: 14px;
-    padding: 10px 14px;
-    background: rgba(248,113,113,.08);
-    border: 1px solid rgba(248,113,113,.25);
-    border-radius: var(--radius-sm);
-    color: var(--danger);
+  .search input {
+    width: 100%; height: 30px; padding: 0 10px 0 30px;
+    background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius-sm);
     font-size: 13px;
   }
-
-  /*  Charts grid  --------------------------------------------------------- */
-  .charts-grid {
-    display: grid;
-    grid-template-columns: 2fr 1fr;
-    gap: 18px;
+  .search input:focus { outline: none; border-color: var(--accent); }
+  .search::before {
+    content: "⌕"; position: absolute; left: 10px; top: 50%; transform: translateY(-52%);
+    color: var(--muted); font-size: 15px; pointer-events: none;
   }
-  .chart-canvas-wrap { position: relative; height: 280px; padding: 16px 4px 4px; }
+  .toolbar .meta { color: var(--muted); font-size: 12px; margin-left: auto; }
 
   /*  Tables  -------------------------------------------------------------- */
+  .table-scroll { overflow-x: auto; }
   table { width: 100%; border-collapse: collapse; }
   thead th {
-    text-align: left;
-    padding: 10px 16px;
-    background: var(--bg-2);
-    color: var(--muted);
-    font-weight: 500;
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
+    text-align: left; padding: 9px 14px;
+    background: var(--bg-2); color: var(--muted);
+    font-weight: 500; font-size: 11px;
+    text-transform: uppercase; letter-spacing: .07em;
     border-bottom: 1px solid var(--border-soft);
+    white-space: nowrap; user-select: none;
   }
+  th.sortable { cursor: pointer; }
+  th.sortable:hover { color: var(--text); }
+  th.sortable::after { content: "↕"; margin-left: 5px; opacity: .35; font-size: 10px; }
+  th.sortable.asc::after  { content: "▲"; opacity: .9; color: var(--accent); }
+  th.sortable.desc::after { content: "▼"; opacity: .9; color: var(--accent); }
   tbody td {
-    padding: 11px 16px;
+    padding: 10px 14px;
     border-bottom: 1px solid var(--border-soft);
-    font-size: 13px;
+    font-size: 13px; vertical-align: middle;
   }
   tbody tr:last-child td { border-bottom: 0; }
-  tbody tr:hover td { background: var(--bg-2); }
-  td.num, th.num { text-align: right; font-family: var(--font-mono); }
-  td.cost { color: var(--accent); font-family: var(--font-mono); font-weight: 500; }
-  td.session-id { font-family: var(--font-mono); color: var(--accent-2); }
-  td.session-id .session-tail { color: var(--muted); }
-  td .badge {
-    display: inline-block;
-    padding: 1px 7px;
-    background: var(--bg-3);
-    border-radius: 4px;
-    font-family: var(--font-mono);
-    font-size: 11px;
-    color: var(--text-soft);
-    margin-right: 4px;
+  tbody tr:hover > td { background: var(--bg-2); }
+  tfoot td {
+    padding: 10px 14px; font-size: 13px; font-weight: 600;
+    background: var(--bg-2); border-top: 1px solid var(--border);
   }
-  td .badge.ok     { color: var(--ok); }
-  td .badge.warn   { color: var(--warn); }
-  td .badge.danger { color: var(--danger); }
+  td.num, th.num { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  td.cost { color: var(--accent); font-weight: 500; }
+  td.mono { font-family: var(--font-mono); }
+  td.muted { color: var(--muted); }
+  .sid { font-family: var(--font-mono); color: var(--accent-2); }
+  .sid .tail { color: var(--muted); }
+  .badge {
+    display: inline-block; padding: 1px 7px;
+    background: var(--bg-3); border-radius: 4px;
+    font-family: var(--font-mono); font-size: 11px; color: var(--text-soft);
+    margin: 1px 4px 1px 0; white-space: nowrap;
+  }
+  .badge.ok     { color: var(--ok);     background: var(--ok-bg); }
+  .badge.warn   { color: var(--warn);   background: var(--warn-bg); }
+  .badge.danger { color: var(--danger); background: var(--danger-bg); }
+  .badge.info   { color: var(--info);   background: var(--info-bg); }
+  .badge.accent { color: var(--accent); background: var(--accent-bg); }
+  .user-cell { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; vertical-align: middle; white-space: nowrap; }
+  .expander { vertical-align: middle; }
+  .avatar {
+    width: 24px; height: 24px; border-radius: 50%; flex: none;
+    display: inline-flex; align-items: center; justify-content: center;
+    font: 700 11px var(--font-sans); color: #fff; text-transform: uppercase;
+  }
+  .presence { width: 7px; height: 7px; border-radius: 50%; background: var(--muted-2); flex: none; }
+  .presence.on { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-bg); }
+  .ts { font-family: var(--font-mono); font-size: 12px; color: var(--text-soft); white-space: nowrap; }
+  .ts small { display: block; color: var(--muted); font-size: 11px; }
+  .expander {
+    width: 20px; height: 20px; border: 0; background: none; cursor: pointer;
+    color: var(--muted); font-size: 11px; border-radius: 4px; margin-right: 4px;
+    transition: transform .15s;
+  }
+  .expander:hover { background: var(--bg-3); color: var(--text); }
+  .expander.open { transform: rotate(90deg); }
+  tr.sub > td { background: var(--bg-2); color: var(--text-soft); font-size: 12.5px; padding-top: 7px; padding-bottom: 7px; }
+  tr.sub > td:first-child { padding-left: 44px; color: var(--muted); }
+  tr.detail > td { background: var(--bg-2); padding: 14px 20px 16px 44px; }
+  .detail-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 12px; }
+  .detail-grid div { font-size: 12px; color: var(--muted); }
+  .detail-grid b { display: block; font: 600 14px var(--font-mono); color: var(--text); margin-top: 2px; }
+  table.inner { background: var(--bg-1); border: 1px solid var(--border-soft); border-radius: var(--radius-sm); overflow: hidden; }
+  table.inner thead th { background: var(--bg-1); }
+  table.inner tbody td { padding: 7px 14px; font-size: 12.5px; }
+  .row-actions { display: flex; gap: 6px; justify-content: flex-end; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 5px;
+    height: 26px; padding: 0 10px; cursor: pointer;
+    background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius-sm);
+    font-size: 12px; color: var(--text-soft); white-space: nowrap;
+  }
+  .btn:hover { color: var(--text); border-color: var(--muted-2); }
+  .btn.danger { color: var(--danger); border-color: rgba(248,113,113,.35); background: var(--danger-bg); }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
 
-  /* Sub-rows under a group (e.g. user breakdown under a date row). */
-  tr.sub td {
-    background: var(--bg-1);
-    color: var(--text-soft);
-    font-size: 13px;
-    border-top: 1px dashed var(--border-soft);
-  }
-  tr.sub td:first-child {
-    padding-left: 36px;
-    color: var(--muted);
-  }
-  tr.group-head td {
-    background: var(--bg-2);
-    font-weight: 600;
-  }
-  td .timestamp {
-    font-family: var(--font-mono);
-    font-size: 12px;
-    color: var(--text-soft);
-  }
-  td .timestamp small { color: var(--muted); margin-left: 4px; }
+  /*  Meters  -------------------------------------------------------------- */
+  .meter { display: flex; align-items: center; gap: 8px; min-width: 150px; }
+  .meter-track { flex: 1; height: 6px; background: var(--bg-3); border-radius: 3px; overflow: hidden; }
+  .meter-fill { height: 100%; border-radius: 3px; background: var(--ok); transition: width .4s cubic-bezier(.4,0,.2,1); }
+  .meter.warn   .meter-fill { background: var(--warn); }
+  .meter.danger .meter-fill { background: var(--danger); }
+  .meter.none   .meter-fill { background: var(--muted-2); }
+  .meter-text { font: 12px var(--font-mono); color: var(--text-soft); min-width: 48px; text-align: right; }
 
-  /*  Empty state  ---------------------------------------------------------- */
-  .empty-state {
-    padding: 36px;
-    text-align: center;
-    color: var(--muted);
-    font-size: 13px;
+  .bar-row { display: grid; grid-template-columns: 130px 1fr auto; align-items: center; gap: 14px; padding: 9px 0; }
+  .bar-row + .bar-row { border-top: 1px dashed var(--border-soft); }
+  .bar-label { color: var(--text-soft); font-size: 13px; }
+  .bar-track { height: 8px; background: var(--bg-3); border-radius: 4px; overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 4px; background: var(--ok); transition: width .5s cubic-bezier(.4,0,.2,1); }
+  .bar-row.warn   .bar-fill { background: var(--warn); }
+  .bar-row.danger .bar-fill { background: var(--danger); }
+  .bar-row.accent .bar-fill { background: linear-gradient(90deg, var(--accent), var(--accent-2)); }
+  .bar-value { font: 12px var(--font-mono); color: var(--text); text-align: right; min-width: 90px; }
+  .bar-value .reset { display: block; color: var(--muted); font-size: 11px; }
+
+  /*  Lists  --------------------------------------------------------------- */
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 8px 16px; font-size: 13px; }
+  .kv dt { color: var(--muted); }
+  .kv dd { margin: 0; text-align: right; font-family: var(--font-mono); color: var(--text); }
+  .top-list { display: grid; gap: 2px; }
+  .top-item { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 8px 0; }
+  .top-item + .top-item { border-top: 1px dashed var(--border-soft); }
+  .top-item .rank { color: var(--muted); font: 12px var(--font-mono); }
+  .top-item .who { min-width: 0; }
+  .top-item .who .name { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .top-item .who .meter { margin-top: 5px; }
+  .top-item .amt { font: 600 13px var(--font-mono); color: var(--accent); }
+  .tip {
+    margin: 8px 0; padding: 9px 12px;
+    background: var(--bg-2); border-left: 3px solid var(--accent);
+    border-radius: 4px; font-size: 13px; line-height: 1.5; color: var(--text-soft);
   }
+  .hours { display: flex; align-items: flex-end; gap: 3px; height: 110px; }
+  .hours .h { flex: 1; height: 100%; display: flex; align-items: flex-end; }
+  .hours .h i { display: block; width: 100%; border-radius: 2px 2px 0 0; background: linear-gradient(180deg, var(--accent), var(--accent-2)); opacity: .85; }
+  .hours .h i.zero { background: var(--bg-3); opacity: 1; }
+  .hours-axis { display: flex; justify-content: space-between; font: 10px var(--font-mono); color: var(--muted); margin-top: 6px; }
+
+  /*  Empty & pager  ------------------------------------------------------- */
+  .empty-state { padding: 36px 20px; text-align: center; color: var(--muted); font-size: 13px; }
   .empty-state strong { color: var(--text-soft); display: block; margin-bottom: 4px; font-weight: 500; }
+  .empty-inline { color: var(--muted); font-size: 13px; padding: 14px 0; text-align: center; }
+  .pager { display: flex; align-items: center; gap: 8px; justify-content: flex-end; padding: 10px 16px; border-top: 1px solid var(--border-soft); font-size: 12px; color: var(--muted); }
+
+  /*  Toast  --------------------------------------------------------------- */
+  .toast {
+    position: fixed; right: 20px; bottom: 20px; z-index: 50;
+    max-width: 360px; padding: 11px 15px;
+    background: var(--bg-1); border: 1px solid var(--border); border-left: 3px solid var(--ok);
+    border-radius: var(--radius-sm); box-shadow: 0 8px 24px rgba(0,0,0,.25);
+    font-size: 13px; color: var(--text);
+    opacity: 0; transform: translateY(8px); pointer-events: none;
+    transition: opacity .2s, transform .2s;
+  }
+  .toast.show { opacity: 1; transform: none; }
+  .toast.error { border-left-color: var(--danger); }
 
   /*  Footer  -------------------------------------------------------------- */
   footer {
-    max-width: 1320px;
-    margin: 0 auto;
-    padding: 24px 28px 40px;
-    color: var(--muted);
-    font-size: 12px;
-    border-top: 1px solid var(--border-soft);
-    margin-top: 16px;
-    display: flex; gap: 16px; flex-wrap: wrap;
+    max-width: 1400px; margin: 0 auto;
+    padding: 20px 28px 36px;
+    color: var(--muted); font-size: 12px;
+    display: flex; gap: 14px; flex-wrap: wrap;
   }
-  footer .dot-sep { color: var(--muted-2); }
+  footer .sep { color: var(--muted-2); }
 
   /*  Responsive  ----------------------------------------------------------- */
-  @media (max-width: 960px) {
-    .card        { grid-column: span 6; }
-    .card.hero   { grid-column: span 12; }
-    .charts-grid { grid-template-columns: 1fr; }
-    .bar-row     { grid-template-columns: 1fr; gap: 4px; }
-    .bar-value   { text-align: left; }
+  @media (max-width: 1100px) {
+    .card, .card.s2 { grid-column: span 4; }
+    .card.hero, .card.s4 { grid-column: span 6; }
+    .grid-2, .grid-3 { grid-template-columns: 1fr; }
+    .app-nav { display: none; }
   }
-  @media (max-width: 560px) {
-    .card        { grid-column: span 12; }
-    main         { padding: 18px; }
-    .topbar      { padding: 12px 18px; }
+  @media (max-width: 760px) {
+    .card, .card.s2, .card.s4 { grid-column: span 6; }
+    .card.hero { grid-column: span 12; }
+    .grid-2e { grid-template-columns: 1fr; }
+    .detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .bar-row { grid-template-columns: 1fr auto; }
+    .bar-row .bar-track { grid-column: 1 / -1; grid-row: 2; }
+    main { padding: 18px 16px 8px; }
+    .topbar-row { padding: 10px 16px; flex-wrap: wrap; }
+    .tabs { padding: 0 8px; }
+    .brand-tag, #last-refresh { display: none; }
+  }
+  @media (max-width: 340px) {
+    .card, .card.s2, .card.s4 { grid-column: span 12; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
   }
 </style>
 </head>
 <body>
 
 <header class="topbar">
-  <div class="brand">
-    <div class="brand-mark"></div>
-    <span class="brand-name">Claude Cloak</span>
-    <span class="brand-tag">· Quota & Cost</span>
+  <div class="topbar-row">
+    <div class="brand">
+      <div class="brand-mark"></div>
+      <span>Claude Cloak</span>
+      <span class="brand-tag">Usage &amp; Cost</span>
+    </div>
+    <nav class="app-nav" aria-label="Consoles">
+      <a href="/dashboard" class="current">Dashboard</a>
+      <a href="/keys" title="Proxy keys — reachable only from ADMIN_IPS">Keys</a>
+      <a href="/config" title="Settings — reachable only from ADMIN_IPS">Config</a>
+    </nav>
+    <div class="spacer"></div>
+    <span class="pill" id="period-pill" title="Current tracking period — resets automatically on the 1st of each month" hidden></span>
+    <span class="pill" id="last-refresh" title="Time of last successful /quota fetch">—</span>
+    <span class="pill live" id="status-pill"><span class="dot"></span><span id="status-text">connecting…</span></span>
+    <select class="ctrl" id="refresh-interval" title="Auto-refresh interval" aria-label="Auto-refresh interval">
+      <option value="5000">Every 5 s</option>
+      <option value="10000">Every 10 s</option>
+      <option value="30000">Every 30 s</option>
+      <option value="60000">Every 60 s</option>
+      <option value="0">Paused</option>
+    </select>
+    <button class="ctrl icon" id="refresh-now" title="Refresh now (R)" aria-label="Refresh now">↻</button>
+    <button class="ctrl icon" id="theme-toggle" title="Toggle light / dark theme" aria-label="Toggle theme">◐</button>
   </div>
-  <div class="topbar-spacer"></div>
-  <span class="pill" id="period-pill" title="Current tracking period — resets automatically on the 1st of each month" style="display:none"></span>
-  <span class="pill" id="last-refresh" title="Time of last successful /quota fetch">—</span>
-  <span class="pill live" id="status-pill"><span class="dot"></span><span id="status-text">connecting…</span></span>
-  <a class="pill" href="/config" title="Settings — reachable only from ADMIN_IPS">Config</a>
+  <div class="tabs" role="tablist" aria-label="Dashboard sections">
+    <button class="tab" role="tab" data-view="overview" aria-selected="true">Overview <span class="count" id="tab-count-overview" hidden></span></button>
+    <button class="tab" role="tab" data-view="users" aria-selected="false">Users <span class="count" id="tab-count-users" hidden></span></button>
+    <button class="tab" role="tab" data-view="sessions" aria-selected="false">Sessions <span class="count" id="tab-count-sessions" hidden></span></button>
+    <button class="tab" role="tab" data-view="usage" aria-selected="false">Usage &amp; Models</button>
+    <button class="tab" role="tab" data-view="performance" aria-selected="false">Performance <span class="count" id="tab-count-performance" hidden></span></button>
+    <button class="tab" role="tab" data-view="coaching" aria-selected="false">Coaching</button>
+  </div>
 </header>
 
 <main>
 
-  <!-- Totals -->
-  <section>
-    <div class="section-head">
-      <h2>Totals</h2>
-      <span class="hint">Lifetime — persisted across restarts</span>
-    </div>
-    <div class="grid-cards">
-      <div class="card hero">
-        <div class="card-label">Total Cost (estimated)</div>
-        <div class="card-value num" id="cost-total">$0.0000</div>
-        <div class="card-meta" id="cost-meta">No requests recorded yet</div>
-      </div>
-      <div class="card">
-        <div class="card-label">Requests</div>
-        <div class="card-value num" id="req-total">0</div>
-        <div class="card-meta">on /v1/messages</div>
-      </div>
-      <div class="card">
-        <div class="card-label">Active users</div>
-        <div class="card-value num" id="user-count">0</div>
-        <div class="card-meta" id="user-count-meta">via /u/&lt;name&gt; or IP label</div>
-      </div>
-      <div class="card">
-        <div class="card-label">Distinct sessions</div>
-        <div class="card-value num" id="session-count">0</div>
-        <div class="card-meta">x-claude-code-session-id</div>
-      </div>
-      <div class="card">
-        <div class="card-label">Input tokens (paid)</div>
-        <div class="card-value num" id="in-total">0</div>
-      </div>
-      <div class="card">
-        <div class="card-label">Output tokens</div>
-        <div class="card-value num" id="out-total">0</div>
-      </div>
-      <div class="card">
-        <div class="card-label">Cache read</div>
-        <div class="card-value num" id="cache-read">0</div>
-        <div class="card-meta">10% of input price</div>
-      </div>
-      <div class="card">
-        <div class="card-label">Cache write</div>
-        <div class="card-value num" id="cache-write">0</div>
-        <div class="card-meta">125% (5m) / 200% (1h)</div>
-      </div>
-      <div class="card">
-        <div class="card-label">Avg cost / request</div>
-        <div class="card-value num" id="avg-cost">$0.0000</div>
-        <div class="card-meta">across all /v1/messages</div>
-      </div>
-      <div class="card">
-        <div class="card-label">Cache hit rate</div>
-        <div class="card-value num" id="cache-hit-rate">0%</div>
-        <div class="card-meta">cache_read / total input</div>
-      </div>
-      <div class="card">
-        <div class="card-label">Top spender</div>
-        <div class="card-value" id="top-spender" style="font-size:22px">—</div>
-        <div class="card-meta" id="top-spender-cost"></div>
-      </div>
-    </div>
-  </section>
+  <!-- ================================================================ -->
+  <!-- Overview                                                          -->
+  <!-- ================================================================ -->
+  <div class="view active" id="view-overview" role="tabpanel">
+    <div class="alerts" id="alerts"></div>
 
-  <!-- Coaching -->
-  <section>
-    <div class="section-head">
-      <h2>Stream health</h2>
-      <span class="hint">Diagnoses "Response stalled mid-stream" — stalls point upstream, pool waits point at this proxy</span>
-    </div>
-    <div class="grid-cards">
-      <div class="card">
-        <div class="card-label">Stalled streams</div>
-        <div class="card-value num" id="stream-stalls">0</div>
-        <div class="card-meta" id="stream-stalls-meta">no stalls recorded</div>
+    <section>
+      <div class="section-head">
+        <h2>Key metrics</h2>
+        <span class="hint" id="kpi-hint">Current period — persisted across restarts</span>
       </div>
-      <div class="card">
-        <div class="card-label">Time to first byte</div>
-        <div class="card-value num" id="stream-ttfb">—</div>
-        <div class="card-meta" id="stream-ttfb-meta">average · peak</div>
-      </div>
-      <div class="card">
-        <div class="card-label">Pool waits</div>
-        <div class="card-value num" id="stream-pool">0</div>
-        <div class="card-meta" id="stream-pool-meta">requests queued for a connection</div>
-      </div>
-      <div class="card">
-        <div class="card-label">Connect retries</div>
-        <div class="card-value num" id="stream-retries">0</div>
-        <div class="card-meta">recovered before any byte was sent</div>
-      </div>
-      <div class="card">
-        <div class="card-label">Client disconnects</div>
-        <div class="card-value num" id="stream-disconnects">0</div>
-        <div class="card-meta">client hung up mid-stream</div>
-      </div>
-      <div class="card">
-        <div class="card-label">Streams completed</div>
-        <div class="card-value num" id="stream-completed">0</div>
-        <div class="card-meta" id="stream-completed-meta">of 0 started</div>
-      </div>
-    </div>
-  </section>
-
-  <section>
-    <div class="section-head">
-      <h2>Coaching</h2>
-      <span class="hint">Privacy-safe — derived from traffic, no prompt text or code is stored</span>
-    </div>
-    <div class="grid-cards">
-      <div class="card hero">
-        <div class="card-label">Practice score</div>
-        <div class="card-value num" id="coach-score">—</div>
-        <div class="card-meta" id="coach-score-meta">no activity yet</div>
-      </div>
-      <div class="card">
-        <div class="card-label">Tool reliability</div>
-        <div class="card-value num" id="coach-reliability">—</div>
-        <div class="card-meta" id="coach-reliability-meta">tool-call errors</div>
-      </div>
-      <div class="card">
-        <div class="card-label">Read / edit discipline</div>
-        <div class="card-value num" id="coach-discipline">—</div>
-        <div class="card-meta" id="coach-discipline-meta">reads vs edits</div>
-      </div>
-      <div class="card">
-        <div class="card-label">Cache efficiency</div>
-        <div class="card-value num" id="coach-cache">—</div>
-        <div class="card-meta">cache hit rate</div>
-      </div>
-      <div class="card">
-        <div class="card-label">Avg turns / session</div>
-        <div class="card-value num" id="coach-depth">—</div>
-        <div class="card-meta">conversation depth</div>
-      </div>
-      <div class="card">
-        <div class="card-label">Opus cost share</div>
-        <div class="card-value num" id="coach-opus">—</div>
-        <div class="card-meta">model fit</div>
-      </div>
-    </div>
-    <div class="charts-grid" style="margin-top:16px">
-      <div class="panel">
-        <div class="panel-title">
-          <h3>Tool usage</h3>
-          <span class="sub" id="coach-tools-sub">—</span>
+      <div class="grid-cards">
+        <div class="card hero">
+          <div class="card-label">Total cost (estimated)</div>
+          <div class="card-value" id="cost-total">$0.0000</div>
+          <div class="card-meta" id="cost-meta">No requests recorded yet</div>
         </div>
-        <div class="panel-body"><div id="coach-tools"></div></div>
+        <div class="card s4">
+          <div class="card-label">Today</div>
+          <div class="card-value" id="cost-today">$0.00</div>
+          <div class="card-meta" id="cost-today-meta">vs yesterday —</div>
+        </div>
+        <div class="card s4">
+          <div class="card-label">Projected this month</div>
+          <div class="card-value" id="cost-projected">—</div>
+          <div class="card-meta" id="cost-projected-meta">linear run-rate from daily history</div>
+        </div>
+        <div class="card s2">
+          <div class="card-label">Requests</div>
+          <div class="card-value" id="req-total">0</div>
+          <div class="card-meta">on /v1/messages</div>
+        </div>
+        <div class="card s2">
+          <div class="card-label">Users</div>
+          <div class="card-value" id="user-count">0</div>
+          <div class="card-meta" id="user-count-meta">active in last 24 h: 0</div>
+        </div>
+        <div class="card s2">
+          <div class="card-label">Sessions</div>
+          <div class="card-value" id="session-count">0</div>
+          <div class="card-meta" id="session-count-meta">active in last hour: 0</div>
+        </div>
+        <div class="card s2">
+          <div class="card-label">Avg cost / request</div>
+          <div class="card-value" id="avg-cost">$0.0000</div>
+          <div class="card-meta">all models</div>
+        </div>
+        <div class="card s2">
+          <div class="card-label">Cache hit rate</div>
+          <div class="card-value" id="cache-hit-rate">0%</div>
+          <div class="card-meta">cache read / total input</div>
+        </div>
+        <div class="card s2">
+          <div class="card-label">Output tokens</div>
+          <div class="card-value" id="out-total">0</div>
+          <div class="card-meta" id="in-total-meta">input 0</div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <div class="grid-2">
+        <div class="panel chart-panel">
+          <div class="panel-title">
+            <h3>Daily cost &amp; tokens</h3>
+            <span class="sub" id="daily-range">—</span>
+            <span class="spacer"></span>
+            <div class="seg" id="daily-range-seg">
+              <button data-days="7">7d</button>
+              <button data-days="15" class="on">15d</button>
+            </div>
+          </div>
+          <div class="chart-wrap"><canvas id="daily-chart"></canvas></div>
+          <div class="chart-off">Charts unavailable — Chart.js could not be loaded from the CDN.</div>
+        </div>
+        <div class="panel chart-panel">
+          <div class="panel-title"><h3>Cost by model</h3><span class="sub">current period</span></div>
+          <div class="chart-wrap"><canvas id="model-chart"></canvas></div>
+          <div class="chart-off">Charts unavailable.</div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <div class="grid-3">
+        <div class="panel">
+          <div class="panel-title">
+            <h3>Top spenders</h3><span class="sub" id="top-sub">this period</span>
+            <span class="spacer"></span><a href="#users" class="sub">All users →</a>
+          </div>
+          <div class="panel-body"><div class="top-list" id="top-users"></div></div>
+        </div>
+        <div class="panel">
+          <div class="panel-title">
+            <h3>Rate limits</h3><span class="sub" id="rl-updated">Anthropic headers</span>
+          </div>
+          <div class="panel-body"><div id="rate-limits-mini"></div></div>
+        </div>
+        <div class="panel">
+          <div class="panel-title">
+            <h3>Proxy status</h3><span class="sub">anonymity layers</span>
+          </div>
+          <div class="panel-body"><dl class="kv" id="system-kv"><dt>Loading…</dt><dd></dd></dl></div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <!-- ================================================================ -->
+  <!-- Users                                                             -->
+  <!-- ================================================================ -->
+  <div class="view" id="view-users" role="tabpanel">
+    <section>
+      <div class="section-head">
+        <h2 id="user-section-title">Users</h2>
+        <span class="hint" id="user-section-hint">Attribution by URL prefix <code>/u/&lt;name&gt;/</code>, proxy key, or IP label.</span>
+      </div>
+      <div class="grid-cards" style="margin-bottom:16px">
+        <div class="card"><div class="card-label">Tracked users</div><div class="card-value" id="u-kpi-total">0</div><div class="card-meta" id="u-kpi-total-meta">—</div></div>
+        <div class="card"><div class="card-label">Period spend</div><div class="card-value" id="u-kpi-spend">$0.00</div><div class="card-meta" id="u-kpi-spend-meta">sum of all users</div></div>
+        <div class="card" id="u-kpi-near-card"><div class="card-label">Near cap (≥ 80%)</div><div class="card-value" id="u-kpi-near">0</div><div class="card-meta" id="u-kpi-near-meta">caps disabled</div></div>
+        <div class="card" id="u-kpi-over-card"><div class="card-label">Over cap / blocked</div><div class="card-value" id="u-kpi-over">0</div><div class="card-meta" id="u-kpi-over-meta">0 requests blocked</div></div>
       </div>
       <div class="panel">
-        <div class="panel-title">
-          <h3>Tips</h3>
-          <span class="sub">actionable · local</span>
+        <div class="toolbar">
+          <label class="search"><input type="search" id="user-search" placeholder="Search users…" aria-label="Search users"></label>
+          <div class="seg" id="user-filter">
+            <button data-f="all" class="on">All</button>
+            <button data-f="active">Active 24h</button>
+            <button data-f="near">Near cap</button>
+            <button data-f="over">Over cap</button>
+          </div>
+          <button class="btn" id="user-export" title="Download the visible rows as CSV">⤓ CSV</button>
+          <span class="meta" id="user-meta"></span>
         </div>
-        <div class="panel-body"><div id="coach-tips"></div></div>
+        <div class="table-scroll">
+          <table id="user-table">
+            <thead><tr>
+              <th class="sortable" data-key="label">User</th>
+              <th class="sortable num" data-key="cost_usd">Spend</th>
+              <th class="sortable" data-key="cost_pct">Cap usage</th>
+              <th class="sortable num" data-key="requests">Requests</th>
+              <th class="sortable num" data-key="input_tokens">Input</th>
+              <th class="sortable num" data-key="output_tokens">Output</th>
+              <th class="sortable num" data-key="cache_hit">Cache hit</th>
+              <th class="sortable num" data-key="blocked_count">Blocked</th>
+              <th class="sortable" data-key="last_seen">Last seen</th>
+              <th class="num">Actions</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="empty-state" id="user-empty" hidden>
+          <strong>No users tracked yet</strong>
+          User buckets appear after the first labelled <code>/v1/messages</code> response.
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <div class="grid-2">
+        <div class="panel chart-panel">
+          <div class="panel-title"><h3>Daily cost by user</h3><span class="sub" id="daily-user-range">—</span></div>
+          <div class="chart-wrap"><canvas id="daily-user-chart"></canvas></div>
+          <div class="chart-off">Charts unavailable.</div>
+        </div>
+        <div class="panel chart-panel">
+          <div class="panel-title"><h3>Share of spend</h3><span class="sub">current period</span></div>
+          <div class="chart-wrap"><canvas id="user-chart"></canvas></div>
+          <div class="chart-off">Charts unavailable.</div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <!-- ================================================================ -->
+  <!-- Sessions                                                          -->
+  <!-- ================================================================ -->
+  <div class="view" id="view-sessions" role="tabpanel">
+    <section>
+      <div class="section-head">
+        <h2>Sessions</h2>
+        <span class="hint">Each device sends its own <code>x-claude-code-session-id</code> — identity is locked outbound, but sessions stay distinct here</span>
       </div>
       <div class="panel">
-        <div class="panel-title">
-          <h3>Activity by hour</h3>
-          <span class="sub">local time · assistant turns</span>
+        <div class="toolbar">
+          <label class="search"><input type="search" id="session-search" placeholder="Search session, user or model…" aria-label="Search sessions"></label>
+          <select class="ctrl" id="session-user" aria-label="Filter by user"><option value="">All users</option></select>
+          <select class="ctrl" id="session-window" aria-label="Filter by activity">
+            <option value="0">Any time</option>
+            <option value="3600">Active last hour</option>
+            <option value="86400">Active last 24 h</option>
+            <option value="604800">Active last 7 d</option>
+          </select>
+          <button class="btn" id="session-export" title="Download the filtered rows as CSV">⤓ CSV</button>
+          <span class="meta" id="session-meta"></span>
         </div>
-        <div class="panel-body"><div id="coach-hours"></div></div>
+        <div class="table-scroll">
+          <table id="session-table">
+            <thead><tr>
+              <th class="sortable" data-key="user_label">User</th>
+              <th class="sortable" data-key="session_id">Session</th>
+              <th>Models</th>
+              <th class="sortable num" data-key="requests">Requests</th>
+              <th class="sortable num" data-key="input_tokens">Input</th>
+              <th class="sortable num" data-key="output_tokens">Output</th>
+              <th class="sortable num" data-key="cost_usd">Cost</th>
+              <th class="sortable" data-key="first_seen">Started</th>
+              <th class="sortable" data-key="last_seen">Last seen</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="empty-state" id="session-empty" hidden>
+          <strong>No sessions match</strong>
+          <span id="session-empty-text">Sessions appear once the proxy sees an <code>x-claude-code-session-id</code> header.</span>
+        </div>
+        <div class="pager" id="session-pager" hidden>
+          <span id="session-page-info"></span>
+          <select class="ctrl" id="session-page-size" aria-label="Rows per page">
+            <option value="25">25 / page</option>
+            <option value="50">50 / page</option>
+            <option value="100">100 / page</option>
+          </select>
+          <button class="btn" id="session-prev">‹ Prev</button>
+          <button class="btn" id="session-next">Next ›</button>
+        </div>
       </div>
-    </div>
-  </section>
+    </section>
+  </div>
 
-  <!-- Rate limits -->
-  <section>
-    <div class="section-head">
-      <h2>Rate Limits</h2>
-      <span class="hint">Live from Anthropic — last response headers</span>
-    </div>
-    <div class="panel">
-      <div class="panel-body">
-        <div id="rate-limits"></div>
+  <!-- ================================================================ -->
+  <!-- Usage & models                                                    -->
+  <!-- ================================================================ -->
+  <div class="view" id="view-usage" role="tabpanel">
+    <section>
+      <div class="section-head">
+        <h2>Token totals</h2>
+        <span class="hint">Current period</span>
       </div>
-    </div>
-  </section>
+      <div class="grid-cards">
+        <div class="card"><div class="card-label">Input tokens (paid)</div><div class="card-value" id="in-total">0</div></div>
+        <div class="card"><div class="card-label">Output tokens</div><div class="card-value" id="out-total-2">0</div></div>
+        <div class="card"><div class="card-label">Cache read</div><div class="card-value" id="cache-read">0</div><div class="card-meta">≈10% of input price</div></div>
+        <div class="card"><div class="card-label">Cache write</div><div class="card-value" id="cache-write">0</div><div class="card-meta" id="cache-write-meta">125% (5m) / 200% (1h)</div></div>
+      </div>
+    </section>
 
-  <!-- Daily trend + Cost by model -->
-  <section>
-    <div class="section-head">
-      <h2>Daily Trend</h2>
-      <span class="hint">Last 15 days — cost &amp; tokens per day (local time)</span>
-    </div>
-    <div class="charts-grid">
+    <section>
+      <div class="section-head">
+        <h2>Daily breakdown</h2>
+        <span class="hint">Last 15 days, local time — expand a day to see each user</span>
+        <span class="spacer"></span>
+        <button class="btn" id="daily-expand-all">Expand all</button>
+        <button class="btn" id="daily-export">⤓ CSV</button>
+      </div>
       <div class="panel">
-        <div class="panel-title">
-          <h3>Cost & tokens / day</h3>
-          <span class="sub" id="daily-range">—</span>
+        <div class="table-scroll">
+          <table id="daily-table">
+            <thead><tr>
+              <th>Date</th>
+              <th class="num">Requests</th>
+              <th class="num">Input</th>
+              <th class="num">Output</th>
+              <th class="num">Cache R</th>
+              <th class="num">Cache W</th>
+              <th class="num">Cost</th>
+            </tr></thead>
+            <tbody></tbody>
+            <tfoot></tfoot>
+          </table>
         </div>
-        <div class="chart-canvas-wrap"><canvas id="daily-chart"></canvas></div>
+        <div class="empty-state" id="daily-empty" hidden>
+          <strong>No daily data yet</strong>
+          Send a request to <code>/v1/messages</code> through the proxy to populate.
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <div class="section-head">
+        <h2>Per-model breakdown</h2>
+        <span class="hint">Current period — expand a model to see who used it</span>
+        <span class="spacer"></span>
+        <button class="btn" id="model-export">⤓ CSV</button>
       </div>
       <div class="panel">
-        <div class="panel-title">
-          <h3>Cost by model</h3>
-          <span class="sub">lifetime</span>
+        <div class="table-scroll">
+          <table id="model-table">
+            <thead><tr>
+              <th class="sortable" data-key="model">Model</th>
+              <th class="sortable num" data-key="requests">Requests</th>
+              <th class="sortable num" data-key="input_tokens">Input</th>
+              <th class="sortable num" data-key="output_tokens">Output</th>
+              <th class="sortable num" data-key="cache_read_input_tokens">Cache R</th>
+              <th class="sortable num" data-key="cache_creation_input_tokens">Cache W</th>
+              <th class="sortable num" data-key="cost_usd">Cost</th>
+              <th class="sortable num" data-key="share">Share</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
         </div>
-        <div class="chart-canvas-wrap"><canvas id="model-chart"></canvas></div>
-      </div>
-      <div class="panel" id="user-chart-panel" style="display:none">
-        <div class="panel-title">
-          <h3>Cost by user</h3>
-          <span class="sub">current period</span>
+        <div class="empty-state" id="model-empty" hidden>
+          <strong>No model data yet</strong>
+          Per-model breakdown appears after the first response.
         </div>
-        <div class="chart-canvas-wrap"><canvas id="user-chart"></canvas></div>
       </div>
-      <div class="panel" id="daily-user-chart-panel" style="display:none">
-        <div class="panel-title">
-          <h3>Daily cost stacked by user</h3>
-          <span class="sub" id="daily-user-range">—</span>
+    </section>
+  </div>
+
+  <!-- ================================================================ -->
+  <!-- Performance                                                       -->
+  <!-- ================================================================ -->
+  <div class="view" id="view-performance" role="tabpanel">
+    <section>
+      <div class="section-head">
+        <h2>Stream health</h2>
+        <span class="hint">Diagnoses "Response stalled mid-stream" — stalls point upstream, pool waits point at this proxy</span>
+      </div>
+      <div class="grid-cards">
+        <div class="card s4" id="stream-stalls-card">
+          <div class="card-label">Stalled streams</div>
+          <div class="card-value" id="stream-stalls">0</div>
+          <div class="card-meta" id="stream-stalls-meta">no stalls recorded</div>
         </div>
-        <div class="chart-canvas-wrap"><canvas id="daily-user-chart"></canvas></div>
+        <div class="card s4">
+          <div class="card-label">Time to first byte</div>
+          <div class="card-value" id="stream-ttfb">—</div>
+          <div class="card-meta" id="stream-ttfb-meta">average · peak</div>
+        </div>
+        <div class="card s4" id="stream-pool-card">
+          <div class="card-label">Pool waits</div>
+          <div class="card-value" id="stream-pool">0</div>
+          <div class="card-meta" id="stream-pool-meta">requests queued for a connection</div>
+        </div>
+        <div class="card s4">
+          <div class="card-label">Connect retries</div>
+          <div class="card-value" id="stream-retries">0</div>
+          <div class="card-meta">recovered before any byte was sent</div>
+        </div>
+        <div class="card s4">
+          <div class="card-label">Client disconnects</div>
+          <div class="card-value" id="stream-disconnects">0</div>
+          <div class="card-meta">client hung up mid-stream</div>
+        </div>
+        <div class="card s4">
+          <div class="card-label">Streams completed</div>
+          <div class="card-value" id="stream-completed">0</div>
+          <div class="card-meta" id="stream-completed-meta">of 0 started</div>
+        </div>
       </div>
-    </div>
-  </section>
+    </section>
 
-  <!-- Daily table -->
-  <section>
-    <div class="section-head">
-      <h2>Daily Breakdown</h2>
-      <span class="hint">Most recent first</span>
-    </div>
-    <div class="panel">
-      <table id="daily-table">
-        <thead><tr>
-          <th>Date</th>
-          <th class="num">Requests</th>
-          <th class="num">Input</th>
-          <th class="num">Output</th>
-          <th class="num">Cache R</th>
-          <th class="num">Cache W</th>
-          <th class="num">Cost</th>
-        </tr></thead>
-        <tbody></tbody>
-      </table>
-      <div class="empty-state" id="daily-empty" style="display:none">
-        <strong>No daily data yet</strong>
-        Send a request to <code>/v1/messages</code> through the proxy to populate.
+    <section>
+      <div class="grid-2">
+        <div class="panel">
+          <div class="panel-title"><h3>Rate limits</h3><span class="sub" id="rl-updated-2">live from Anthropic — last response headers</span></div>
+          <div class="panel-body"><div id="rate-limits"></div></div>
+        </div>
+        <div class="panel">
+          <div class="panel-title"><h3>Upstream configuration</h3><span class="sub">.env tunables</span></div>
+          <div class="panel-body"><dl class="kv" id="upstream-kv"></dl></div>
+        </div>
       </div>
-    </div>
-  </section>
+    </section>
+  </div>
 
-  <!-- Per-model -->
-  <section>
-    <div class="section-head">
-      <h2>Per-Model Breakdown</h2>
-      <span class="hint">Lifetime totals</span>
-    </div>
-    <div class="panel">
-      <table id="model-table">
-        <thead><tr>
-          <th>Model</th>
-          <th class="num">Requests</th>
-          <th class="num">Input</th>
-          <th class="num">Output</th>
-          <th class="num">Cache R</th>
-          <th class="num">Cache W</th>
-          <th class="num">Cost</th>
-        </tr></thead>
-        <tbody></tbody>
-      </table>
-      <div class="empty-state" id="model-empty" style="display:none">
-        <strong>No model data yet</strong>
-        Per-model breakdown appears after the first response.
+  <!-- ================================================================ -->
+  <!-- Coaching                                                          -->
+  <!-- ================================================================ -->
+  <div class="view" id="view-coaching" role="tabpanel">
+    <section>
+      <div class="section-head">
+        <h2>Coaching</h2>
+        <span class="hint">Privacy-safe — derived from traffic, no prompt text or code is stored</span>
       </div>
-    </div>
-  </section>
-
-  <!-- Per-user (always shown once any user has activity) -->
-  <section id="user-section" style="display:none">
-    <div class="section-head">
-      <h2 id="user-section-title">Per-User Breakdown</h2>
-      <span class="hint" id="user-section-hint">Attribution by URL prefix <code>/u/&lt;name&gt;/</code> or by IP label.</span>
-    </div>
-    <div class="panel">
-      <table id="user-table">
-        <thead><tr>
-          <th>User</th>
-          <th>Cost / Cap</th>
-          <th class="num">% of cap</th>
-          <th class="num">Requests</th>
-          <th class="num">Tokens (in/out)</th>
-          <th class="num">Blocked</th>
-          <th>Last seen</th>
-        </tr></thead>
-        <tbody></tbody>
-      </table>
-      <div class="empty-state" id="user-empty" style="display:none">
-        <strong>No users tracked yet</strong>
-        User buckets appear after the first <code>/v1/messages</code> response.
+      <div class="grid-cards">
+        <div class="card hero">
+          <div class="card-label">Practice score</div>
+          <div class="card-value" id="coach-score">—</div>
+          <div class="card-meta" id="coach-score-meta">no activity yet</div>
+        </div>
+        <div class="card s4">
+          <div class="card-label">Tool reliability</div>
+          <div class="card-value" id="coach-reliability">—</div>
+          <div class="card-meta" id="coach-reliability-meta">tool-call errors</div>
+        </div>
+        <div class="card s4">
+          <div class="card-label">Read / edit discipline</div>
+          <div class="card-value" id="coach-discipline">—</div>
+          <div class="card-meta" id="coach-discipline-meta">reads vs edits</div>
+        </div>
+        <div class="card s4">
+          <div class="card-label">Cache efficiency</div>
+          <div class="card-value" id="coach-cache">—</div>
+          <div class="card-meta">cache hit rate</div>
+        </div>
+        <div class="card s4">
+          <div class="card-label">Avg turns / session</div>
+          <div class="card-value" id="coach-depth">—</div>
+          <div class="card-meta">conversation depth</div>
+        </div>
+        <div class="card s4">
+          <div class="card-label">Opus cost share</div>
+          <div class="card-value" id="coach-opus">—</div>
+          <div class="card-meta">model fit</div>
+        </div>
       </div>
-    </div>
-  </section>
-
-  <!-- Per-session -->
-  <section>
-    <div class="section-head">
-      <h2>Per-Session Breakdown</h2>
-      <span class="hint">Each device sends its own <code>x-claude-code-session-id</code> — the proxy locks identity outbound but keeps each session distinct here</span>
-    </div>
-    <div class="panel">
-      <table id="session-table">
-        <thead><tr>
-          <th>User</th>
-          <th>Session</th>
-          <th>Models</th>
-          <th class="num">Requests</th>
-          <th class="num">Tokens (in/out)</th>
-          <th class="num">Cost</th>
-          <th>Last seen</th>
-        </tr></thead>
-        <tbody></tbody>
-      </table>
-      <div class="empty-state" id="session-empty" style="display:none">
-        <strong>No session data yet</strong>
-        Sessions appear once the proxy sees an <code>x-claude-code-session-id</code> header.
+    </section>
+    <section>
+      <div class="grid-3">
+        <div class="panel">
+          <div class="panel-title"><h3>Tool usage</h3><span class="sub" id="coach-tools-sub">—</span></div>
+          <div class="panel-body"><div id="coach-tools"></div></div>
+        </div>
+        <div class="panel">
+          <div class="panel-title"><h3>Tips</h3><span class="sub">actionable · local</span></div>
+          <div class="panel-body"><div id="coach-tips"></div></div>
+        </div>
+        <div class="panel">
+          <div class="panel-title"><h3>Activity by hour</h3><span class="sub">local time · assistant turns</span></div>
+          <div class="panel-body"><div id="coach-hours"></div></div>
+        </div>
       </div>
-    </div>
-  </section>
+    </section>
+  </div>
 
 </main>
 
 <footer>
-  <span>Source: <code>GET /quota</code></span>
-  <span class="dot-sep">·</span>
+  <span>Source: <code>GET /quota</code> · <code>/coach</code> · <code>/health</code></span>
+  <span class="sep">·</span>
   <span>Persisted to <code>.quota.json</code></span>
-  <span class="dot-sep">·</span>
-  <span>Auto-refresh every 5 s</span>
-  <span class="dot-sep">·</span>
+  <span class="sep">·</span>
   <span>Costs are <em>estimates</em> — not your actual subscription bill</span>
+  <span class="sep">·</span>
+  <span>Shortcuts: <code>1</code>–<code>6</code> switch tabs, <code>R</code> refresh, <code>/</code> search</span>
 </footer>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <script>
+  'use strict';
+
+  /*  Storage (per-viewer conveniences only)  ---------------------------- */
+  const store = {
+    get(k, d) { try { const v = localStorage.getItem('cc.' + k); return v == null ? d : v; } catch (e) { return d; } },
+    set(k, v) { try { localStorage.setItem('cc.' + k, v); } catch (e) {} },
+  };
+
   /*  Formatting helpers  ------------------------------------------------- */
+  const $ = id => document.getElementById(id);
   const fmtCount = new Intl.NumberFormat('en-US');
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g,
+      c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
   function fmtNum(n) {
     n = Number(n) || 0;
     if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
@@ -706,648 +1011,1053 @@
     const v = Number(c) || 0;
     if (v === 0) return '$0.00';
     if (v < 0.01) return '$' + v.toFixed(4);
-    if (v < 1) return '$' + v.toFixed(3);
-    return '$' + v.toFixed(2);
+    if (v < 100) return '$' + v.toFixed(2);
+    return '$' + fmtCount.format(Math.round(v));
   }
   function fmtCostExact(c) { return '$' + (Number(c) || 0).toFixed(4); }
+  function fmtPct(p, d = 1) { return (Number(p) || 0).toFixed(d) + '%'; }
+  function ageSec(iso) {
+    if (!iso) return Infinity;
+    const t = new Date(iso).getTime();
+    return isNaN(t) ? Infinity : (Date.now() - t) / 1000;
+  }
   function fmtRelativeTime(iso) {
-    if (!iso) return '—';
-    const d = new Date(iso);
-    if (isNaN(d)) return iso;
-    const diff = (Date.now() - d.getTime()) / 1000;
+    const diff = ageSec(iso);
+    if (!Number.isFinite(diff)) return iso ? String(iso) : '—';
     if (diff < 5) return 'just now';
     if (diff < 60) return Math.round(diff) + 's ago';
     if (diff < 3600) return Math.round(diff / 60) + 'm ago';
     if (diff < 86400) return Math.round(diff / 3600) + 'h ago';
     return Math.round(diff / 86400) + 'd ago';
   }
-  function shortSession(id) {
-    if (!id) return '—';
-    if (id.length <= 14) return id;
-    return id.slice(0, 8) + '…' + id.slice(-4);
+  function tsCell(iso) {
+    if (!iso) return '<span class="muted">—</span>';
+    return `<span class="ts" title="${esc(iso)}">${esc(fmtRelativeTime(iso))}<small>${esc(String(iso).replace('T', ' '))}</small></span>`;
+  }
+  function localDateKey(d) {
+    const p = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  }
+  function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+  const AVATAR_COLORS = ['#8b5cf6','#0891b2','#d97706','#16a34a','#dc2626','#2563eb','#db2777','#7c3aed','#0d9488','#ea580c'];
+  function hashColor(s) {
+    let h = 0;
+    for (const ch of String(s)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+    return AVATAR_COLORS[h % AVATAR_COLORS.length];
+  }
+  function userCell(label, lastSeen) {
+    if (!label) return '<span class="badge">—</span>';
+    const on = ageSec(lastSeen) < 300;
+    return `<span class="user-cell"><span class="avatar" style="background:${hashColor(label)}">${esc(String(label).slice(0, 1))}</span>`
+      + `<span>${esc(label)}</span>${on ? '<span class="presence on" title="active in the last 5 minutes"></span>' : ''}</span>`;
+  }
+  function capLevel(pct) {
+    if (pct == null) return 'none';
+    return pct >= 100 ? 'danger' : pct >= 80 ? 'warn' : 'ok';
+  }
+  function meter(pct, text) {
+    const lvl = capLevel(pct);
+    const w = pct == null ? 0 : Math.max(0, Math.min(100, pct));
+    return `<div class="meter ${lvl}"><div class="meter-track"><div class="meter-fill" style="width:${w.toFixed(1)}%"></div></div><span class="meter-text">${esc(text)}</span></div>`;
+  }
+  function shareMeter(pct) {
+    const w = Math.max(0, Math.min(100, Number(pct) || 0));
+    return `<div class="meter ok"><div class="meter-track"><div class="meter-fill" style="width:${w.toFixed(1)}%"></div></div><span class="meter-text">${fmtPct(pct)}</span></div>`;
+  }
+  function cacheHit(o) {
+    const inT = Number(o.input_tokens) || 0, cr = Number(o.cache_read_input_tokens) || 0;
+    return inT + cr > 0 ? (cr / (inT + cr)) * 100 : null;
   }
 
-  /*  Rate-limit progress bars  ------------------------------------------- */
-  function addBar(container, label, remaining, limit, reset) {
-    if (remaining == null || limit == null) return false;
-    const r = Number(remaining), l = Number(limit);
-    if (!Number.isFinite(r) || !Number.isFinite(l) || l <= 0) return false;
-    const pct = Math.max(0, Math.min(100, (r / l) * 100));
-    const cls = pct < 10 ? 'danger' : pct < 30 ? 'warn' : 'ok';
-    const div = document.createElement('div');
-    div.className = 'bar-row ' + cls;
-    const resetText = reset ? `<span class="reset">resets ${reset}</span>` : '';
-    div.innerHTML = `
-      <div class="bar-label">${label}</div>
-      <div class="bar-track"><div class="bar-fill" style="width:${pct.toFixed(1)}%"></div></div>
-      <div class="bar-value">${fmtNum(r)} / ${fmtNum(l)} ${resetText}</div>`;
-    container.appendChild(div);
-    return true;
+  let toastTimer = null;
+  function toast(msg, isError) {
+    const el = $('toast');
+    el.textContent = msg;
+    el.className = 'toast show' + (isError ? ' error' : '');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { el.className = 'toast' + (isError ? ' error' : ''); }, 3800);
   }
 
-  /*  Chart factories  ---------------------------------------------------- */
-  let dailyChart = null, modelChart = null, userChart = null, dailyUserChart = null;
-  const PALETTE = ['#c084fc','#67e8f9','#fbbf24','#4ade80','#f87171','#60a5fa','#f472b6','#a78bfa'];
-  const GRID_COLOR = '#22222e';
-  const TICK_COLOR = '#7c7c8c';
+  function downloadCsv(name, header, rows) {
+    const cell = v => {
+      const s = v == null ? '' : String(v);
+      return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    };
+    const text = [header, ...rows].map(r => r.map(cell).join(',')).join('\r\n');
+    const blob = new Blob(['﻿' + text], { type: 'text/csv;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `claude-cloak-${name}-${localDateKey(new Date())}.csv`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }
 
-  const COMMON_OPTS = {
-    maintainAspectRatio: false,
-    responsive: true,
-    interaction: { mode: 'index', intersect: false },
-    plugins: {
-      legend: { display: true, labels: { color: '#b8b8c4', boxWidth: 10, font: { size: 11 } } },
-      tooltip: {
-        backgroundColor: '#15151e',
-        borderColor: '#2a2a3a', borderWidth: 1,
-        titleColor: '#ebebf0', bodyColor: '#b8b8c4',
-        padding: 10, cornerRadius: 6,
-        titleFont: { size: 12, weight: 600 }, bodyFont: { size: 12 },
-      },
-    },
+  /*  Sortable tables  ---------------------------------------------------- */
+  const sortState = {
+    users:    { key: store.get('sort.users.key', 'cost_usd'),    dir: store.get('sort.users.dir', 'desc') },
+    sessions: { key: store.get('sort.sessions.key', 'last_seen'), dir: store.get('sort.sessions.dir', 'desc') },
+    models:   { key: store.get('sort.models.key', 'cost_usd'),   dir: store.get('sort.models.dir', 'desc') },
   };
+  function sortRows(rows, st, getters = {}) {
+    const get = getters[st.key] || (r => r[st.key]);
+    const mul = st.dir === 'asc' ? 1 : -1;
+    return rows.slice().sort((a, b) => {
+      let x = get(a), y = get(b);
+      const xn = x == null || x === '', yn = y == null || y === '';
+      if (xn && yn) return 0;
+      if (xn) return 1;            // blanks always sink to the bottom
+      if (yn) return -1;
+      if (typeof x === 'number' && typeof y === 'number') return (x - y) * mul;
+      return String(x).localeCompare(String(y), undefined, { numeric: true }) * mul;
+    });
+  }
+  function wireSort(tableId, name, rerender) {
+    const ths = document.querySelectorAll(`#${tableId} th.sortable`);
+    const paint = () => ths.forEach(th => {
+      th.classList.toggle('asc',  th.dataset.key === sortState[name].key && sortState[name].dir === 'asc');
+      th.classList.toggle('desc', th.dataset.key === sortState[name].key && sortState[name].dir === 'desc');
+      th.setAttribute('aria-sort', th.dataset.key === sortState[name].key
+        ? (sortState[name].dir === 'asc' ? 'ascending' : 'descending') : 'none');
+    });
+    ths.forEach(th => {
+      th.tabIndex = 0;
+      const act = () => {
+        const st = sortState[name];
+        if (st.key === th.dataset.key) st.dir = st.dir === 'asc' ? 'desc' : 'asc';
+        else { st.key = th.dataset.key; st.dir = th.classList.contains('num') || /seen|cost|pct/.test(st.key) ? 'desc' : 'asc'; }
+        store.set(`sort.${name}.key`, st.key); store.set(`sort.${name}.dir`, st.dir);
+        paint(); rerender();
+      };
+      th.addEventListener('click', act);
+      th.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); act(); } });
+    });
+    paint();
+  }
+
+  /*  Tabs  ---------------------------------------------------------------- */
+  const VIEWS = ['overview', 'users', 'sessions', 'usage', 'performance', 'coaching'];
+  function showView(name, push) {
+    if (!VIEWS.includes(name)) name = 'overview';
+    document.querySelectorAll('.tab').forEach(t => t.setAttribute('aria-selected', String(t.dataset.view === name)));
+    document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === 'view-' + name));
+    if (push && location.hash !== '#' + name) history.replaceState(null, '', '#' + name);
+    // Charts inside a hidden panel measure 0×0; resize once they are visible.
+    requestAnimationFrame(() => Object.values(charts).forEach(c => c && c.resize()));
+  }
+  document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => showView(t.dataset.view, true)));
+  window.addEventListener('hashchange', () => showView(location.hash.slice(1), false));
+
+  /*  Charts  -------------------------------------------------------------- */
+  const HAS_CHART = typeof window.Chart !== 'undefined';
+  if (!HAS_CHART) document.querySelectorAll('.chart-panel').forEach(p => p.classList.add('no-chart'));
+  const charts = { daily: null, model: null, user: null, dailyUser: null };
+  const PALETTE = ['#a855f7','#22d3ee','#f59e0b','#22c55e','#ef4444','#3b82f6','#ec4899','#8b5cf6','#14b8a6','#f97316'];
+
+  function chartTheme() {
+    return {
+      grid: cssVar('--chart-grid'), tick: cssVar('--chart-tick'), bg: cssVar('--chart-bg'),
+      text: cssVar('--text-soft'), title: cssVar('--text'), border: cssVar('--border'),
+      accent: cssVar('--accent'), accent2: cssVar('--accent-2'), ok: cssVar('--ok'),
+    };
+  }
+  function baseOpts(th) {
+    return {
+      maintainAspectRatio: false,
+      responsive: true,
+      animation: { duration: 250 },
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: true, labels: { color: th.text, boxWidth: 10, font: { size: 11 } } },
+        tooltip: {
+          backgroundColor: th.bg, borderColor: th.border, borderWidth: 1,
+          titleColor: th.title, bodyColor: th.text, footerColor: th.title,
+          padding: 10, cornerRadius: 6,
+          titleFont: { size: 12, weight: 600 }, bodyFont: { size: 12 },
+        },
+      },
+    };
+  }
+  function upsertChart(key, canvasId, cfg) {
+    if (!HAS_CHART) return;
+    const c = charts[key];
+    if (c && c.config.type === cfg.type) {
+      c.data = cfg.data; c.options = cfg.options; c.update();
+    } else {
+      if (c) c.destroy();
+      charts[key] = new Chart($(canvasId), cfg);
+    }
+  }
 
   function buildDailyChart(days) {
-    days = days.slice().reverse(); // oldest -> newest for x-axis
-    const labels = days.map(d => d.date.slice(5)); // MM-DD
-    const cost = days.map(d => Number(d.cost_usd) || 0);
-    const inTok = days.map(d => Number(d.input_tokens) || 0);
-    const outTok = days.map(d => Number(d.output_tokens) || 0);
-    const cfg = {
+    const th = chartTheme();
+    days = days.slice().reverse(); // oldest -> newest
+    const base = baseOpts(th);
+    upsertChart('daily', 'daily-chart', {
+      type: 'bar',
       data: {
-        labels,
+        labels: days.map(d => d.date.slice(5)),
         datasets: [
-          { type: 'line', label: 'Cost (USD)', data: cost,
-            yAxisID: 'y',
-            borderColor: '#c084fc', backgroundColor: 'rgba(192,132,252,.15)',
-            tension: .3, fill: true, pointRadius: 3, pointHoverRadius: 5,
-            borderWidth: 2 },
-          { type: 'bar', label: 'Input tokens', data: inTok,
-            yAxisID: 'y1',
-            backgroundColor: 'rgba(103,232,249,.55)', borderRadius: 3, barPercentage: 0.8 },
-          { type: 'bar', label: 'Output tokens', data: outTok,
-            yAxisID: 'y1',
-            backgroundColor: 'rgba(74,222,128,.55)', borderRadius: 3, barPercentage: 0.8 },
+          { type: 'line', label: 'Cost (USD)', data: days.map(d => Number(d.cost_usd) || 0),
+            yAxisID: 'y', borderColor: th.accent, backgroundColor: th.accent + '26',
+            tension: .3, fill: true, pointRadius: 3, pointHoverRadius: 5, borderWidth: 2, order: 0 },
+          { label: 'Input tokens', data: days.map(d => Number(d.input_tokens) || 0),
+            yAxisID: 'y1', backgroundColor: th.accent2 + '8c', borderRadius: 3, barPercentage: 0.8, order: 1 },
+          { label: 'Output tokens', data: days.map(d => Number(d.output_tokens) || 0),
+            yAxisID: 'y1', backgroundColor: th.ok + '8c', borderRadius: 3, barPercentage: 0.8, order: 1 },
         ],
       },
       options: {
-        ...COMMON_OPTS,
+        ...base,
         scales: {
-          x: { ticks: { color: TICK_COLOR, font: { size: 11 } }, grid: { display: false } },
-          y: {
-            position: 'left', beginAtZero: true,
-            ticks: { color: TICK_COLOR, font: { size: 11 }, callback: v => '$' + Number(v).toFixed(2) },
-            grid: { color: GRID_COLOR },
-            title: { display: true, text: 'Cost (USD)', color: TICK_COLOR, font: { size: 11 } },
-          },
-          y1: {
-            position: 'right', beginAtZero: true,
-            ticks: { color: TICK_COLOR, font: { size: 11 }, callback: v => fmtNum(v) },
-            grid: { display: false },
-            title: { display: true, text: 'Tokens', color: TICK_COLOR, font: { size: 11 } },
-          },
+          x: { ticks: { color: th.tick, font: { size: 11 } }, grid: { display: false } },
+          y: { position: 'left', beginAtZero: true, grid: { color: th.grid },
+               ticks: { color: th.tick, font: { size: 11 }, callback: v => '$' + Number(v).toFixed(2) } },
+          y1: { position: 'right', beginAtZero: true, grid: { display: false },
+                ticks: { color: th.tick, font: { size: 11 }, callback: v => fmtNum(v) } },
         },
         plugins: {
-          ...COMMON_OPTS.plugins,
-          tooltip: {
-            ...COMMON_OPTS.plugins.tooltip,
-            callbacks: {
-              label: ctx => {
-                if (ctx.dataset.label === 'Cost (USD)') return ' Cost: ' + fmtCostExact(ctx.parsed.y);
-                return ' ' + ctx.dataset.label + ': ' + fmtCount.format(ctx.parsed.y);
-              },
-            },
-          },
+          ...base.plugins,
+          tooltip: { ...base.plugins.tooltip, callbacks: {
+            label: ctx => ctx.dataset.yAxisID === 'y'
+              ? ' Cost: ' + fmtCostExact(ctx.parsed.y)
+              : ' ' + ctx.dataset.label + ': ' + fmtCount.format(ctx.parsed.y),
+          } },
         },
       },
-    };
-    if (!dailyChart) {
-      dailyChart = new Chart(document.getElementById('daily-chart'), cfg);
-    } else {
-      dailyChart.data = cfg.data; dailyChart.update();
-    }
+    });
   }
 
-  function buildModelChart(models) {
-    const labels = models.map(m => m.model);
-    const data = models.map(m => Number(m.cost_usd) || 0);
-    const colors = labels.map((_, i) => PALETTE[i % PALETTE.length]);
-    const cfg = {
+  function buildDoughnut(key, canvasId, labels, values) {
+    const th = chartTheme();
+    const base = baseOpts(th);
+    const total = values.reduce((a, b) => a + b, 0);
+    upsertChart(key, canvasId, {
       type: 'doughnut',
-      data: {
-        labels,
-        datasets: [{ data, backgroundColor: colors, borderColor: '#111118', borderWidth: 2, hoverOffset: 4 }],
-      },
+      data: { labels, datasets: [{ data: values, backgroundColor: labels.map((_, i) => PALETTE[i % PALETTE.length]),
+                                   borderColor: th.bg, borderWidth: 2, hoverOffset: 4 }] },
       options: {
-        ...COMMON_OPTS,
-        cutout: '62%',
+        ...base, cutout: '64%', interaction: { mode: 'nearest', intersect: true },
         plugins: {
-          legend: { position: 'bottom', labels: { color: '#b8b8c4', boxWidth: 10, font: { size: 11 }, padding: 10 } },
-          tooltip: {
-            ...COMMON_OPTS.plugins.tooltip,
-            callbacks: { label: ctx => ' ' + ctx.label + ': ' + fmtCostExact(ctx.parsed) },
-          },
+          legend: { position: 'bottom', labels: { color: th.text, boxWidth: 10, font: { size: 11 }, padding: 10 } },
+          tooltip: { ...base.plugins.tooltip, callbacks: {
+            label: ctx => ` ${ctx.label}: ${fmtCostExact(ctx.parsed)} (${total > 0 ? fmtPct(ctx.parsed / total * 100) : '0%'})`,
+          } },
         },
       },
-    };
-    if (!modelChart) {
-      modelChart = new Chart(document.getElementById('model-chart'), cfg);
-    } else {
-      modelChart.data = cfg.data; modelChart.update();
-    }
-  }
-
-  function buildUserChart(users) {
-    const labels = users.map(u => u.label);
-    const data = users.map(u => Number(u.cost_usd) || 0);
-    const colors = labels.map((_, i) => PALETTE[i % PALETTE.length]);
-    const cfg = {
-      type: 'doughnut',
-      data: {
-        labels,
-        datasets: [{ data, backgroundColor: colors, borderColor: '#111118', borderWidth: 2, hoverOffset: 4 }],
-      },
-      options: {
-        ...COMMON_OPTS,
-        cutout: '62%',
-        plugins: {
-          legend: { position: 'bottom', labels: { color: '#b8b8c4', boxWidth: 10, font: { size: 11 }, padding: 10 } },
-          tooltip: {
-            ...COMMON_OPTS.plugins.tooltip,
-            callbacks: { label: ctx => ' ' + ctx.label + ': ' + fmtCostExact(ctx.parsed) },
-          },
-        },
-      },
-    };
-    if (!userChart) {
-      userChart = new Chart(document.getElementById('user-chart'), cfg);
-    } else {
-      userChart.data = cfg.data; userChart.update();
-    }
+    });
   }
 
   function buildDailyUserChart(days) {
-    // days = [{date, users: [{user_label, cost_usd}, ...]}]; build stacked bar.
-    const dateLabels = days.map(d => d.date.slice(5));   // MM-DD
-    const userSet = new Map();
-    for (const d of days) {
-      for (const u of (d.users || [])) {
-        if (!userSet.has(u.user_label)) userSet.set(u.user_label, userSet.size);
-      }
-    }
-    const datasets = [...userSet.keys()].map((label, i) => ({
-      label,
-      data: days.map(d => {
-        const u = (d.users || []).find(x => x.user_label === label);
-        return u ? Number(u.cost_usd) || 0 : 0;
-      }),
-      backgroundColor: PALETTE[i % PALETTE.length],
-      borderColor: '#111118',
-      borderWidth: 1,
-      stack: 'cost',
-    }));
-    const cfg = {
+    const th = chartTheme();
+    const base = baseOpts(th);
+    const totals = new Map();
+    for (const d of days) for (const u of (d.users || []))
+      totals.set(u.user_label, (totals.get(u.user_label) || 0) + (Number(u.cost_usd) || 0));
+    const labels = [...totals.keys()].sort((a, b) => totals.get(b) - totals.get(a));
+    upsertChart('dailyUser', 'daily-user-chart', {
       type: 'bar',
-      data: { labels: dateLabels, datasets },
+      data: {
+        labels: days.map(d => d.date.slice(5)),
+        datasets: labels.map((label, i) => ({
+          label,
+          data: days.map(d => { const u = (d.users || []).find(x => x.user_label === label); return u ? Number(u.cost_usd) || 0 : 0; }),
+          backgroundColor: PALETTE[i % PALETTE.length], borderRadius: 2, stack: 'cost',
+        })),
+      },
       options: {
-        ...COMMON_OPTS,
+        ...base,
         plugins: {
-          legend: { position: 'bottom', labels: { color: '#b8b8c4', boxWidth: 10, font: { size: 11 }, padding: 8 } },
-          tooltip: {
-            ...COMMON_OPTS.plugins.tooltip,
+          legend: { position: 'bottom', labels: { color: th.text, boxWidth: 10, font: { size: 11 }, padding: 8 } },
+          tooltip: { ...base.plugins.tooltip,
+            filter: it => it.parsed.y > 0,
             callbacks: {
               label: ctx => ' ' + ctx.dataset.label + ': ' + fmtCostExact(ctx.parsed.y),
-              footer: items => {
-                const total = items.reduce((s, it) => s + (it.parsed.y || 0), 0);
-                return 'Total: ' + fmtCostExact(total);
-              },
-            },
-          },
+              footer: items => 'Total: ' + fmtCostExact(items.reduce((s, it) => s + (it.parsed.y || 0), 0)),
+            } },
         },
         scales: {
-          x: { stacked: true, grid: { color: GRID_COLOR }, ticks: { color: TICK_COLOR } },
-          y: { stacked: true, grid: { color: GRID_COLOR }, ticks: { color: TICK_COLOR, callback: v => '$' + v } },
+          x: { stacked: true, grid: { display: false }, ticks: { color: th.tick, font: { size: 11 } } },
+          y: { stacked: true, beginAtZero: true, grid: { color: th.grid }, ticks: { color: th.tick, font: { size: 11 }, callback: v => '$' + v } },
         },
       },
-    };
-    if (!dailyUserChart) {
-      dailyUserChart = new Chart(document.getElementById('daily-user-chart'), cfg);
+    });
+  }
+
+  /*  State  --------------------------------------------------------------- */
+  let Q = null, C = null, H = null;
+  let dailyDays = Number(store.get('dailyDays', '15')) || 15;
+  let userFilter = 'all';
+  let sessionPage = 0;
+  const expanded = { users: new Set(), days: new Set(), models: new Set() };
+
+  /*  Alerts  -------------------------------------------------------------- */
+  function computeAlerts() {
+    const out = [];
+    if (!Q) return out;
+    const rl = Q.rate_limits || {};
+    if (rl.retry_after) out.push({ lvl: 'danger', view: 'performance',
+      html: `<strong>Rate limited.</strong> Anthropic asked the proxy to retry after <code>${esc(rl.retry_after)}</code> s.` });
+    for (const [label, r, l] of [
+      ['requests', rl.requests_remaining, rl.requests_limit],
+      ['input tokens', rl.input_tokens_remaining, rl.input_tokens_limit],
+      ['output tokens', rl.output_tokens_remaining, rl.output_tokens_limit],
+      ['tokens', rl.tokens_remaining, rl.tokens_limit],
+    ]) {
+      const rn = Number(r), ln = Number(l);
+      if (r == null || l == null || !(ln > 0) || !Number.isFinite(rn)) continue;
+      const p = rn / ln * 100;
+      if (p < 10) out.push({ lvl: 'danger', view: 'performance', html: `<strong>Rate limit almost exhausted:</strong> ${esc(label)} at ${fmtPct(p)} remaining.` });
+      else if (p < 30) out.push({ lvl: 'warn', view: 'performance', html: `<strong>Rate limit low:</strong> ${esc(label)} at ${fmtPct(p)} remaining.` });
+    }
+    const uq = Q.user_quota || {};
+    if (uq.enabled) {
+      const users = uq.users || [];
+      const over = users.filter(u => u.cost_pct != null && u.cost_pct >= 100);
+      const near = users.filter(u => u.cost_pct != null && u.cost_pct >= 80 && u.cost_pct < 100);
+      if (over.length) out.push({ lvl: 'danger', view: 'users', filter: 'over',
+        html: `<strong>${over.length} user${over.length > 1 ? 's' : ''} over cap:</strong> ${over.slice(0, 5).map(u => esc(u.label)).join(', ')}${over.length > 5 ? '…' : ''}${uq.hard_limit ? ' — requests are being blocked.' : ' — soft limit, not blocked.'}` });
+      if (near.length) out.push({ lvl: 'warn', view: 'users', filter: 'near',
+        html: `<strong>${near.length} user${near.length > 1 ? 's' : ''} above 80% of cap:</strong> ${near.slice(0, 5).map(u => esc(u.label)).join(', ')}${near.length > 5 ? '…' : ''}` });
+    }
+    const sh = Q.stream || {};
+    if ((sh.stalls || 0) > 0 && (sh.stall_rate || 0) >= 0.02)
+      out.push({ lvl: 'warn', view: 'performance', html: `<strong>Upstream stalls:</strong> ${fmtPct(sh.stall_rate * 100)} of streams stalled (last ${esc(sh.last_stall_at || '—')}).` });
+    if ((sh.pool_waits || 0) > 0)
+      out.push({ lvl: 'info', view: 'performance', html: `<strong>Connection pool saturated ${fmtCount.format(sh.pool_waits)}×</strong> (avg wait ${fmtCount.format(sh.pool_wait_ms_avg || 0)} ms) — consider raising <code>UPSTREAM_MAX_CONNECTIONS</code>.` });
+    const unpriced = Object.keys(Q.unpriced_models || {});
+    if (unpriced.length) out.push({ lvl: 'warn', view: 'usage',
+      html: `<strong>Unpriced model${unpriced.length > 1 ? 's' : ''}:</strong> ${unpriced.map(m => `<code>${esc(m)}</code>`).join(', ')} — costed at the fallback rate; add pricing in <a href="/config">Config</a>.` });
+    if (H) {
+      const tls = H.tls || {};
+      if (tls.status === 'expired' || tls.status === 'missing' || tls.status === 'unreadable')
+        out.push({ lvl: 'danger', html: `<strong>TLS certificate ${esc(tls.status)}</strong>${tls.certfile ? ' — <code>' + esc(tls.certfile) + '</code>' : ''}.` });
+      else if (tls.status === 'critical' || tls.status === 'warning')
+        out.push({ lvl: tls.status === 'critical' ? 'danger' : 'warn', html: `<strong>TLS certificate expires in ${esc(tls.days_remaining)} days</strong> — check that renewal is running.` });
+      if (!H.identity_captured)
+        out.push({ lvl: 'info', html: '<strong>Device identity not captured yet.</strong> It is recorded from the first Claude Code request through the proxy.' });
+    }
+    return out;
+  }
+
+  function renderAlerts() {
+    const list = computeAlerts();
+    const el = $('alerts');
+    const icons = { danger: '!', warn: '▲', info: 'i', ok: '✓' };
+    el.innerHTML = list.length
+      ? list.map((a, i) => `<div class="alert ${a.lvl}"><span class="ic">${icons[a.lvl]}</span><span>${a.html}</span>${a.view ? `<button class="go" data-i="${i}">View →</button>` : ''}</div>`).join('')
+      : (Q && (Q.messages_requests || 0) > 0 ? '<div class="alert ok"><span class="ic">✓</span><span>All systems nominal — no caps, rate limits or stream issues need attention.</span></div>' : '');
+    el.querySelectorAll('.go').forEach(b => b.addEventListener('click', () => {
+      const a = list[Number(b.dataset.i)];
+      if (a.filter) setUserFilter(a.filter);
+      showView(a.view, true);
+    }));
+    const bad = list.filter(a => a.lvl === 'danger').length, warn = list.filter(a => a.lvl === 'warn').length;
+    setCount('overview', bad + warn, bad ? 'danger' : 'warn');
+    const perf = list.filter(a => a.view === 'performance' && a.lvl !== 'info');
+    setCount('performance', perf.length, perf.some(a => a.lvl === 'danger') ? 'danger' : 'warn');
+  }
+  function setCount(view, n, cls) {
+    const el = $('tab-count-' + view);
+    if (!el) return;
+    el.hidden = !n;
+    el.textContent = n;
+    el.className = 'count' + (cls ? ' ' + cls : '');
+  }
+
+  /*  Overview  ------------------------------------------------------------ */
+  function renderOverview() {
+    const q = Q, t = q.tokens || {};
+    const reqs = q.messages_requests || 0;
+    $('cost-total').textContent = fmtCostExact(q.cost_usd_total);
+    $('cost-meta').textContent = reqs === 0 ? 'No requests recorded yet'
+      : `${fmtCount.format(reqs)} requests across ${(q.by_model || []).length} model(s)`;
+    $('kpi-hint').textContent = q.monthly_reset_enabled && q.period_month
+      ? `Period ${q.period_month} — persisted across restarts` : 'Lifetime — persisted across restarts';
+
+    const days = q.by_day || [];
+    const todayKey = localDateKey(new Date());
+    const yKey = localDateKey(new Date(Date.now() - 86400000));
+    const today = days.find(d => d.date === todayKey);
+    const yday = days.find(d => d.date === yKey);
+    const tc = today ? Number(today.cost_usd) || 0 : 0;
+    const yc = yday ? Number(yday.cost_usd) || 0 : 0;
+    $('cost-today').textContent = fmtCost(tc);
+    let delta = '<span class="delta flat">no data yesterday</span>';
+    if (yc > 0) {
+      const ch = (tc - yc) / yc * 100;
+      const cls = Math.abs(ch) < 1 ? 'flat' : ch > 0 ? 'up' : 'down';
+      delta = `<span class="delta ${cls}">${ch > 0 ? '▲' : ch < 0 ? '▼' : '•'} ${fmtPct(Math.abs(ch), 0)}</span> vs yesterday (${fmtCost(yc)})`;
+    }
+    $('cost-today-meta').innerHTML = `${today ? fmtCount.format(today.requests) : 0} requests · ${delta}`;
+
+    // Projection: average daily spend over the days recorded this month.
+    const now = new Date();
+    const monthPrefix = todayKey.slice(0, 7);
+    const monthDays = days.filter(d => d.date.startsWith(monthPrefix));
+    const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+    if (monthDays.length) {
+      const spent = monthDays.reduce((s, d) => s + (Number(d.cost_usd) || 0), 0);
+      const elapsed = now.getDate();
+      const proj = spent / elapsed * daysInMonth;
+      $('cost-projected').textContent = fmtCost(proj);
+      $('cost-projected-meta').textContent = `${fmtCost(spent)} spent in ${elapsed} of ${daysInMonth} days`;
     } else {
-      dailyUserChart.data = cfg.data; dailyUserChart.update();
+      $('cost-projected').textContent = '—';
+      $('cost-projected-meta').textContent = 'no spend recorded this month';
+    }
+
+    $('req-total').textContent = fmtCount.format(reqs);
+    const users = (q.user_quota || {}).users || [];
+    const sessions = q.by_session || [];
+    $('user-count').textContent = fmtCount.format(users.length);
+    $('user-count-meta').textContent = `active in last 24 h: ${users.filter(u => ageSec(u.last_seen) < 86400).length}`;
+    $('session-count').textContent = fmtCount.format(sessions.length);
+    $('session-count-meta').textContent = `active in last hour: ${sessions.filter(s => ageSec(s.last_seen) < 3600).length}`;
+    $('avg-cost').textContent = fmtCostExact(reqs > 0 ? (q.cost_usd_total || 0) / reqs : 0);
+    const hr = cacheHit(t);
+    $('cache-hit-rate').textContent = hr == null ? '0%' : fmtPct(hr);
+    $('out-total').textContent = fmtNum(t.output_tokens || 0);
+    $('in-total-meta').textContent = `input ${fmtNum(t.input_tokens || 0)}`;
+
+    // Charts
+    const shown = days.slice(0, dailyDays);
+    if (HAS_CHART) buildDailyChart(shown);
+    $('daily-range').textContent = shown.length ? `${shown[shown.length - 1].date} → ${shown[0].date}` : '';
+    const models = (q.by_model || []).slice().sort((a, b) => b.cost_usd - a.cost_usd);
+    if (HAS_CHART) buildDoughnut('model', 'model-chart', models.map(m => m.model), models.map(m => Number(m.cost_usd) || 0));
+
+    // Top spenders
+    const uq = q.user_quota || {};
+    const top = users.slice(0, 5);
+    $('top-sub').textContent = uq.enabled ? `${uq.period || 'monthly'} period` : 'current period';
+    $('top-users').innerHTML = top.length ? top.map((u, i) => {
+      const pct = u.cost_pct == null ? null : Number(u.cost_pct);
+      const capTxt = uq.enabled && pct != null ? fmtPct(pct, 0) + ' of ' + fmtCost(u.cap_usd) : `${fmtCount.format(u.requests || 0)} req`;
+      const w = uq.enabled && pct != null ? pct : (users[0].cost_usd > 0 ? u.cost_usd / users[0].cost_usd * 100 : 0);
+      return `<div class="top-item"><span class="rank">${i + 1}</span><div class="who"><div class="name">${userCell(u.label, u.last_seen)}</div>`
+        + `<div class="meter ${uq.enabled && pct != null ? capLevel(pct) : 'ok'}"><div class="meter-track"><div class="meter-fill" style="width:${Math.min(100, w).toFixed(1)}%"></div></div><span class="meter-text">${esc(capTxt)}</span></div></div>`
+        + `<span class="amt">${fmtCost(u.cost_usd)}</span></div>`;
+    }).join('') : '<div class="empty-inline">No user activity yet.</div>';
+
+    // Rate limits (compact)
+    renderRateLimits($('rate-limits-mini'));
+    const rlAt = (q.rate_limits || {}).updated_at;
+    $('rl-updated').textContent = rlAt ? 'updated ' + fmtRelativeTime(rlAt) : 'Anthropic headers';
+  }
+
+  function renderSystem() {
+    const el = $('system-kv');
+    if (!H) { el.innerHTML = '<dt>Status</dt><dd>unavailable</dd>'; return; }
+    const ts = H.token_saver || {};
+    const tls = H.tls || {};
+    const dep = H.deploy || {};
+    const tlsBadge = { ok: 'ok', warning: 'warn', critical: 'danger', expired: 'danger', missing: 'danger', unreadable: 'danger', disabled: '' }[tls.status] || '';
+    const rows = [
+      ['Identity', H.identity_captured ? `<span class="badge ok">captured · ${esc(H.headers_locked)} headers</span>` : '<span class="badge warn">not captured</span>'],
+      ['Telemetry blocked', fmtCount.format(H.telemetry_blocked || 0)],
+      ['Bodies sanitized', fmtCount.format(H.bodies_sanitized || 0)],
+      ['Token saver', ts.enabled ? `<span class="badge ok">on</span> ~${fmtNum(ts.tokens_saved_est || 0)} saved` : '<span class="badge">off</span>'],
+      ['Deploy mode', `<span class="badge info">${esc(dep.mode || '—')}</span>`],
+      ['TLS', tls.status ? `<span class="badge ${tlsBadge}">${esc(tls.status)}${tls.days_remaining != null ? ' · ' + esc(tls.days_remaining) + 'd' : ''}</span>` : '—'],
+    ];
+    el.innerHTML = rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join('');
+  }
+
+  function renderRateLimits(container) {
+    const rl = Q.rate_limits || {};
+    const rows = [
+      ['Requests', rl.requests_remaining, rl.requests_limit, rl.requests_reset],
+      ['Input tokens', rl.input_tokens_remaining, rl.input_tokens_limit, rl.input_tokens_reset],
+      ['Output tokens', rl.output_tokens_remaining, rl.output_tokens_limit, rl.output_tokens_reset],
+      ['Total tokens', rl.tokens_remaining, rl.tokens_limit, rl.tokens_reset],
+    ];
+    let html = '';
+    for (const [label, rem, lim, reset] of rows) {
+      if (rem == null || lim == null) continue;
+      const r = Number(rem), l = Number(lim);
+      if (!Number.isFinite(r) || !Number.isFinite(l) || l <= 0) continue;
+      const pct = Math.max(0, Math.min(100, r / l * 100));
+      const cls = pct < 10 ? 'danger' : pct < 30 ? 'warn' : 'ok';
+      const resetTxt = reset ? `<span class="reset">resets ${esc(fmtResetTime(reset))}</span>` : '';
+      html += `<div class="bar-row ${cls}"><div class="bar-label">${label}</div>`
+        + `<div class="bar-track"><div class="bar-fill" style="width:${pct.toFixed(1)}%"></div></div>`
+        + `<div class="bar-value">${fmtNum(r)} / ${fmtNum(l)}${resetTxt}</div></div>`;
+    }
+    if (rl.retry_after) html += `<div class="alert danger" style="margin-top:12px"><span class="ic">!</span><span>Anthropic asked us to retry after <code>${esc(rl.retry_after)}</code> s</span></div>`;
+    container.innerHTML = html || '<div class="empty-inline">Waiting for the first <code>/v1/messages</code> response from Anthropic…</div>';
+  }
+  function fmtResetTime(v) {
+    const d = new Date(v);
+    if (isNaN(d)) return v;
+    const s = (d.getTime() - Date.now()) / 1000;
+    if (s <= 0) return 'now';
+    if (s < 90) return `in ${Math.round(s)}s`;
+    if (s < 5400) return `in ${Math.round(s / 60)}m`;
+    return d.toLocaleString();
+  }
+
+  /*  Users  --------------------------------------------------------------- */
+  function setUserFilter(f) {
+    userFilter = f;
+    document.querySelectorAll('#user-filter button').forEach(b => b.classList.toggle('on', b.dataset.f === f));
+    renderUsers();
+  }
+  function filteredUsers() {
+    const uq = (Q && Q.user_quota) || {};
+    const term = $('user-search').value.trim().toLowerCase();
+    let users = (uq.users || []).map(u => ({ ...u, cache_hit: cacheHit(u) }));
+    if (term) users = users.filter(u => String(u.label).toLowerCase().includes(term));
+    if (userFilter === 'active') users = users.filter(u => ageSec(u.last_seen) < 86400);
+    if (userFilter === 'near') users = users.filter(u => u.cost_pct != null && u.cost_pct >= 80 && u.cost_pct < 100);
+    if (userFilter === 'over') users = users.filter(u => u.cost_pct != null && u.cost_pct >= 100);
+    return sortRows(users, sortState.users);
+  }
+  function renderUsers() {
+    if (!Q) return;
+    const uq = Q.user_quota || {};
+    const all = uq.users || [];
+    const resetIn = uq.reset_in_seconds != null ? Math.ceil(uq.reset_in_seconds / 86400) + 'd' : '—';
+    if (uq.enabled) {
+      $('user-section-title').textContent = 'Per-user quota';
+      $('user-section-hint').innerHTML = `Cap enforced per <code>${esc(uq.period || 'monthly')}</code> period${uq.hard_limit ? ' (hard limit — over-cap requests get 429)' : ' (soft limit — tracked, not blocked)'}. Resets in ${resetIn}.`;
+    } else {
+      $('user-section-title').textContent = 'Users';
+      $('user-section-hint').innerHTML = 'Attribution by URL prefix <code>/u/&lt;name&gt;/</code>, proxy key, or IP label. Enable <code>USER_QUOTA_ENABLED</code> to add caps.';
+    }
+
+    // KPIs
+    const spend = all.reduce((s, u) => s + (Number(u.cost_usd) || 0), 0);
+    const near = all.filter(u => u.cost_pct != null && u.cost_pct >= 80 && u.cost_pct < 100).length;
+    const over = all.filter(u => u.cost_pct != null && u.cost_pct >= 100).length;
+    const blocked = all.reduce((s, u) => s + (u.blocked_count || 0), 0);
+    $('u-kpi-total').textContent = fmtCount.format(all.length);
+    $('u-kpi-total-meta').textContent = `${all.filter(u => ageSec(u.last_seen) < 86400).length} active in last 24 h`;
+    $('u-kpi-spend').textContent = fmtCost(spend);
+    $('u-kpi-spend-meta').textContent = uq.enabled ? `default cap ${uq.default_cap_usd > 0 ? fmtCost(uq.default_cap_usd) : 'unlimited'} / user` : 'sum of all users';
+    $('u-kpi-near').textContent = uq.enabled ? near : '—';
+    $('u-kpi-near-meta').textContent = uq.enabled ? `resets in ${resetIn}` : 'caps disabled';
+    $('u-kpi-near-card').className = 'card' + (uq.enabled && near ? ' st-warn' : '');
+    $('u-kpi-over').textContent = uq.enabled ? over : '—';
+    $('u-kpi-over-meta').textContent = `${fmtCount.format(blocked)} request${blocked === 1 ? '' : 's'} blocked`;
+    $('u-kpi-over-card').className = 'card' + (uq.enabled && over ? ' st-danger' : '');
+    setCount('users', over + near, over ? 'danger' : 'warn');
+
+    const users = filteredUsers();
+    $('user-meta').textContent = `${users.length} of ${all.length} user${all.length === 1 ? '' : 's'}`;
+    const tb = document.querySelector('#user-table tbody');
+    $('user-empty').hidden = users.length > 0;
+    $('user-table').hidden = users.length === 0;
+    if (!users.length && all.length) {
+      $('user-empty').innerHTML = '<strong>No users match</strong>Try a different search or filter.';
+    } else if (!all.length) {
+      $('user-empty').innerHTML = '<strong>No users tracked yet</strong>User buckets appear after the first labelled <code>/v1/messages</code> response.';
+    }
+
+    let html = '';
+    for (const u of users) {
+      const cap = Number(u.cap_usd) || 0;
+      const pct = u.cost_pct == null ? null : Number(u.cost_pct);
+      let capCell;
+      if (!uq.enabled) capCell = '<span class="muted">caps off</span>';
+      else if (cap > 0) capCell = meter(pct, `${fmtPct(pct, 0)} of ${fmtCost(cap)}`);
+      else capCell = '<span class="badge">unlimited</span>';
+      const open = expanded.users.has(u.label);
+      const hit = u.cache_hit;
+      html += `<tr>
+        <td><button class="expander${open ? ' open' : ''}" data-user="${esc(u.label)}" aria-label="Details" aria-expanded="${open}">▶</button>${userCell(u.label, u.last_seen)}</td>
+        <td class="num cost">${fmtCostExact(u.cost_usd)}</td>
+        <td>${capCell}</td>
+        <td class="num">${fmtCount.format(u.requests || 0)}</td>
+        <td class="num">${fmtNum(u.input_tokens)}</td>
+        <td class="num">${fmtNum(u.output_tokens)}</td>
+        <td class="num">${hit == null ? '—' : fmtPct(hit, 0)}</td>
+        <td class="num">${uq.enabled ? (u.blocked_count ? `<span class="badge danger">${fmtCount.format(u.blocked_count)}</span>` : '0') : '—'}</td>
+        <td>${tsCell(u.last_seen)}</td>
+        <td><div class="row-actions">${uq.enabled ? `<button class="btn danger" data-reset="${esc(u.label)}" title="Zero this user's counters for the current period (admin only)">Reset</button>` : ''}</div></td>
+      </tr>`;
+      if (open) html += userDetailRow(u, uq);
+    }
+    tb.innerHTML = html;
+    tb.querySelectorAll('.expander').forEach(b => b.addEventListener('click', () => {
+      const k = b.dataset.user;
+      expanded.users.has(k) ? expanded.users.delete(k) : expanded.users.add(k);
+      renderUsers();
+    }));
+    tb.querySelectorAll('[data-reset]').forEach(b => b.addEventListener('click', () => resetUser(b.dataset.reset, b)));
+
+    // Charts
+    const hasSplit = (Q.by_day || []).some(d => (d.users || []).length);
+    const chrono = (Q.by_day || []).slice().reverse();
+    $('daily-user-range').textContent = chrono.length ? `${chrono[0].date} → ${chrono[chrono.length - 1].date}` : '—';
+    if (HAS_CHART && hasSplit) buildDailyUserChart(chrono);
+    if (HAS_CHART && all.length) buildDoughnut('user', 'user-chart', all.map(u => u.label), all.map(u => Number(u.cost_usd) || 0));
+  }
+
+  function userDetailRow(u, uq) {
+    const sessions = (Q.by_session || []).filter(s => s.user_label === u.label);
+    const models = u.models || [];
+    const avg = u.requests ? (u.cost_usd || 0) / u.requests : 0;
+    return `<tr class="detail"><td colspan="10">
+      <div class="detail-grid">
+        <div>Period<b>${esc(u.period_key || uq.period || '—')}</b></div>
+        <div>First seen<b>${esc(u.first_seen ? String(u.first_seen).replace('T', ' ') : '—')}</b></div>
+        <div>Avg cost / request<b>${fmtCostExact(avg)}</b></div>
+        <div>Sessions<b>${fmtCount.format(sessions.length)}</b></div>
+      </div>
+      ${models.length ? `<table class="inner"><thead><tr>
+          <th>Model</th><th class="num">Requests</th><th class="num">Input</th><th class="num">Output</th>
+          <th class="num">Cache R</th><th class="num">Cache W</th><th class="num">Cost</th></tr></thead><tbody>
+        ${models.map(m => `<tr><td class="mono">${esc(m.model)}</td><td class="num">${fmtCount.format(m.requests)}</td>
+          <td class="num">${fmtNum(m.input_tokens)}</td><td class="num">${fmtNum(m.output_tokens)}</td>
+          <td class="num">${fmtNum(m.cache_read_input_tokens)}</td><td class="num">${fmtNum(m.cache_creation_input_tokens)}</td>
+          <td class="num cost">${fmtCostExact(m.cost_usd)}</td></tr>`).join('')}
+        </tbody></table>` : '<div class="empty-inline">No per-model data for this period.</div>'}
+      ${sessions.length ? `<div style="margin-top:10px;font-size:12px"><a href="#sessions" data-user-sessions="${esc(u.label)}">View ${sessions.length} session${sessions.length > 1 ? 's' : ''} →</a></div>` : ''}
+    </td></tr>`;
+  }
+
+  async function resetUser(label, btn) {
+    if (!confirm(`Reset the current-period counters for "${label}"?\n\nSpend, requests and blocked count go back to zero. This cannot be undone.`)) return;
+    btn.disabled = true;
+    try {
+      const r = await fetch('/admin/quota/reset/' + encodeURIComponent(label), { method: 'POST' });
+      if (r.status === 403) throw new Error('Forbidden — resetting quotas is only allowed from ADMIN_IPS.');
+      if (!r.ok) throw new Error(`Reset failed (HTTP ${r.status}).`);
+      toast(`Quota for "${label}" was reset.`);
+      refresh();
+    } catch (e) {
+      toast(e.message || 'Reset failed.', true);
+    } finally {
+      btn.disabled = false;
     }
   }
 
-  /*  Main refresh loop  --------------------------------------------------- */
-  async function refresh() {
-    let q;
-    try {
-      const r = await fetch('/quota', { cache: 'no-store' });
-      q = await r.json();
-      const pill = document.getElementById('status-pill');
-      pill.classList.remove('error'); pill.classList.add('live');
-      document.getElementById('status-text').textContent = 'live';
-      document.getElementById('last-refresh').textContent =
-        'updated ' + new Date().toLocaleTimeString();
-    } catch (e) {
-      const pill = document.getElementById('status-pill');
-      pill.classList.add('error'); pill.classList.remove('live');
-      document.getElementById('status-text').textContent = 'offline';
-      return;
+  /*  Sessions  ------------------------------------------------------------ */
+  function filteredSessions() {
+    const term = $('session-search').value.trim().toLowerCase();
+    const user = $('session-user').value;
+    const win = Number($('session-window').value) || 0;
+    let rows = (Q && Q.by_session) || [];
+    if (user) rows = rows.filter(s => (s.user_label || '') === user);
+    if (win) rows = rows.filter(s => ageSec(s.last_seen) < win);
+    if (term) rows = rows.filter(s =>
+      String(s.session_id).toLowerCase().includes(term)
+      || String(s.user_label || '').toLowerCase().includes(term)
+      || Object.keys(s.models || {}).some(m => m.toLowerCase().includes(term)));
+    return sortRows(rows, sortState.sessions);
+  }
+  function renderSessions() {
+    if (!Q) return;
+    const all = Q.by_session || [];
+    // Keep the user filter options in sync without losing the selection.
+    const sel = $('session-user');
+    const current = sel.value;
+    const labels = [...new Set(all.map(s => s.user_label || '').filter(Boolean))].sort();
+    const want = ['', ...labels].join('\u0000');
+    if (sel.dataset.opts !== want) {
+      sel.innerHTML = '<option value="">All users</option>' + labels.map(l => `<option value="${esc(l)}">${esc(l)}</option>`).join('');
+      sel.dataset.opts = want;
+      sel.value = labels.includes(current) ? current : '';
     }
 
-    /* Period pill */
-    const periodPill = document.getElementById('period-pill');
-    if (q.monthly_reset_enabled && q.period_month) {
-      const [y, m] = q.period_month.split('-').map(Number);
-      const nextReset = new Date(y, m, 1); // 1st of next month
-      const daysLeft = Math.ceil((nextReset - new Date()) / 86400000);
-      periodPill.textContent = `${q.period_month} · resets in ${daysLeft}d`;
-      periodPill.style.display = '';
-    } else {
-      periodPill.style.display = 'none';
-    }
+    const rows = filteredSessions();
+    const size = Number($('session-page-size').value) || 25;
+    const pages = Math.max(1, Math.ceil(rows.length / size));
+    sessionPage = Math.min(sessionPage, pages - 1);
+    const pageRows = rows.slice(sessionPage * size, (sessionPage + 1) * size);
+    const active = all.filter(s => ageSec(s.last_seen) < 3600).length;
+    $('session-meta').textContent = `${rows.length} of ${all.length} · ${active} active in last hour`;
+    setCount('sessions', active, '');
 
-    /* Totals cards */
-    const t = q.tokens || {};
-    document.getElementById('cost-total').textContent  = fmtCostExact(q.cost_usd_total);
-    document.getElementById('req-total').textContent   = fmtCount.format(q.messages_requests || 0);
-    document.getElementById('session-count').textContent = fmtCount.format((q.by_session || []).length);
-    document.getElementById('in-total').textContent    = fmtCount.format(t.input_tokens || 0);
-    document.getElementById('out-total').textContent   = fmtCount.format(t.output_tokens || 0);
-    document.getElementById('cache-read').textContent  = fmtCount.format(t.cache_read_input_tokens || 0);
-    document.getElementById('cache-write').textContent = fmtCount.format(t.cache_creation_input_tokens || 0);
-    document.getElementById('cost-meta').textContent =
-      (q.messages_requests || 0) === 0
-        ? 'No requests recorded yet'
-        : `Across ${fmtCount.format(q.messages_requests)} requests on ${(q.by_model || []).length} model(s)`;
+    $('session-empty').hidden = rows.length > 0;
+    $('session-table').hidden = rows.length === 0;
+    $('session-empty-text').innerHTML = all.length
+      ? 'Try a different search or filter.'
+      : 'Sessions appear once the proxy sees an <code>x-claude-code-session-id</code> header.';
+    $('session-pager').hidden = rows.length <= 25 && size === 25;
+    $('session-page-info').textContent = rows.length
+      ? `${sessionPage * size + 1}–${Math.min(rows.length, (sessionPage + 1) * size)} of ${rows.length}` : '';
+    $('session-prev').disabled = sessionPage === 0;
+    $('session-next').disabled = sessionPage >= pages - 1;
 
-    /* Stream health cards */
-    const sh = q.stream || {};
-    const started = sh.streams_started || 0;
-    document.getElementById('stream-stalls').textContent = fmtCount.format(sh.stalls || 0);
-    document.getElementById('stream-stalls-meta').textContent =
-      (sh.stalls || 0) === 0
-        ? `no stalls in ${fmtCount.format(started)} streams`
-        : `${(100 * (sh.stall_rate || 0)).toFixed(1)}% of streams · last ${sh.last_stall_at || '—'}`;
-    document.getElementById('stream-ttfb').textContent =
-      (sh.ttfb_ms_avg || 0) > 0 ? `${fmtCount.format(sh.ttfb_ms_avg)} ms` : '—';
-    document.getElementById('stream-ttfb-meta').textContent =
-      `avg · peak ${fmtCount.format(sh.ttfb_ms_max || 0)} ms`;
-    document.getElementById('stream-pool').textContent = fmtCount.format(sh.pool_waits || 0);
-    document.getElementById('stream-pool-meta').textContent =
-      (sh.pool_waits || 0) === 0
-        ? `pool of ${(sh.config || {}).max_connections || '?'} connections never saturated`
-        : `avg wait ${fmtCount.format(sh.pool_wait_ms_avg || 0)} ms — consider raising UPSTREAM_MAX_CONNECTIONS`;
-    document.getElementById('stream-retries').textContent = fmtCount.format(sh.connect_retries || 0);
-    document.getElementById('stream-disconnects').textContent = fmtCount.format(sh.client_disconnects || 0);
-    document.getElementById('stream-completed').textContent = fmtCount.format(sh.streams_completed || 0);
-    document.getElementById('stream-completed-meta').textContent =
-      `of ${fmtCount.format(started)} started`;
+    document.querySelector('#session-table tbody').innerHTML = pageRows.map(s => {
+      const id = String(s.session_id || '');
+      const head = id.length > 14 ? id.slice(0, 8) : id;
+      const tail = id.length > 14 ? '…' + id.slice(-4) : '';
+      const badges = Object.entries(s.models || {})
+        .map(([k, n]) => `<span class="badge">${esc(k)} × ${fmtCount.format(n)}</span>`).join('');
+      return `<tr>
+        <td>${userCell(s.user_label, s.last_seen)}</td>
+        <td><span class="sid" title="${esc(id)}">${esc(head)}<span class="tail">${esc(tail)}</span></span>
+          <button class="btn" style="height:20px;padding:0 6px;margin-left:6px" data-copy="${esc(id)}" title="Copy session id">⧉</button></td>
+        <td>${badges || '<span class="badge">—</span>'}</td>
+        <td class="num">${fmtCount.format(s.requests)}</td>
+        <td class="num">${fmtNum(s.input_tokens)}</td>
+        <td class="num">${fmtNum(s.output_tokens)}</td>
+        <td class="num cost">${fmtCostExact(s.cost_usd)}</td>
+        <td>${tsCell(s.first_seen)}</td>
+        <td>${tsCell(s.last_seen)}</td>
+      </tr>`;
+    }).join('');
+    document.querySelectorAll('#session-table [data-copy]').forEach(b => b.addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(b.dataset.copy); toast('Session id copied.'); }
+      catch (e) { toast('Copy failed — clipboard unavailable.', true); }
+    }));
+  }
 
-    /* Derived totals cards */
-    const reqs = q.messages_requests || 0;
-    const avg = reqs > 0 ? (q.cost_usd_total || 0) / reqs : 0;
-    document.getElementById('avg-cost').textContent = fmtCostExact(avg);
+  /*  Usage & models  ------------------------------------------------------ */
+  function renderUsage() {
+    if (!Q) return;
+    const t = Q.tokens || {};
+    $('in-total').textContent = fmtCount.format(t.input_tokens || 0);
+    $('out-total-2').textContent = fmtCount.format(t.output_tokens || 0);
+    $('cache-read').textContent = fmtCount.format(t.cache_read_input_tokens || 0);
+    $('cache-write').textContent = fmtCount.format(t.cache_creation_input_tokens || 0);
+    $('cache-write-meta').textContent =
+      `5m ${fmtNum(t.cache_creation_5m_input_tokens || 0)} · 1h ${fmtNum(t.cache_creation_1h_input_tokens || 0)}`;
 
-    const inT = t.input_tokens || 0;
-    const crT = t.cache_read_input_tokens || 0;
-    const denom = inT + crT;
-    const hitRate = denom > 0 ? (crT / denom) * 100 : 0;
-    document.getElementById('cache-hit-rate').textContent = hitRate.toFixed(1) + '%';
-
-    const topUser = ((q.user_quota || {}).users || [])[0];
-    const topSpenderEl = document.getElementById('top-spender');
-    const topSpenderCostEl = document.getElementById('top-spender-cost');
-    if (topUser) {
-      topSpenderEl.textContent = topUser.label;
-      topSpenderCostEl.textContent = fmtCostExact(topUser.cost_usd) + ' this period';
-    } else {
-      topSpenderEl.textContent = '—';
-      topSpenderCostEl.textContent = 'no user activity yet';
-    }
-
-    /* Rate limits */
-    const rl = q.rate_limits || {};
-    const rlEl = document.getElementById('rate-limits');
-    rlEl.innerHTML = '';
-    let any = false;
-    any |= addBar(rlEl, 'Requests',      rl.requests_remaining,      rl.requests_limit,      rl.requests_reset);
-    any |= addBar(rlEl, 'Input tokens',  rl.input_tokens_remaining,  rl.input_tokens_limit,  rl.input_tokens_reset);
-    any |= addBar(rlEl, 'Output tokens', rl.output_tokens_remaining, rl.output_tokens_limit, rl.output_tokens_reset);
-    any |= addBar(rlEl, 'Total tokens',  rl.tokens_remaining,        rl.tokens_limit,        rl.tokens_reset);
-    if (rl.retry_after) {
-      const div = document.createElement('div');
-      div.className = 'retry-banner';
-      div.textContent = '⚠ Anthropic asked us to retry after ' + rl.retry_after + ' s';
-      rlEl.appendChild(div);
-    }
-    if (!any && !rl.retry_after) {
-      const div = document.createElement('div');
-      div.className = 'empty-bars';
-      div.textContent = 'Waiting for first /v1/messages response from Anthropic…';
-      rlEl.appendChild(div);
-    }
-
-    /* Daily chart + range label + table */
-    const days = q.by_day || [];
-    if (window.Chart) buildDailyChart(days);
-    document.getElementById('daily-range').textContent =
-      days.length ? (days[days.length - 1].date + ' → ' + days[0].date) : '';
-    const dailyTb = document.querySelector('#daily-table tbody');
-    dailyTb.innerHTML = '';
-    document.getElementById('daily-empty').style.display = days.length ? 'none' : 'block';
-    document.getElementById('daily-table').style.display = days.length ? '' : 'none';
+    // Daily table
+    const days = Q.by_day || [];
+    $('daily-empty').hidden = days.length > 0;
+    $('daily-table').hidden = days.length === 0;
+    let html = '';
+    const sum = { requests: 0, input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, cost_usd: 0 };
     for (const d of days) {
-      const dayUsers = d.users || [];
-      const hasUsers = dayUsers.length > 0;
-      const groupCls = hasUsers ? 'group-head' : '';
-      const userCol = hasUsers
-        ? `<td><span class="num">${d.date}</span></td>`
-        : `<td><span class="num">${d.date}</span></td>`;
-      const tr = document.createElement('tr');
-      tr.className = groupCls;
-      tr.innerHTML = `
-        ${userCol}
+      for (const k in sum) sum[k] += Number(d[k]) || 0;
+      const us = d.users || [];
+      const open = expanded.days.has(d.date);
+      html += `<tr>
+        <td>${us.length ? `<button class="expander${open ? ' open' : ''}" data-day="${esc(d.date)}" aria-label="Show users" aria-expanded="${open}">▶</button>` : '<span style="display:inline-block;width:24px"></span>'}<span class="num">${esc(d.date)}</span>${us.length ? ` <span class="badge">${us.length} user${us.length > 1 ? 's' : ''}</span>` : ''}</td>
         <td class="num">${fmtCount.format(d.requests)}</td>
         <td class="num">${fmtNum(d.input_tokens)}</td>
         <td class="num">${fmtNum(d.output_tokens)}</td>
         <td class="num">${fmtNum(d.cache_read_input_tokens)}</td>
         <td class="num">${fmtNum(d.cache_creation_input_tokens)}</td>
-        <td class="num cost">${fmtCostExact(d.cost_usd)}</td>`;
-      dailyTb.appendChild(tr);
-      // Per-user sub-rows (sorted by cost desc on the backend).
-      for (const u of dayUsers) {
-        const sub = document.createElement('tr');
-        sub.className = 'sub';
-        sub.innerHTML = `
-          <td>${u.user_label || '—'}</td>
-          <td class="num">${fmtCount.format(u.requests)}</td>
-          <td class="num">${fmtNum(u.input_tokens)}</td>
-          <td class="num">${fmtNum(u.output_tokens)}</td>
-          <td class="num">${fmtNum(u.cache_read_input_tokens)}</td>
-          <td class="num">${fmtNum(u.cache_creation_input_tokens)}</td>
-          <td class="num cost">${fmtCostExact(u.cost_usd)}</td>`;
-        dailyTb.appendChild(sub);
-      }
+        <td class="num cost">${fmtCostExact(d.cost_usd)}</td></tr>`;
+      if (open) for (const u of us) html += `<tr class="sub">
+        <td>${esc(u.user_label || '—')}</td>
+        <td class="num">${fmtCount.format(u.requests)}</td>
+        <td class="num">${fmtNum(u.input_tokens)}</td>
+        <td class="num">${fmtNum(u.output_tokens)}</td>
+        <td class="num">${fmtNum(u.cache_read_input_tokens)}</td>
+        <td class="num">${fmtNum(u.cache_creation_input_tokens)}</td>
+        <td class="num cost">${fmtCostExact(u.cost_usd)}</td></tr>`;
     }
+    document.querySelector('#daily-table tbody').innerHTML = html;
+    document.querySelector('#daily-table tfoot').innerHTML = days.length ? `<tr>
+      <td>Total · ${days.length} day${days.length > 1 ? 's' : ''}</td>
+      <td class="num">${fmtCount.format(sum.requests)}</td>
+      <td class="num">${fmtNum(sum.input_tokens)}</td>
+      <td class="num">${fmtNum(sum.output_tokens)}</td>
+      <td class="num">${fmtNum(sum.cache_read_input_tokens)}</td>
+      <td class="num">${fmtNum(sum.cache_creation_input_tokens)}</td>
+      <td class="num cost">${fmtCostExact(sum.cost_usd)}</td></tr>` : '';
+    document.querySelectorAll('#daily-table [data-day]').forEach(b => b.addEventListener('click', () => {
+      const k = b.dataset.day;
+      expanded.days.has(k) ? expanded.days.delete(k) : expanded.days.add(k);
+      renderUsage();
+    }));
+    const allOpen = days.filter(d => (d.users || []).length).every(d => expanded.days.has(d.date));
+    $('daily-expand-all').textContent = allOpen && days.length ? 'Collapse all' : 'Expand all';
 
-    /* Per-model table + chart */
-    const models = q.by_model || [];
-    if (window.Chart) buildModelChart(models);
-    const modelTb = document.querySelector('#model-table tbody');
-    modelTb.innerHTML = '';
-    document.getElementById('model-empty').style.display = models.length ? 'none' : 'block';
-    document.getElementById('model-table').style.display = models.length ? '' : 'none';
+    // Model table
+    const total = Number(Q.cost_usd_total) || 0;
+    const unpriced = Q.unpriced_models || {};
+    const models = sortRows((Q.by_model || []).map(m => ({ ...m, share: total > 0 ? m.cost_usd / total * 100 : 0 })), sortState.models);
+    $('model-empty').hidden = models.length > 0;
+    $('model-table').hidden = models.length === 0;
+    html = '';
     for (const m of models) {
-      const modelUsers = m.users || [];
-      const tr = document.createElement('tr');
-      tr.className = modelUsers.length ? 'group-head' : '';
-      tr.innerHTML = `
-        <td><strong>${m.model}</strong></td>
+      const us = m.users || [];
+      const open = expanded.models.has(m.model);
+      const fallback = m.model === 'unknown' && Object.keys(unpriced).length
+        ? ' <span class="badge warn" title="Costed at the PRICING_FALLBACK rate">fallback price</span>' : '';
+      html += `<tr>
+        <td>${us.length ? `<button class="expander${open ? ' open' : ''}" data-model="${esc(m.model)}" aria-label="Show users" aria-expanded="${open}">▶</button>` : '<span style="display:inline-block;width:24px"></span>'}<strong class="mono">${esc(m.model)}</strong>${fallback}</td>
         <td class="num">${fmtCount.format(m.requests)}</td>
         <td class="num">${fmtNum(m.input_tokens)}</td>
         <td class="num">${fmtNum(m.output_tokens)}</td>
         <td class="num">${fmtNum(m.cache_read_input_tokens)}</td>
         <td class="num">${fmtNum(m.cache_creation_input_tokens)}</td>
-        <td class="num cost">${fmtCostExact(m.cost_usd)}</td>`;
-      modelTb.appendChild(tr);
-      for (const u of modelUsers) {
-        const sub = document.createElement('tr');
-        sub.className = 'sub';
-        sub.innerHTML = `
-          <td>${u.user_label || '—'}</td>
-          <td class="num">${fmtCount.format(u.requests)}</td>
-          <td class="num">${fmtNum(u.input_tokens)}</td>
-          <td class="num">${fmtNum(u.output_tokens)}</td>
-          <td class="num">—</td>
-          <td class="num">—</td>
-          <td class="num cost">${fmtCostExact(u.cost_usd)}</td>`;
-        modelTb.appendChild(sub);
-      }
+        <td class="num cost">${fmtCostExact(m.cost_usd)}</td>
+        <td class="num">${shareMeter(m.share)}</td></tr>`;
+      if (open) for (const u of us) html += `<tr class="sub">
+        <td>${esc(u.user_label || '—')}</td>
+        <td class="num">${fmtCount.format(u.requests)}</td>
+        <td class="num">${fmtNum(u.input_tokens)}</td>
+        <td class="num">${fmtNum(u.output_tokens)}</td>
+        <td class="num">—</td><td class="num">—</td>
+        <td class="num cost">${fmtCostExact(u.cost_usd)}</td>
+        <td class="num">${m.cost_usd > 0 ? fmtPct(u.cost_usd / m.cost_usd * 100) : '—'}</td></tr>`;
     }
-
-    /* Per-user breakdown — always shown once at least one user has activity.
-       The cap columns only carry meaning when USER_QUOTA_ENABLED is true. */
-    const uq = q.user_quota || {};
-    const users = uq.users || [];
-    const userSection = document.getElementById('user-section');
-    const userTitle = document.getElementById('user-section-title');
-    const userHint = document.getElementById('user-section-hint');
-    document.getElementById('user-count').textContent = fmtCount.format(users.length);
-
-    if (uq.enabled) {
-      userTitle.textContent = 'Per-User Quota';
-      userHint.innerHTML = `Cap enforced per <code>${uq.period || 'monthly'}</code> period. Resets in ${
-        uq.reset_in_seconds != null ? Math.ceil(uq.reset_in_seconds / 86400) + 'd' : '—'
-      }.`;
-    } else {
-      userTitle.textContent = 'Per-User Breakdown';
-      userHint.innerHTML = 'Attribution by URL prefix <code>/u/&lt;name&gt;/</code> or by IP label. Enable <code>USER_QUOTA_ENABLED</code> to add caps.';
-    }
-
-    if (users.length) {
-      userSection.style.display = '';
-      const userTb = document.querySelector('#user-table tbody');
-      userTb.innerHTML = '';
-      document.getElementById('user-empty').style.display = 'none';
-      document.getElementById('user-table').style.display = '';
-      for (const u of users) {
-        const tr = document.createElement('tr');
-        const cap = Number(u.cap_usd) || 0;
-        const used = Number(u.cost_usd) || 0;
-        const pct = u.cost_pct == null ? null : Number(u.cost_pct);
-        let pctCell = '<span class="badge">—</span>';
-        if (uq.enabled && pct != null) {
-          const cls = pct >= 100 ? 'danger' : pct >= 80 ? 'warn' : 'ok';
-          pctCell = `<span class="badge ${cls}">${pct.toFixed(1)}%</span>`;
-        }
-        let capCell;
-        if (!uq.enabled) {
-          capCell = fmtCostExact(used);
-        } else if (cap > 0) {
-          capCell = `${fmtCostExact(used)} / ${fmtCostExact(cap)}`;
-        } else {
-          capCell = `${fmtCostExact(used)} <span class="badge">unlimited</span>`;
-        }
-        const lastSeen = u.last_seen
-          ? `<span class="timestamp">${fmtRelativeTime(u.last_seen)}<small>${u.last_seen.replace('T',' ')}</small></span>`
-          : '—';
-        tr.innerHTML = `
-          <td><strong>${u.label}</strong></td>
-          <td class="num cost">${capCell}</td>
-          <td class="num">${pctCell}</td>
-          <td class="num">${fmtCount.format(u.requests || 0)}</td>
-          <td class="num">${fmtNum(u.input_tokens)} / ${fmtNum(u.output_tokens)}</td>
-          <td class="num">${uq.enabled ? fmtCount.format(u.blocked_count || 0) : '—'}</td>
-          <td>${lastSeen}</td>`;
-        userTb.appendChild(tr);
-      }
-    } else {
-      // No users yet — only show the section in server mode so local users
-      // aren't shown an empty per-user widget that doesn't apply to them.
-      userSection.style.display = (q.deploy_mode === 'server') ? '' : 'none';
-      if (q.deploy_mode === 'server') {
-        document.getElementById('user-empty').style.display = 'block';
-        document.getElementById('user-table').style.display = 'none';
-      }
-    }
-
-    /* Cost-by-user doughnut */
-    const userChartPanel = document.getElementById('user-chart-panel');
-    if (users.length >= 1 && window.Chart) {
-      userChartPanel.style.display = '';
-      buildUserChart(users);
-    } else {
-      userChartPanel.style.display = 'none';
-    }
-
-    /* Daily cost stacked by user */
-    const daysForUserChart = (q.by_day || []).slice().reverse(); // chronological for chart
-    const hasUserSplit = daysForUserChart.some(d => (d.users || []).length > 0);
-    const dailyUserPanel = document.getElementById('daily-user-chart-panel');
-    if (hasUserSplit && window.Chart) {
-      dailyUserPanel.style.display = '';
-      document.getElementById('daily-user-range').textContent =
-        daysForUserChart.length ? daysForUserChart[0].date + ' → ' + daysForUserChart[daysForUserChart.length - 1].date : '';
-      buildDailyUserChart(daysForUserChart);
-    } else {
-      dailyUserPanel.style.display = 'none';
-    }
-
-    /* Per-session table */
-    const sessions = q.by_session || [];
-    const sessTb = document.querySelector('#session-table tbody');
-    sessTb.innerHTML = '';
-    document.getElementById('session-empty').style.display = sessions.length ? 'none' : 'block';
-    document.getElementById('session-table').style.display = sessions.length ? '' : 'none';
-    for (const s of sessions) {
-      const tr = document.createElement('tr');
-      const id = s.session_id || '';
-      const idHead = id.length > 14 ? id.slice(0, 8) : id;
-      const idTail = id.length > 14 ? '…' + id.slice(-4) : '';
-      const modelBadges = Object.entries(s.models || {})
-        .map(([k, n]) => `<span class="badge">${k} × ${n}</span>`).join('');
-      const lastSeen = s.last_seen
-        ? `<span class="timestamp">${fmtRelativeTime(s.last_seen)}<small>${s.last_seen.replace('T',' ')}</small></span>`
-        : '—';
-      const userCell = s.user_label
-        ? `<strong>${s.user_label}</strong>`
-        : '<span class="badge">—</span>';
-      tr.innerHTML = `
-        <td>${userCell}</td>
-        <td class="session-id" title="${id}">${idHead}<span class="session-tail">${idTail}</span></td>
-        <td>${modelBadges || '<span class="badge">—</span>'}</td>
-        <td class="num">${fmtCount.format(s.requests)}</td>
-        <td class="num">${fmtNum(s.input_tokens)} / ${fmtNum(s.output_tokens)}</td>
-        <td class="num cost">${fmtCostExact(s.cost_usd)}</td>
-        <td>${lastSeen}</td>`;
-      sessTb.appendChild(tr);
-    }
+    document.querySelector('#model-table tbody').innerHTML = html;
+    document.querySelectorAll('#model-table [data-model]').forEach(b => b.addEventListener('click', () => {
+      const k = b.dataset.model;
+      expanded.models.has(k) ? expanded.models.delete(k) : expanded.models.add(k);
+      renderUsage();
+    }));
   }
 
-  /*  Coaching panel  ------------------------------------------------------ */
-  function coachBar(label, value, max, suffix) {
-    const pct = max > 0 ? Math.min(100, (value / max) * 100) : 0;
-    return `<div style="margin:6px 0">
-      <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:3px">
-        <span>${label}</span><span class="num">${suffix}</span>
-      </div>
-      <div style="background:rgba(255,255,255,.07);border-radius:4px;height:8px;overflow:hidden">
-        <div style="height:100%;width:${pct}%;background:linear-gradient(90deg,#7c3aed,#a855f7)"></div>
-      </div></div>`;
+  /*  Performance  --------------------------------------------------------- */
+  function renderPerformance() {
+    if (!Q) return;
+    const sh = Q.stream || {};
+    const started = sh.streams_started || 0;
+    $('stream-stalls').textContent = fmtCount.format(sh.stalls || 0);
+    $('stream-stalls-meta').textContent = (sh.stalls || 0) === 0
+      ? `no stalls in ${fmtCount.format(started)} streams`
+      : `${fmtPct(100 * (sh.stall_rate || 0))} of streams · last ${sh.last_stall_at || '—'}`;
+    $('stream-stalls-card').className = 'card s4' + ((sh.stalls || 0) === 0 ? '' : (sh.stall_rate || 0) >= 0.02 ? ' st-warn' : '');
+    $('stream-ttfb').textContent = (sh.ttfb_ms_avg || 0) > 0 ? `${fmtCount.format(sh.ttfb_ms_avg)} ms` : '—';
+    $('stream-ttfb-meta').textContent = `avg · peak ${fmtCount.format(sh.ttfb_ms_max || 0)} ms`;
+    $('stream-pool').textContent = fmtCount.format(sh.pool_waits || 0);
+    $('stream-pool-meta').textContent = (sh.pool_waits || 0) === 0
+      ? `pool of ${(sh.config || {}).max_connections || '?'} connections never saturated`
+      : `avg wait ${fmtCount.format(sh.pool_wait_ms_avg || 0)} ms — consider raising UPSTREAM_MAX_CONNECTIONS`;
+    $('stream-pool-card').className = 'card s4' + ((sh.pool_waits || 0) ? ' st-warn' : '');
+    $('stream-retries').textContent = fmtCount.format(sh.connect_retries || 0);
+    $('stream-disconnects').textContent = fmtCount.format(sh.client_disconnects || 0);
+    $('stream-completed').textContent = fmtCount.format(sh.streams_completed || 0);
+    $('stream-completed-meta').textContent = `of ${fmtCount.format(started)} started`
+      + (started ? ` · ${fmtPct((sh.streams_completed || 0) / started * 100)}` : '');
+
+    renderRateLimits($('rate-limits'));
+    const rlAt = (Q.rate_limits || {}).updated_at;
+    $('rl-updated-2').textContent = rlAt ? `last response headers · ${fmtRelativeTime(rlAt)}` : 'live from Anthropic — last response headers';
+
+    const cfg = sh.config || {};
+    $('upstream-kv').innerHTML = [
+      ['Max connections', cfg.max_connections, 'UPSTREAM_MAX_CONNECTIONS'],
+      ['Pool timeout', cfg.pool_timeout != null ? cfg.pool_timeout + ' s' : null, 'UPSTREAM_POOL_TIMEOUT'],
+      ['Read timeout', cfg.read_timeout != null ? cfg.read_timeout + ' s' : null, 'UPSTREAM_READ_TIMEOUT'],
+      ['Stall threshold', cfg.stall_seconds != null ? cfg.stall_seconds + ' s' : null, 'UPSTREAM_STALL_SECONDS'],
+      ['Connect retries', cfg.connect_retries, 'UPSTREAM_CONNECT_RETRIES'],
+    ].map(([k, v, env]) => `<dt title="${env}">${k}</dt><dd>${v == null ? '—' : esc(v)}</dd>`).join('');
   }
 
-  function scoreColor(s) {
-    if (s == null) return '';
-    if (s >= 80) return '#34d399';
-    if (s >= 60) return '#fbbf24';
-    return '#f87171';
-  }
-
-  async function refreshCoach() {
-    let c;
-    try {
-      const r = await fetch('/coach', { cache: 'no-store' });
-      c = await r.json();
-    } catch (e) { return; }
-
-    const scoreEl = document.getElementById('coach-score');
+  /*  Coaching  ------------------------------------------------------------ */
+  function renderCoach() {
+    const c = C;
+    if (!c) return;
+    const scoreCls = s => s == null ? '' : s >= 80 ? ' st-ok' : s >= 60 ? ' st-warn' : ' st-danger';
+    const scoreEl = $('coach-score');
     if (c.score == null) {
       scoreEl.textContent = '—';
-      scoreEl.style.color = '';
-      document.getElementById('coach-score-meta').textContent =
-        c.assistant_turns ? 'gathering signal…' : 'no activity yet';
+      $('coach-score-meta').textContent = c.assistant_turns ? 'gathering signal…' : 'no activity yet';
     } else {
       scoreEl.textContent = c.score + '/100';
-      scoreEl.style.color = scoreColor(c.score);
-      document.getElementById('coach-score-meta').textContent =
-        `over ${fmtCount.format(c.assistant_turns)} assistant turns`;
+      $('coach-score-meta').textContent = `over ${fmtCount.format(c.assistant_turns)} assistant turns`;
     }
-
     const comp = c.components || {};
-    const rel = comp.reliability;
-    document.getElementById('coach-reliability').textContent =
-      rel == null ? '—' : rel + '/100';
-    document.getElementById('coach-reliability-meta').textContent =
-      c.tool_results_seen ? `${(c.error_rate*100).toFixed(1)}% errors · ${fmtCount.format(c.tool_errors)}/${fmtCount.format(c.tool_results_seen)}` : 'no tool results yet';
+    const setScore = (id, v, txt) => {
+      $(id).textContent = v == null ? '—' : txt;
+      $(id).parentElement.className = 'card s4' + scoreCls(v);
+    };
+    setScore('coach-reliability', comp.reliability, comp.reliability + '/100');
+    $('coach-reliability-meta').textContent = c.tool_results_seen
+      ? `${fmtPct(c.error_rate * 100)} errors · ${fmtCount.format(c.tool_errors)}/${fmtCount.format(c.tool_results_seen)}` : 'no tool results yet';
+    setScore('coach-discipline', comp.discipline, comp.discipline + '/100');
+    $('coach-discipline-meta').textContent = c.edits
+      ? `${fmtCount.format(c.reads)} reads / ${fmtCount.format(c.edits)} edits` : 'no edits yet';
+    setScore('coach-cache', comp.cache, fmtPct(c.cache_hit_rate * 100));
+    $('coach-depth').textContent = c.avg_turns_per_session ? c.avg_turns_per_session : '—';
+    $('coach-opus').textContent = c.opus_cost_share != null ? fmtPct(c.opus_cost_share * 100, 0) : '—';
 
-    document.getElementById('coach-discipline').textContent =
-      comp.discipline == null ? '—' : comp.discipline + '/100';
-    document.getElementById('coach-discipline-meta').textContent =
-      c.edits ? `${fmtCount.format(c.reads)} reads / ${fmtCount.format(c.edits)} edits` : 'no edits yet';
-
-    document.getElementById('coach-cache').textContent =
-      comp.cache == null ? '—' : (c.cache_hit_rate*100).toFixed(1) + '%';
-
-    document.getElementById('coach-depth').textContent =
-      c.avg_turns_per_session ? c.avg_turns_per_session : '—';
-
-    document.getElementById('coach-opus').textContent =
-      c.opus_cost_share != null ? (c.opus_cost_share*100).toFixed(0) + '%' : '—';
-
-    /* Tool usage bars */
-    const toolsEl = document.getElementById('coach-tools');
-    const tools = Object.entries(c.tools || {});
-    document.getElementById('coach-tools-sub').textContent =
-      c.tool_total ? fmtCount.format(c.tool_total) + ' calls' : '—';
+    const tools = Object.entries(c.tools || {}).sort((a, b) => b[1] - a[1]);
+    $('coach-tools-sub').textContent = c.tool_total ? fmtCount.format(c.tool_total) + ' calls' : '—';
     if (!tools.length) {
-      toolsEl.innerHTML = '<div class="empty-bars">No tool calls observed yet.</div>';
+      $('coach-tools').innerHTML = '<div class="empty-inline">No tool calls observed yet.</div>';
     } else {
-      const maxN = Math.max(...tools.map(([,n]) => n));
-      toolsEl.innerHTML = tools.slice(0, 12)
-        .map(([name, n]) => coachBar(name, n, maxN, fmtCount.format(n))).join('');
+      const maxN = tools[0][1];
+      $('coach-tools').innerHTML = tools.slice(0, 12).map(([name, n]) =>
+        `<div class="bar-row accent"><div class="bar-label">${esc(name)}</div>`
+        + `<div class="bar-track"><div class="bar-fill" style="width:${(maxN ? n / maxN * 100 : 0).toFixed(1)}%"></div></div>`
+        + `<div class="bar-value">${fmtCount.format(n)}</div></div>`).join('');
     }
-
-    /* Tips */
-    const tipsEl = document.getElementById('coach-tips');
     const tips = c.tips || [];
-    tipsEl.innerHTML = tips.length
-      ? tips.map(t => `<div style="margin:6px 0;padding:8px 10px;background:rgba(255,255,255,.04);border-left:3px solid #7c3aed;border-radius:4px;font-size:13px;line-height:1.5">${t}</div>`).join('')
-      : '<div class="empty-bars">—</div>';
-
-    /* Activity by hour */
-    const hoursEl = document.getElementById('coach-hours');
+    $('coach-tips').innerHTML = tips.length
+      ? tips.map(t => `<div class="tip">${esc(t)}</div>`).join('')
+      : '<div class="empty-inline">No tips right now.</div>';
     const hours = c.by_hour || [];
     const maxH = hours.length ? Math.max(...hours) : 0;
-    if (!maxH) {
-      hoursEl.innerHTML = '<div class="empty-bars">No activity recorded yet.</div>';
+    $('coach-hours').innerHTML = !maxH ? '<div class="empty-inline">No activity recorded yet.</div>'
+      : '<div class="hours">' + hours.map((n, h) =>
+          `<div class="h" title="${h}:00 — ${n} turns"><i class="${n ? '' : 'zero'}" style="height:${Math.max(2, n / maxH * 100)}%"></i></div>`).join('')
+        + '</div><div class="hours-axis"><span>0h</span><span>6h</span><span>12h</span><span>18h</span><span>23h</span></div>';
+  }
+
+  /*  Fetch loop  ---------------------------------------------------------- */
+  function setStatus(kind, text) {
+    const pill = $('status-pill');
+    pill.className = 'pill ' + kind;
+    $('status-text').textContent = text;
+  }
+  function renderPeriodPill() {
+    const pill = $('period-pill');
+    if (Q.monthly_reset_enabled && Q.period_month) {
+      const [y, m] = Q.period_month.split('-').map(Number);
+      const daysLeft = Math.ceil((new Date(y, m, 1) - new Date()) / 86400000);
+      pill.textContent = `${Q.period_month} · resets in ${daysLeft}d`;
+      pill.hidden = false;
     } else {
-      hoursEl.innerHTML =
-        '<div style="display:flex;align-items:flex-end;gap:2px;height:90px">' +
-        hours.map((n, h) => {
-          const pct = maxH > 0 ? (n / maxH) * 100 : 0;
-          return `<div title="${h}:00 — ${n} turns" style="flex:1;display:flex;flex-direction:column;justify-content:flex-end;height:100%">
-            <div style="background:${n?'linear-gradient(180deg,#a855f7,#7c3aed)':'rgba(255,255,255,.05)'};height:${Math.max(2,pct)}%;border-radius:2px 2px 0 0"></div>
-          </div>`;
-        }).join('') +
-        '</div><div style="display:flex;justify-content:space-between;font-size:10px;color:#888;margin-top:4px"><span>0h</span><span>6h</span><span>12h</span><span>18h</span><span>23h</span></div>';
+      pill.hidden = true;
+    }
+  }
+  function renderAll() {
+    if (!Q) return;
+    renderPeriodPill();
+    renderOverview();
+    renderSystem();
+    renderUsers();
+    renderSessions();
+    renderUsage();
+    renderPerformance();
+    renderCoach();
+    renderAlerts();
+  }
+
+  let inflight = false;
+  async function refresh() {
+    if (inflight) return;
+    inflight = true;
+    try {
+      const [q, c, h] = await Promise.allSettled([
+        fetch('/quota', { cache: 'no-store' }).then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }),
+        fetch('/coach', { cache: 'no-store' }).then(r => r.ok ? r.json() : null),
+        fetch('/health', { cache: 'no-store' }).then(r => r.ok ? r.json() : null),
+      ]);
+      if (q.status !== 'fulfilled') {
+        setStatus('error', /403/.test(String(q.reason)) ? 'forbidden' : 'offline');
+        return;
+      }
+      Q = q.value;
+      C = c.status === 'fulfilled' ? c.value : C;
+      H = h.status === 'fulfilled' ? h.value : H;
+      setStatus(timerMs ? 'live' : 'paused', timerMs ? 'live' : 'paused');
+      $('last-refresh').textContent = 'updated ' + new Date().toLocaleTimeString();
+      renderAll();
+    } finally {
+      inflight = false;
     }
   }
 
+  let timer = null, timerMs = 5000;
+  function schedule() {
+    clearInterval(timer);
+    timer = null;
+    if (timerMs > 0 && !document.hidden) timer = setInterval(refresh, timerMs);
+    if (Q) setStatus(timerMs ? 'live' : 'paused', timerMs ? 'live' : 'paused');
+  }
+  document.addEventListener('visibilitychange', () => {
+    schedule();
+    if (!document.hidden && timerMs > 0) refresh();
+  });
+
+  /*  Controls  ------------------------------------------------------------ */
+  const intervalSel = $('refresh-interval');
+  intervalSel.value = store.get('interval', '5000');
+  if (intervalSel.selectedIndex < 0) intervalSel.value = '5000';
+  timerMs = Number(intervalSel.value);
+  intervalSel.addEventListener('change', () => { timerMs = Number(intervalSel.value); store.set('interval', intervalSel.value); schedule(); });
+  $('refresh-now').addEventListener('click', refresh);
+  $('theme-toggle').addEventListener('click', () => {
+    const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+    document.documentElement.dataset.theme = next;
+    store.set('theme', next);
+    // Chart colours are baked in at build time; rebuild them for the new theme.
+    Object.keys(charts).forEach(k => { if (charts[k]) { charts[k].destroy(); charts[k] = null; } });
+    renderAll();
+  });
+
+  document.querySelectorAll('#daily-range-seg button').forEach(b => {
+    b.classList.toggle('on', Number(b.dataset.days) === dailyDays);
+    b.addEventListener('click', () => {
+      dailyDays = Number(b.dataset.days);
+      store.set('dailyDays', String(dailyDays));
+      document.querySelectorAll('#daily-range-seg button').forEach(x => x.classList.toggle('on', x === b));
+      if (Q) renderOverview();
+    });
+  });
+
+  $('user-search').addEventListener('input', renderUsers);
+  document.querySelectorAll('#user-filter button').forEach(b => b.addEventListener('click', () => setUserFilter(b.dataset.f)));
+  wireSort('user-table', 'users', renderUsers);
+  wireSort('session-table', 'sessions', () => { sessionPage = 0; renderSessions(); });
+  wireSort('model-table', 'models', renderUsage);
+
+  for (const id of ['session-search', 'session-user', 'session-window', 'session-page-size'])
+    $(id).addEventListener(id === 'session-search' ? 'input' : 'change', () => { sessionPage = 0; renderSessions(); });
+  $('session-prev').addEventListener('click', () => { sessionPage = Math.max(0, sessionPage - 1); renderSessions(); });
+  $('session-next').addEventListener('click', () => { sessionPage++; renderSessions(); });
+
+  // "View N sessions" link inside a user detail row.
+  document.addEventListener('click', e => {
+    const a = e.target.closest('[data-user-sessions]');
+    if (!a) return;
+    e.preventDefault();
+    $('session-search').value = '';
+    $('session-window').value = '0';
+    renderSessions();
+    $('session-user').value = a.dataset.userSessions;
+    sessionPage = 0;
+    renderSessions();
+    showView('sessions', true);
+  });
+
+  $('daily-expand-all').addEventListener('click', () => {
+    const days = ((Q && Q.by_day) || []).filter(d => (d.users || []).length);
+    const allOpen = days.every(d => expanded.days.has(d.date));
+    days.forEach(d => allOpen ? expanded.days.delete(d.date) : expanded.days.add(d.date));
+    renderUsage();
+  });
+
+  $('user-export').addEventListener('click', () => {
+    const uq = (Q && Q.user_quota) || {};
+    downloadCsv('users',
+      ['user', 'cost_usd', 'cap_usd', 'cap_pct', 'requests', 'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens', 'blocked', 'period', 'first_seen', 'last_seen'],
+      filteredUsers().map(u => [u.label, u.cost_usd, uq.enabled ? u.cap_usd : '', u.cost_pct ?? '', u.requests, u.input_tokens, u.output_tokens,
+        u.cache_read_input_tokens, u.cache_creation_input_tokens, u.blocked_count, u.period_key || '', u.first_seen || '', u.last_seen || '']));
+  });
+  $('session-export').addEventListener('click', () => downloadCsv('sessions',
+    ['user', 'session_id', 'models', 'requests', 'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens', 'cost_usd', 'first_seen', 'last_seen'],
+    filteredSessions().map(s => [s.user_label || '', s.session_id, Object.entries(s.models || {}).map(([k, n]) => `${k}:${n}`).join(' '),
+      s.requests, s.input_tokens, s.output_tokens, s.cache_read_input_tokens, s.cache_creation_input_tokens, s.cost_usd, s.first_seen || '', s.last_seen || ''])));
+  $('daily-export').addEventListener('click', () => {
+    const rows = [];
+    for (const d of (Q && Q.by_day) || []) {
+      rows.push([d.date, '', d.requests, d.input_tokens, d.output_tokens, d.cache_read_input_tokens, d.cache_creation_input_tokens, d.cost_usd]);
+      for (const u of d.users || []) rows.push([d.date, u.user_label, u.requests, u.input_tokens, u.output_tokens, u.cache_read_input_tokens, u.cache_creation_input_tokens, u.cost_usd]);
+    }
+    downloadCsv('daily', ['date', 'user', 'requests', 'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens', 'cost_usd'], rows);
+  });
+  $('model-export').addEventListener('click', () => {
+    const rows = [];
+    for (const m of (Q && Q.by_model) || []) {
+      rows.push([m.model, '', m.requests, m.input_tokens, m.output_tokens, m.cache_read_input_tokens, m.cache_creation_input_tokens, m.cost_usd]);
+      for (const u of m.users || []) rows.push([m.model, u.user_label, u.requests, u.input_tokens, u.output_tokens, '', '', u.cost_usd]);
+    }
+    downloadCsv('models', ['model', 'user', 'requests', 'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens', 'cost_usd'], rows);
+  });
+
+  // Keyboard shortcuts: 1-6 switch tabs, R refreshes, / focuses the search of the current tab.
+  document.addEventListener('keydown', e => {
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const tag = (e.target.tagName || '').toLowerCase();
+    if (tag === 'input' || tag === 'select' || tag === 'textarea') {
+      if (e.key === 'Escape') e.target.blur();
+      return;
+    }
+    if (/^[1-6]$/.test(e.key)) { showView(VIEWS[Number(e.key) - 1], true); }
+    else if (e.key === 'r' || e.key === 'R') { refresh(); }
+    else if (e.key === '/') {
+      const active = document.querySelector('.view.active input[type=search]');
+      if (active) { e.preventDefault(); active.focus(); }
+    }
+  });
+
+  showView(location.hash.slice(1) || 'overview', false);
   refresh();
-  refreshCoach();
-  setInterval(refresh, 5000);
-  setInterval(refreshCoach, 5000);
+  schedule();
 </script>
 </body>
 </html>

@@ -335,7 +335,7 @@ Cost calc uses the per-TTL breakdown when Anthropic provides it (`cache_creation
 
 ### Stream health (diagnosing "Response stalled mid-stream")
 
-When Claude Code reports a stalled response, it means no bytes reached it for a while — the proxy tracks why, in the **Stream health** section of `/dashboard` and the `stream` block of `/health` and `/quota`:
+When Claude Code reports a stalled response, it means no bytes reached it for a while — the proxy tracks why, in the **Performance** tab of `/dashboard` and the `stream` block of `/health` and `/quota`:
 
 | Signal | What it points at | Fix |
 |---|---|---|
@@ -356,17 +356,38 @@ Telemetry shipping (Loki) uses its own connection pool, so a slow log push can n
 
 ### Web Dashboard
 
-Open `http://localhost:9999/dashboard` for a live web UI:
+Open `http://localhost:9999/dashboard` for a live management console. It reads `/quota`, `/coach` and `/health`; the API is unchanged, so nothing on the server side needs configuring. The pages are split into tabs, and the URL hash (`#users`, `#sessions`, …) links straight to one:
 
-- **Totals** card grid — total cost, requests, distinct sessions, paid input / output / cache read / cache write
-- **Stream health** cards — stalled streams, time-to-first-byte (avg/peak), connection-pool waits, connect retries, client disconnects
-- **Live rate-limit progress bars** color-coded green / amber / red with reset times
-- **Daily trend chart** — last 15 days, cost line + input/output token bars on dual y-axes
-- **Cost-by-model doughnut** — lifetime breakdown
-- **Daily breakdown table** — date · requests · tokens · cost
-- **Per-model breakdown table**
-- **Per-session breakdown table** — each device's `x-claude-code-session-id` shown separately (the proxy locks identity outbound, but tracks each session inbound)
-- Auto-refreshes every 5 s, polls `/quota`. Sticky header with live status pill. Chart.js loaded from CDN; the rest is self-contained vanilla JS that degrades gracefully if blocked
+| Tab | What it shows |
+|-----|---------------|
+| **Overview** | An **alerts** strip (see below). KPI cards for total cost, today's cost vs yesterday, a projected month-end spend, requests, users and sessions (with how many are active now), average cost per request, cache hit rate and output tokens. A 7- or 15-day cost + token chart, cost by model, the top 5 spenders with their cap meters, compact rate-limit bars, and proxy status (identity captured, telemetry blocked, bodies sanitized, token saver, deploy mode, TLS) |
+| **Users** | Per-user spend and cap usage: KPIs (tracked, period spend, near cap, over cap / blocked), a table you can search, filter (All / Active 24h / Near cap / Over cap) and sort by any column. Expand a row to see that user's per-model breakdown and jump to their sessions. **Reset** zeroes a user's current-period counters (`POST /admin/quota/reset/<label>`, only from `ADMIN_IPS`). There is also a daily cost chart stacked by user and a share-of-spend chart |
+| **Sessions** | Every `x-claude-code-session-id`: search by session, user or model, filter by user and by recent activity, sort, paginate (25/50/100), and copy an id in one click |
+| **Usage & Models** | Token totals (including the 5m/1h cache-write split). A daily breakdown with a totals row, where you can expand a day into per-user rows. A per-model table with each model's share of spend, which expands into per-user rows. Unpriced models are flagged |
+| **Performance** | Stream health (stalls, TTFB, pool waits, retries, disconnects, completion rate), turning amber or red when there is a problem. Live rate-limit bars with a countdown to reset, and the upstream tunables currently in effect |
+| **Coaching** | Practice score, the scores that make it up, tool-usage bars, tips, and activity by hour |
+
+**Alerts** show up on the Overview. Each one has a **View →** link that opens the matching tab, and each tab carries a badge with its count. An alert is raised for:
+
+- a `retry-after` from Anthropic
+- a rate limit below 30% (amber) or below 10% (red)
+- users above 80% of their cap, or over it
+- an upstream stall rate of 2% or more
+- connection-pool saturation
+- unpriced models
+- a TLS certificate that is expiring or broken
+- a device identity that has not been captured yet
+
+**Management tools:**
+
+- Export any table to CSV (Users, Sessions, Daily, Models). The CSV keeps what the current filter shows.
+- Choose the auto-refresh interval (5 / 10 / 30 / 60 s, or paused), or refresh by hand. Refreshing stops while the tab is in the background.
+- Switch between a light and a dark theme.
+- Keyboard shortcuts: `1`–`6` switch tabs, `R` refreshes, `/` focuses the search box.
+- The theme, refresh interval, sort order and chart range are saved in the browser (`localStorage`).
+- User labels are HTML-escaped everywhere, so a label such as `/u/<script>…/` cannot inject markup.
+
+Chart.js is loaded from the CDN. If it is blocked, the charts are replaced by a notice and everything else keeps working.
 
 ### Per-Session & Daily Tracking
 
@@ -454,7 +475,7 @@ These roll up into a **practice score (0–100)** — a weighted blend of discip
 
 ### Where to see it
 
-- **Dashboard**: a new **Coaching** section in `http://localhost:9999/dashboard` (score + metric cards, tool-usage bars, tips, activity-by-hour).
+- **Dashboard**: the **Coaching** tab in `http://localhost:9999/dashboard` (score + metric cards, tool-usage bars, tips, activity-by-hour).
 - **JSON**: `GET /coach` returns the full computed view.
 
 ### Config & persistence
