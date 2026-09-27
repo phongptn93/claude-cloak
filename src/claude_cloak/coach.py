@@ -8,10 +8,38 @@ import time
 from datetime import datetime
 
 from . import settings, state
+from .coach_insights import coach_insights
 from .constants import COACH_EDIT_TOOLS, COACH_READ_TOOLS
 
+MAX_COACH_WEEKS = 12
+MAX_COACH_USERS = 500
 
-def _coach_record_request(body: bytes, content_type: str | None, path: str) -> None:
+
+def _week_key(when: datetime) -> str:
+    year, week, _ = when.isocalendar()
+    return f"{year}-W{week:02d}"
+
+
+def _bump(field: str, key: str, **counts: int) -> None:
+    """Add counts to a by_week / by_user bucket, keeping both maps bounded."""
+    buckets = state.coach_stats[field]
+    b = buckets.setdefault(
+        key, {"turns": 0, "tool_results": 0, "tool_errors": 0, "reads": 0, "edits": 0}
+    )
+    for k, n in counts.items():
+        b[k] = b.get(k, 0) + n
+    limit = MAX_COACH_WEEKS if field == "by_week" else MAX_COACH_USERS
+    while len(buckets) > limit:
+        # Week keys sort chronologically; for users drop the least active.
+        drop = (
+            min(buckets) if field == "by_week" else min(buckets, key=lambda k: buckets[k]["turns"])
+        )
+        del buckets[drop]
+
+
+def _coach_record_request(
+    body: bytes, content_type: str | None, path: str, user_label: str | None = None
+) -> None:
     """Extract privacy-safe coaching signals from a /v1/messages request.
 
     Inspects ONLY tool_result blocks in the last message (messages[-1]) —
@@ -50,9 +78,15 @@ def _coach_record_request(body: bytes, content_type: str | None, path: str) -> N
 
     state.coach_stats["tool_results_seen"] += n_results
     state.coach_stats["tool_errors"] += n_errors
+    if n_results:
+        _bump("by_week", _week_key(datetime.now()), tool_results=n_results, tool_errors=n_errors)
+        if user_label:
+            _bump("by_user", user_label, tool_results=n_results, tool_errors=n_errors)
 
 
-def _coach_record_response(tools_used: dict, stop_reason: str | None) -> None:
+def _coach_record_response(
+    tools_used: dict, stop_reason: str | None, user_label: str | None = None
+) -> None:
     """Record one assistant turn's tool calls + stop reason. Never raises."""
     if not settings.COACH_ENABLED:
         return
@@ -71,6 +105,15 @@ def _coach_record_response(tools_used: dict, stop_reason: str | None) -> None:
         state.coach_stats["stop_reasons"][stop_reason] = (
             state.coach_stats["stop_reasons"].get(stop_reason, 0) + 1
         )
+    tools_used = tools_used or {}
+    counts = {
+        "turns": 1,
+        "reads": sum(n or 0 for t, n in tools_used.items() if t in COACH_READ_TOOLS),
+        "edits": sum(n or 0 for t, n in tools_used.items() if t in COACH_EDIT_TOOLS),
+    }
+    _bump("by_week", _week_key(now), **counts)
+    if user_label:
+        _bump("by_user", user_label, **counts)
     _save_coach_stats()
 
 
@@ -94,6 +137,15 @@ def _load_coach_stats() -> bool:
         if isinstance(v, dict):
             state.coach_stats[key] = {
                 str(k): int(x) for k, x in v.items() if isinstance(x, (int, float))
+            }
+    # v2 — per-week and per-user counter buckets.
+    for key in ("by_week", "by_user"):
+        v = data.get(key)
+        if isinstance(v, dict):
+            state.coach_stats[key] = {
+                str(k): {c: int(n) for c, n in b.items() if isinstance(n, (int, float))}
+                for k, b in v.items()
+                if isinstance(b, dict)
             }
     for key in ("tool_results_seen", "tool_errors", "assistant_turns"):
         v = data.get(key)
@@ -228,4 +280,5 @@ def _compute_coach_view() -> dict:
         "first_seen": state.coach_stats["first_seen"],
         "last_seen": state.coach_stats["last_seen"],
         "tips": tips,
+        **coach_insights(),
     }

@@ -94,7 +94,9 @@ async def proxy(path: str, request: Request):
     # ── Coaching: tool-result signals (counts only, never content) ──
     if settings.COACH_ENABLED:
         with contextlib.suppress(Exception):
-            _coach_record_request(body, content_type, path)
+            _coach_record_request(
+                body, content_type, path, getattr(request.state, "user_label", None)
+            )
 
     # ── Token saver ──
     if settings.TOKEN_SAVER_ENABLED:
@@ -150,7 +152,7 @@ async def proxy(path: str, request: Request):
                 )
             if settings.COACH_ENABLED and usage_tap.is_messages:
                 with contextlib.suppress(Exception):
-                    _coach_record_response(*usage_tap.coach_signals())
+                    _coach_record_response(*usage_tap.coach_signals(), usage_tap.user_label)
 
         if is_streaming_request(body):
             frames = echo_sse_events(request.method, path, headers, body)
@@ -311,7 +313,7 @@ async def proxy(path: str, request: Request):
                 )
             if settings.COACH_ENABLED and usage_tap.is_messages:
                 with contextlib.suppress(Exception):
-                    _coach_record_response(*usage_tap.coach_signals())
+                    _coach_record_response(*usage_tap.coach_signals(), usage_tap.user_label)
             return Response(
                 content=buffered_body,
                 status_code=response.status_code,
@@ -407,7 +409,7 @@ async def proxy(path: str, request: Request):
                             user_label=usage_tap.user_label,
                         )
                     if settings.COACH_ENABLED and usage_tap.is_messages:
-                        _coach_record_response(*usage_tap.coach_signals())
+                        _coach_record_response(*usage_tap.coach_signals(), usage_tap.user_label)
                 except Exception as e:
                     log(f"  {YELLOW}usage tap cleanup failed (non-fatal): {e}{RESET}")
 

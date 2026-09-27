@@ -305,37 +305,67 @@ Example `/quota`:
 
 ### Pricing
 
-Defaults are public Anthropic list prices (USD per million tokens). Override per-tier via env if Anthropic changes them or you want plan-specific rates:
+Prices live in a data file, [`src/claude_cloak/data/pricing.json`](src/claude_cloak/data/pricing.json), not in code. It lists each model's input, output, cache-write (5 m / 1 h) and cache-read rates in USD per million tokens. The dashboard's **Usage & pricing** view and `GET /pricing` show the table in force, where it came from, and any model seen without a price.
+
+**Why it is not fetched live from Anthropic:** Anthropic publishes no pricing API. `GET /v1/models` returns model ids, context windows and capabilities, not rates. The only authoritative prices are the ones on the [pricing page](https://platform.claude.com/docs/en/about-claude/pricing), so the table stays the source of truth. What *can* be automatic is getting a corrected table to every install:
 
 ```env
-PRICING_SONNET_5_INPUT=3.00
-PRICING_SONNET_5_OUTPUT=15.00
-PRICING_SONNET_5_CACHE_WRITE_5M=3.75
-PRICING_SONNET_5_CACHE_WRITE_1H=6.00
-PRICING_SONNET_5_CACHE_READ=0.30
+# Off by default. Fetch the maintained table every 24 h and merge it over the bundled one.
+PRICING_REMOTE_URL=https://raw.githubusercontent.com/phongptn93/claude-cloak/main/src/claude_cloak/data/pricing.json
+PRICING_REMOTE_REFRESH_HOURS=24
 ```
 
-Current defaults, per million tokens (cache tiers follow Anthropic's standard multipliers on input: 5 m write ×1.25, 1 h write ×2, read ×0.1):
+- The fetched document is validated in full before it is used. A bad download, a non-200 response or a malformed file leaves the current table in place, and the error shows in `/pricing` and on the dashboard.
+- The last good copy is cached as `.pricing-remote.json` next to `.env` and reused at startup, so a restart without network still has it.
+- `POST /admin/pricing/refresh` (only from `ADMIN_IPS`) fetches it now. The dashboard has a **Sync now** button for the same thing.
+- Turning it on means the proxy makes one outbound HTTPS request per interval to that URL. It is off by default because this project avoids any traffic you did not ask for.
 
-| Model key | Input | Output |
-|---|---|---|
-| `FABLE_5`, `MYTHOS_5` | $10.00 | $50.00 |
-| `OPUS_5`, `OPUS_4_8`, `OPUS_4_7`, `OPUS_4_6`, `OPUS_4_5` | $5.00 | $25.00 |
-| `OPUS_4_1`, `OPUS_4`, `OPUS_3` | $15.00 | $75.00 |
-| `SONNET_5`, `SONNET_4_6`, `SONNET_4`, `SONNET_3_7`, `SONNET_3_5` | $3.00 | $15.00 |
-| `HAIKU_4` | $1.00 | $5.00 |
-| `HAIKU_3_5` | $0.80 | $4.00 |
-| `HAIKU_3` | $0.25 | $1.25 |
+**Effective dates.** Each model holds a list of rates. A rate applies from its `effective_from` date (`YYYY-MM-DD`, local time) until the next entry; a rate with no date applies from the beginning. To schedule an announced price change, add a new entry rather than editing the old one. The proxy switches over at local midnight without a restart, and the dashboard shows the pending change.
 
-Note the split inside the Opus 4 line: **Opus 4.5 and newer are $5/$25**, only Opus 4.0/4.1 kept the older $15/$75 rate. A single `OPUS_4` key covering all of them over-reports 4.6/4.7/4.8 spend by 3×.
+```json
+"opus-5": [
+  { "input": 5.00, "output": 25.00, "cache_write_5m": 6.25, "cache_write_1h": 10.00, "cache_read": 0.50 },
+  { "effective_from": "2027-01-01", "input": 4.00, "output": 20.00, "cache_write_5m": 5.00, "cache_write_1h": 8.00, "cache_read": 0.40 }
+]
+```
 
-A model id matching no key is costed at `PRICING_FALLBACK_INPUT` / `PRICING_FALLBACK_OUTPUT` (Opus tier by default) rather than $0, so a model released after your build still shows up in the total. Those ids are listed under `unpriced_models` in `/quota` — treat their cost as an estimate and add a real key when you see one.
+**Per-install overrides** still win over both tables, e.g. for plan-specific rates:
+
+```env
+PRICING_SONNET_5_INPUT=2.00
+PRICING_SONNET_5_CACHE_READ=0.20
+```
+
+Current rates, per million tokens:
+
+| Model key | Input | Output | Cache read |
+|---|---|---|---|
+| `fable-5.1`, `mythos-5.1` | $10.00 | $50.00 | $0.25 |
+| `fable-5`, `mythos-5` | $10.00 | $50.00 | $1.00 |
+| `opus-5.5` | $4.00 | $20.00 | $0.20 |
+| `opus-5`, `opus-4.8`, `opus-4.7`, `opus-4.6`, `opus-4.5` | $5.00 | $25.00 | $0.50 |
+| `opus-4.1`, `opus-4`, `opus-3` | $15.00 | $75.00 | $1.50 |
+| `sonnet-5` | $2.00 | $10.00 | $0.20 |
+| `sonnet-4.6`, `sonnet-4`, `sonnet-3.7`, `sonnet-3.5` | $3.00 | $15.00 | $0.30 |
+| `haiku-4` | $1.00 | $5.00 | $0.10 |
+| `haiku-3.5` | $0.80 | $4.00 | $0.08 |
+| `haiku-3` | $0.25 | $1.25 | $0.03 |
+
+Cache writes are 1.25× input for a 5 m TTL and 2× input for 1 h.
+
+Model ids are matched to keys by substring, and the longest key wins. That is why `claude-opus-5-5` is priced as `opus-5.5`, not `opus-5`; before the table carried an `opus-5.5` row it was billed 25% high. Two splits matter:
+- Inside the Opus 4 line, **Opus 4.5 and newer are $5/$25**; only Opus 4.0/4.1 kept $15/$75.
+- **Sonnet 5 is $2/$10**, unlike the $3/$15 of Sonnet 4.x.
+
+`tests/test_pricing.py` holds the list of model ids Anthropic currently serves and fails if any of them resolves to no price or to the wrong sibling. Add a new id there the day it ships.
+
+A model id matching no key is costed at `PRICING_FALLBACK_INPUT` / `PRICING_FALLBACK_OUTPUT` (Opus tier by default) rather than $0, so a model released after your table still shows up in the total. Those ids are listed under `unpriced_models` in `/quota` and `/pricing`, and flagged on the dashboard. Treat their cost as an estimate and add a real key when you see one.
 
 Cost calc uses the per-TTL breakdown when Anthropic provides it (`cache_creation.ephemeral_5m_input_tokens` / `ephemeral_1h_input_tokens`); falls back to the 5 m rate when only the legacy aggregate field is present.
 
 ### Stream health (diagnosing "Response stalled mid-stream")
 
-When Claude Code reports a stalled response, it means no bytes reached it for a while — the proxy tracks why, in the **Stream health** section of `/dashboard` and the `stream` block of `/health` and `/quota`:
+When Claude Code reports a stalled response, it means no bytes reached it for a while — the proxy tracks why, in the **Performance** tab of `/dashboard` and the `stream` block of `/health` and `/quota`:
 
 | Signal | What it points at | Fix |
 |---|---|---|
@@ -356,28 +386,58 @@ Telemetry shipping (Loki) uses its own connection pool, so a slow log push can n
 
 ### Web Dashboard
 
-Open `http://localhost:9999/dashboard` for a live web UI:
+Open `http://localhost:9999/dashboard` for a live management console. A sidebar holds seven views, and each has its own URL hash (`#activity`, `#insights`, …) and a keyboard shortcut (`1`–`7`):
 
-- **Totals** card grid — total cost, requests, distinct sessions, paid input / output / cache read / cache write
-- **Stream health** cards — stalled streams, time-to-first-byte (avg/peak), connection-pool waits, connect retries, client disconnects
-- **Live rate-limit progress bars** color-coded green / amber / red with reset times
-- **Daily trend chart** — last 15 days, cost line + input/output token bars on dual y-axes
-- **Cost-by-model doughnut** — lifetime breakdown
-- **Daily breakdown table** — date · requests · tokens · cost
-- **Per-model breakdown table**
-- **Per-session breakdown table** — each device's `x-claude-code-session-id` shown separately (the proxy locks identity outbound, but tracks each session inbound)
-- Auto-refreshes every 5 s, polls `/quota`. Sticky header with live status pill. Chart.js loaded from CDN; the rest is self-contained vanilla JS that degrades gracefully if blocked
+| View | What it answers |
+|------|-----------------|
+| **Overview** | Is anything wrong, and what are we spending? An **alerts** strip, KPI cards (total cost, today vs yesterday, projected month-end, requests, users, sessions, cost per request, cache hit rate), a 7- or 15-day cost + token chart, cost by model, top spenders against their caps, rate limits and proxy status |
+| **Activity** | Who used Claude Code, how many sessions, and what each session cost. Filter by **range** (today / yesterday / 7 days / 30 days) and by **user or group**. It has four parts, listed below the table |
+| **Users** | Per-user spend and cap usage, with search, filters (active / near cap / over cap), sorting, a per-model breakdown for each user, and a **Reset** action (`ADMIN_IPS` only) |
+| **Sessions** | Every `x-claude-code-session-id` in the current period, with search, user and activity filters, and pagination |
+| **Usage & pricing** | Token totals, the daily table (expand a day into users) and the per-model table (expand a model into users). Also the **price table** in force: where it came from, which models are in use, scheduled changes and unpriced models |
+| **Insights** | What to do about it: **recommendations** with estimated savings, the **weekly trend**, a **user or group comparison**, and the practice score, tool usage, tips and activity by hour (see *Coding Coach*) |
+| **Performance** | Stream health (stalls, TTFB, pool waits, retries, disconnects), live rate-limit bars and the upstream settings in effect |
+
+The four parts of the **Activity** view:
+- **KPIs** — spend, sessions, cost per session, active users and requests per session, each compared with the previous period of the same length.
+- **Today vs yesterday** — per user: sessions, spend and $/session for both days, the change, 7-day spend against the 7 days before, and a 14-day sparkline. Click a session count to open those sessions.
+- **Heatmap** — users (or groups) × days, coloured by spend, sessions or $/session. Click a cell to open a side panel with that day's sessions: times, duration, requests, models and cost.
+- **Breakdown** — grouped by **day, ISO week, user or group**. Expand any row to see its users or days.
+
+**Groups.** Set `USER_GROUPS=phong:backend,huy:backend,linh:frontend` to add group filters, group rows in the heatmap and breakdown, and group-level comparison and advice. Without it, everything works per user.
+
+**Alerts** fire for:
+- a `retry-after` from Anthropic
+- a rate limit below 30% or 10%
+- users near or over their cap
+- upstream stalls
+- connection-pool saturation
+- unpriced models
+- TLS expiry
+- a device identity that has not been captured yet
+
+Each alert links to the relevant view, and nav badges carry the counts.
+
+**Management tools:**
+- CSV export on every table, matching what the current filter shows.
+- Auto-refresh interval (5–60 s, or paused); refreshing stops while the browser tab is hidden.
+- Light and dark themes.
+- Layout that works down to phone width.
+- View and sort choices remembered per browser.
+- User labels are HTML-escaped everywhere.
+
+Session counts per day come from `by_day_session` (quota schema v5). Days recorded before that show spend and tokens but no session count. They show "—", never a misleading 0.
 
 ### Per-Session & Daily Tracking
 
 The proxy reads `x-claude-code-session-id` from each **incoming** request (before the proxy rewrites it to the locked identity) and groups stats per session. So even though every device sends the same locked session-id outbound, the dashboard shows each device's own session distinctly.
 
-Daily buckets use **local time** (`datetime.now()`). The dashboard shows the most recent 15 days; the proxy keeps up to `QUOTA_MAX_DAYS` (default 30) on disk.
+Daily buckets use **local time** (`datetime.now()`). The dashboard shows the most recent 15 days; the proxy keeps up to `QUOTA_MAX_DAYS` (default 90) on disk, which is what the Activity view, the 30-day comparison and the 8-week trend read from.
 
 | Cap | Default | Behavior when exceeded |
 |---|---|---|
 | `QUOTA_MAX_SESSIONS` | 100 | Oldest session (by `last_seen`) evicted |
-| `QUOTA_MAX_DAYS`     | 30  | Oldest date evicted |
+| `QUOTA_MAX_DAYS`     | 90  | Oldest date evicted (with its per-user and per-session buckets) |
 
 ### Persistence
 
@@ -386,7 +446,7 @@ Counters are persisted to `.quota.json` next to `.env` so totals survive proxy r
 ```env
 QUOTA_PERSIST_INTERVAL=30      # Write at most every N seconds
 QUOTA_MAX_SESSIONS=100         # Cap on per-session buckets
-QUOTA_MAX_DAYS=30              # Cap on per-day buckets
+QUOTA_MAX_DAYS=90              # Cap on per-day buckets
 # QUOTA_PERSIST_PATH=          # Override location (default: .quota.json next to .env)
 ```
 
@@ -452,9 +512,29 @@ Because every Claude Code request already flows through the proxy, it's the perf
 
 These roll up into a **practice score (0–100)** — a weighted blend of discipline, reliability, and cache efficiency — plus a list of **actionable tips** (e.g. *"50% tool calls failed — check paths before running"*, *"90% of cost is on Opus — consider Sonnet/Haiku for simple work"*).
 
+### Insights: trends, comparison and priced advice
+
+The coach also keeps its counters **per ISO week and per user** (`by_week`, `by_user` in `.coach.json`, schema v2). It combines them with the quota data into three things:
+
+- **Weekly trend** — for each of the last 8 weeks: spend, change vs the previous week, requests, sessions, $/session, $/request, cache hit rate, tool-error rate and reads per edit. The current week is marked as in progress.
+- **Comparison** — per group when `USER_GROUPS` is set, otherwise per user. Every column, the model mix included, covers the same last 30 days: spend, sessions, $/session, $/request, cache hit rate, share of spend on Opus/Fable, tool-error rate, reads per edit and a score. The dashboard marks the best and weakest value in each column.
+- **Recommendations**, sorted by estimated savings. Each is computed from the tokens actually sent and the live price table:
+
+| Advice | Fires when | Savings estimate |
+|---|---|---|
+| Same-tier cheaper model (e.g. `opus-4.8` → `opus-5.5`, `sonnet-4.6` → `sonnet-5`) | the older model has spend in the last 30 days | the same tokens repriced at the successor's rates |
+| Move routine work off Opus/Fable | ≥ 60% of a user's or group's spend is top-tier | 30% of that traffic repriced at `sonnet-5` |
+| Raise cache hit rate | ≥ 2 M input tokens and hit rate ≥ 10 points under the team median (at least 60%) | the extra cached tokens × (input − cache-read rate) |
+| Cache written but rarely read | cache writes ≥ 1 M tokens and more than cache reads | the write premium paid |
+| Expensive sessions | $/session > 2× the team median (≥ 3 sessions, ≥ $1) | — |
+| Tool errors | > 15% of ≥ 50 tool results failed | — |
+| Spend jump | a complete week is ≥ 30% and ≥ $5 above the one before | — |
+
+Savings figures say what the same traffic would have cost on another model or with a better cache hit rate. They are not a judgement that the cheaper model would have done the work equally well, and several of them can describe the same spend, so they are shown individually, never summed. Advice text is in Vietnamese, like the tips.
+
 ### Where to see it
 
-- **Dashboard**: a new **Coaching** section in `http://localhost:9999/dashboard` (score + metric cards, tool-usage bars, tips, activity-by-hour).
+- **Dashboard**: the **Insights** view in `http://localhost:9999/dashboard` (recommendations, weekly trend, comparison, score + metric cards, tool-usage bars, tips, activity-by-hour).
 - **JSON**: `GET /coach` returns the full computed view.
 
 ### Config & persistence
@@ -786,8 +866,12 @@ tests/                     # pytest suite + golden endpoint snapshots
 | `POST /keys/create` | Issue a key for a user label. The plaintext is in this response and nowhere else |
 | `POST /keys/update` | Enable, disable, relabel, re-note or re-date one key |
 | `POST /keys/delete` | Destroy a key — the next request carrying it gets a 403 |
-| `GET /dashboard` | Web UI rendering `/quota` as charts (Chart.js, dark theme, auto-refresh 5s) + Coaching section |
-| `GET /coach` | Privacy-safe coaching insights JSON (see Coding Coach section) |
+| `GET /dashboard` | Management console: overview, activity, users, sessions, usage & pricing, insights, performance (Chart.js, light/dark, auto-refresh) |
+| `GET /quota/activity?days=30` | Per day × user spend, tokens and session counts, plus today / yesterday / last-7 / previous-7 windows per user and per group |
+| `GET /quota/activity/{YYYY-MM-DD}?user=<label>` | The sessions recorded on one day, optionally for one user |
+| `GET /pricing` | The price table in force, where it came from (bundled / remote), scheduled changes and unpriced models |
+| `POST /admin/pricing/refresh` | Fetch `PRICING_REMOTE_URL` now (`ADMIN_IPS` only) |
+| `GET /coach` | Privacy-safe coaching insights JSON: score, tips, weekly trend, comparison and recommendations (see Coding Coach section) |
 | `GET /config` | Config console — `ADMIN_IPS` only; read-only until you sign in with `ADMIN_TOKEN` |
 | `GET /config/data` | Current settings as JSON, with scope and validation metadata. Secrets report presence only |
 | `POST /config/login` | Exchange `ADMIN_TOKEN` for a signed session cookie (rate-limited per IP) |

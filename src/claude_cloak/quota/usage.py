@@ -33,6 +33,53 @@ def _record_rate_limits(headers) -> None:
         state.quota_stats["rate_limits_updated_at"] = datetime.now().isoformat(timespec="seconds")
 
 
+def _record_day_session(
+    today: str,
+    session_id: str,
+    user_label: str | None,
+    model_key: str,
+    now_iso: str,
+    cost: float,
+    in_t: int,
+    out_t: int,
+    cr_t: int,
+    cw_t: int,
+) -> None:
+    """Per-day slice of a session, so "sessions per user per day" and cost per
+    session can be answered for any day in history. A session that runs past
+    midnight is split between the two days."""
+    day = state.quota_stats["by_day_session"].setdefault(today, {})
+    b = day.setdefault(
+        session_id,
+        {
+            "session_id": session_id,
+            "user_label": user_label or "",
+            "requests": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cost_usd": 0.0,
+            "models": {},
+            "first_seen": now_iso,
+            "last_seen": now_iso,
+        },
+    )
+    if user_label:
+        b["user_label"] = user_label
+    b["requests"] += 1
+    b["input_tokens"] += in_t
+    b["output_tokens"] += out_t
+    b["cache_creation_input_tokens"] += cw_t
+    b["cache_read_input_tokens"] += cr_t
+    b["cost_usd"] += cost
+    b["last_seen"] = now_iso
+    b["models"][model_key] = b["models"].get(model_key, 0) + 1
+    if len(day) > settings.QUOTA_MAX_DAY_SESSIONS:
+        oldest = min(day, key=lambda sid: day[sid].get("last_seen", ""))
+        del day[oldest]
+
+
 def _record_usage(
     model: str | None,
     usage: dict,
@@ -136,6 +183,11 @@ def _record_usage(
         _evict_oldest("by_session", "last_seen", settings.QUOTA_MAX_SESSIONS)
 
     today = datetime.now().strftime("%Y-%m-%d")
+    if session_id:
+        _record_day_session(
+            today, session_id, user_label, model_key, now_iso, cost, in_t, out_t, cr_t, cw_t
+        )
+
     db = state.quota_stats["by_day"].setdefault(
         today,
         {
@@ -181,6 +233,25 @@ def _record_usage(
         dub["cache_read_input_tokens"] += cr_t
         dub["cache_creation_input_tokens"] += cw_t
         dub["cost_usd"] += cost
+        # Per-model split, so model mix can be read over any window of days
+        # rather than only over the current quota period.
+        dm = dub.setdefault("models", {}).setdefault(
+            model_key,
+            {
+                "requests": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cost_usd": 0.0,
+            },
+        )
+        dm["requests"] += 1
+        dm["input_tokens"] += in_t
+        dm["output_tokens"] += out_t
+        dm["cache_read_input_tokens"] += cr_t
+        dm["cache_creation_input_tokens"] += cw_t
+        dm["cost_usd"] += cost
         # Cap dates the same way by_day is capped, so the two stay in lockstep.
         _evict_by_day_user_to_match_by_day()
 

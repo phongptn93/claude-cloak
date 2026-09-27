@@ -1,176 +1,106 @@
-"""Model price table and cost computation."""
+"""Model price table and cost computation.
+
+Prices live in ``data/pricing.json`` rather than in code, so a price change
+is a data edit reviewed like any other, and a proxy can pick one up without a
+release (see ``PRICING_REMOTE_URL`` below). Anthropic publishes no pricing
+API — ``GET /v1/models`` carries ids, context windows and capabilities, not
+rates — so the table is the source of truth and the remote sync only fetches
+a newer copy of the same file.
+
+Each model key holds a list of rates. A rate applies from its
+``effective_from`` date (``YYYY-MM-DD``, local time) until the next entry, and
+one without a date applies from the beginning, so a known price change can be
+scheduled ahead of time. ``PRICING`` always holds today's rates with
+``PRICING_<KEY>_<TIER>`` env overrides applied on top.
+
+Tiers: input, output, cache_write_5m, cache_write_1h, cache_read — USD per
+million tokens. Model key is matched by substring against the response
+``model`` field; longer keys win, so ``opus-5.5`` is picked over ``opus-5``.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import json
 import os
+import re
+from datetime import datetime
+from importlib import resources
 
-# Per-million-token USD prices. Defaults are public Anthropic list prices
-# at the time of writing — override via PRICING_<KEY>_<TIER>=<usd> env if
-# Anthropic changes them or you want plan-specific rates.
-#
-# Tiers: input, output, cache_write_5m, cache_write_1h, cache_read.
-# Cache tiers follow Anthropic's standard multipliers on the input price:
-#   5m write = 1.25x, 1h write = 2x, read = 0.1x.
-# Exception: Fable 5.1 and Mythos 5.1 read at 0.025x ($0.25/MTok), a quarter of
-# the 5.0 rate — keep those rows separate from `fable-5` / `mythos-5`.
-# Model key is matched by substring against the response `model` field;
-# longer keys win, so `opus-4.8` is picked over the legacy `opus-4` entry.
-#
-# IMPORTANT: Opus 4.5 and newer are $5/$25 — only Opus 4.0/4.1 and Opus 3
-# carry the old $15/$75 rate. Keep those rows separate or 4.x traffic gets
-# billed at 3x its real cost.
-PRICING_DEFAULTS: dict[str, dict[str, float]] = {
-    # ---- Claude 5 family ----
-    "fable-5.1": {
-        "input": 10.00,
-        "output": 50.00,
-        "cache_write_5m": 12.50,
-        "cache_write_1h": 20.00,
-        "cache_read": 0.25,
-    },
-    "mythos-5.1": {
-        "input": 10.00,
-        "output": 50.00,
-        "cache_write_5m": 12.50,
-        "cache_write_1h": 20.00,
-        "cache_read": 0.25,
-    },
-    "fable-5": {
-        "input": 10.00,
-        "output": 50.00,
-        "cache_write_5m": 12.50,
-        "cache_write_1h": 20.00,
-        "cache_read": 1.00,
-    },
-    "mythos-5": {
-        "input": 10.00,
-        "output": 50.00,
-        "cache_write_5m": 12.50,
-        "cache_write_1h": 20.00,
-        "cache_read": 1.00,
-    },
-    "opus-5": {
-        "input": 5.00,
-        "output": 25.00,
-        "cache_write_5m": 6.25,
-        "cache_write_1h": 10.00,
-        "cache_read": 0.50,
-    },
-    "sonnet-5": {
-        "input": 2.00,
-        "output": 10.00,
-        "cache_write_5m": 2.50,
-        "cache_write_1h": 4.00,
-        "cache_read": 0.20,
-    },
-    # ---- Opus 4.x (4.5+ moved to the $5/$25 tier) ----
-    "opus-4.8": {
-        "input": 5.00,
-        "output": 25.00,
-        "cache_write_5m": 6.25,
-        "cache_write_1h": 10.00,
-        "cache_read": 0.50,
-    },
-    "opus-4.7": {
-        "input": 5.00,
-        "output": 25.00,
-        "cache_write_5m": 6.25,
-        "cache_write_1h": 10.00,
-        "cache_read": 0.50,
-    },
-    "opus-4.6": {
-        "input": 5.00,
-        "output": 25.00,
-        "cache_write_5m": 6.25,
-        "cache_write_1h": 10.00,
-        "cache_read": 0.50,
-    },
-    "opus-4.5": {
-        "input": 5.00,
-        "output": 25.00,
-        "cache_write_5m": 6.25,
-        "cache_write_1h": 10.00,
-        "cache_read": 0.50,
-    },
-    "opus-4.1": {
-        "input": 15.00,
-        "output": 75.00,
-        "cache_write_5m": 18.75,
-        "cache_write_1h": 30.00,
-        "cache_read": 1.50,
-    },
-    "opus-4": {
-        "input": 15.00,
-        "output": 75.00,
-        "cache_write_5m": 18.75,
-        "cache_write_1h": 30.00,
-        "cache_read": 1.50,
-    },
-    # ---- Sonnet / Haiku ----
-    "sonnet-4.6": {
-        "input": 3.00,
-        "output": 15.00,
-        "cache_write_5m": 3.75,
-        "cache_write_1h": 6.00,
-        "cache_read": 0.30,
-    },
-    "sonnet-4": {
-        "input": 3.00,
-        "output": 15.00,
-        "cache_write_5m": 3.75,
-        "cache_write_1h": 6.00,
-        "cache_read": 0.30,
-    },
-    "haiku-4": {
-        "input": 1.00,
-        "output": 5.00,
-        "cache_write_5m": 1.25,
-        "cache_write_1h": 2.00,
-        "cache_read": 0.10,
-    },
-    "opus-3": {
-        "input": 15.00,
-        "output": 75.00,
-        "cache_write_5m": 18.75,
-        "cache_write_1h": 30.00,
-        "cache_read": 1.50,
-    },
-    "sonnet-3.7": {
-        "input": 3.00,
-        "output": 15.00,
-        "cache_write_5m": 3.75,
-        "cache_write_1h": 6.00,
-        "cache_read": 0.30,
-    },
-    "sonnet-3.5": {
-        "input": 3.00,
-        "output": 15.00,
-        "cache_write_5m": 3.75,
-        "cache_write_1h": 6.00,
-        "cache_read": 0.30,
-    },
-    "haiku-3.5": {
-        "input": 0.80,
-        "output": 4.00,
-        "cache_write_5m": 1.00,
-        "cache_write_1h": 1.60,
-        "cache_read": 0.08,
-    },
-    "haiku-3": {
-        "input": 0.25,
-        "output": 1.25,
-        "cache_write_5m": 0.30,
-        "cache_write_1h": 0.50,
-        "cache_read": 0.03,
-    },
-}
+from .env import data_path
 
-# Fallback rate for a model id that matches no key above (e.g. a model that
-# shipped after this build). Without it such traffic is silently costed at
-# $0 and the dashboard under-reports spend. Defaults to the Opus-tier rate so
-# the estimate errs high rather than invisible; set PRICING_FALLBACK_INPUT=0
-# to restore the old "unknown = free" behaviour.
+TIERS = ("input", "output", "cache_write_5m", "cache_write_1h", "cache_read")
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_KEY_RE = re.compile(r"^[a-z]+-[0-9][0-9.]*$|^[a-z]+$")
+
+
+class PricingError(ValueError):
+    """A pricing document failed validation; the current table stays in use."""
+
+
+def parse_pricing(doc: object) -> dict[str, list[dict]]:
+    """Validate a pricing document and return ``{key: [rate, ...]}``.
+
+    Rates come back sorted by ``effective_from`` (undated first). Anything
+    malformed raises PricingError rather than being skipped, because a
+    half-applied table would misprice traffic without anyone noticing.
+    """
+    if not isinstance(doc, dict) or doc.get("schema") != 1:
+        raise PricingError("expected a pricing document with schema 1")
+    models = doc.get("models")
+    if not isinstance(models, dict) or not models:
+        raise PricingError("`models` must be a non-empty object")
+    table: dict[str, list[dict]] = {}
+    for key, rates in models.items():
+        if not isinstance(key, str) or not _KEY_RE.match(key):
+            raise PricingError(f"invalid model key {key!r}")
+        if not isinstance(rates, list) or not rates:
+            raise PricingError(f"{key}: expected a non-empty list of rates")
+        seen: set[str] = set()
+        clean = []
+        for rate in rates:
+            if not isinstance(rate, dict):
+                raise PricingError(f"{key}: rate must be an object")
+            eff = rate.get("effective_from", "")
+            if eff and (not isinstance(eff, str) or not _DATE_RE.match(eff)):
+                raise PricingError(f"{key}: effective_from must be YYYY-MM-DD, got {eff!r}")
+            if eff in seen:
+                raise PricingError(f"{key}: two rates share effective_from {eff or '(none)'}")
+            seen.add(eff)
+            row = {"effective_from": eff}
+            for tier in TIERS:
+                v = rate.get(tier)
+                if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 <= v < 10_000:
+                    raise PricingError(f"{key}: {tier} must be a non-negative number")
+                row[tier] = float(v)
+            clean.append(row)
+        table[key] = sorted(clean, key=lambda r: r["effective_from"])
+    return table
+
+
+def rates_on(table: dict[str, list[dict]], key: str, day: str) -> dict[str, float] | None:
+    """The rate for ``key`` in force on ``day`` (``YYYY-MM-DD``), or None."""
+    current = None
+    for rate in table.get(key, ()):
+        if rate["effective_from"] <= day:
+            current = rate
+    if current is None:
+        return None
+    return {tier: current[tier] for tier in TIERS}
+
+
+def _load_bundled() -> tuple[dict[str, list[dict]], dict]:
+    raw = resources.files("claude_cloak.data").joinpath("pricing.json").read_text(encoding="utf-8")
+    doc = json.loads(raw)
+    return parse_pricing(doc), doc
+
+
+# Fallback rate for a model id that matches no key (e.g. a model that shipped
+# after this table was updated). Without it such traffic is silently costed
+# at $0 and the dashboard under-reports spend. Defaults to the Opus-tier rate
+# so the estimate errs high rather than invisible; set
+# PRICING_FALLBACK_INPUT=0 to restore the old "unknown = free" behaviour.
 PRICING_FALLBACK = {
     "input": float(os.getenv("PRICING_FALLBACK_INPUT", "5.00")),
     "output": float(os.getenv("PRICING_FALLBACK_OUTPUT", "25.00")),
@@ -183,28 +113,80 @@ PRICING_FALLBACK.update(
     }
 )
 
+_BUNDLED_TABLE, _BUNDLED_DOC = _load_bundled()
+_table: dict[str, list[dict]] = _BUNDLED_TABLE
 
-def _load_pricing() -> dict[str, dict[str, float]]:
-    """Apply env overrides on top of PRICING_DEFAULTS."""
-    pricing = {k: dict(v) for k, v in PRICING_DEFAULTS.items()}
-    for model_key in pricing:
-        env_prefix = "PRICING_" + model_key.upper().replace("-", "_").replace(".", "_")
-        for tier in pricing[model_key]:
-            override = os.getenv(f"{env_prefix}_{tier.upper()}")
-            if override:
-                with contextlib.suppress(ValueError):
-                    pricing[model_key][tier] = float(override)
-    return pricing
+# Today's effective rates. Mutated in place on reload so modules that did
+# `from .pricing import PRICING` keep seeing the live table.
+PRICING: dict[str, dict[str, float]] = {}
+_priced_day = ""
+
+PRICING_SOURCE: dict = {
+    "origin": "bundled",
+    "updated": _BUNDLED_DOC.get("updated"),
+    "source": _BUNDLED_DOC.get("source"),
+    "remote_url": "",
+    "fetched_at": None,
+    "last_error": None,
+}
 
 
-PRICING = _load_pricing()
+def _env_override(key: str, tier: str) -> float | None:
+    env_prefix = "PRICING_" + key.upper().replace("-", "_").replace(".", "_")
+    raw = os.getenv(f"{env_prefix}_{tier.upper()}")
+    if raw:
+        with contextlib.suppress(ValueError):
+            return float(raw)
+    return None
+
+
+def _rebuild(day: str | None = None) -> None:
+    """Recompute PRICING for ``day`` (default today) from the loaded table."""
+    global _priced_day
+    day = day or datetime.now().strftime("%Y-%m-%d")
+    fresh: dict[str, dict[str, float]] = {}
+    for key in _table:
+        rates = rates_on(_table, key, day)
+        if rates is None:
+            continue  # every rate for this model is scheduled in the future
+        for tier in TIERS:
+            override = _env_override(key, tier)
+            if override is not None:
+                rates[tier] = override
+        fresh[key] = rates
+    PRICING.clear()
+    PRICING.update(fresh)
+    _priced_day = day
+
+
+def install_table(table: dict[str, list[dict]], origin: str, doc: dict | None = None) -> None:
+    """Swap in a validated table. Remote rows override and extend the bundled ones."""
+    global _table
+    merged = dict(_BUNDLED_TABLE)
+    merged.update(table)
+    _table = merged
+    PRICING_SOURCE["origin"] = origin
+    if doc:
+        PRICING_SOURCE["updated"] = doc.get("updated")
+        PRICING_SOURCE["source"] = doc.get("source")
+    _rebuild()
+
+
+def _ensure_today() -> None:
+    # A price scheduled with effective_from takes effect at local midnight
+    # without a restart. One string compare per request.
+    if datetime.now().strftime("%Y-%m-%d") != _priced_day:
+        _rebuild()
+
+
+_rebuild()
 
 
 def _normalize_model_key(model: str | None) -> str:
     """Map a Claude model id to a PRICING key.
 
     Anthropic's id ordering varies between generations:
-      - 4.x: family-first, e.g. `claude-sonnet-4-5-20250929`
+      - 4.x+: family-first, e.g. `claude-sonnet-4-5-20250929`, `claude-opus-5-5`
       - 3.x: version-first, e.g. `claude-3-5-sonnet-20241022`
 
     We match both `<family>-<version>` and `<version>-<family>` forms,
@@ -231,22 +213,26 @@ def _normalize_model_key(model: str | None) -> str:
     return "unknown"
 
 
-def _compute_cost(model_key: str, usage: dict) -> float:
-    """Compute USD cost for a single /v1/messages response usage block."""
-    # Unknown model ids fall back to a configurable rate instead of $0 so a
-    # newly released model never silently disappears from the cost total.
-    p = PRICING.get(model_key) or PRICING_FALLBACK
-    if not p["input"] and not p["output"]:
-        return 0.0
+def rates_for(model_key: str) -> dict[str, float]:
+    """Today's rates for a PRICING key, or the fallback for an unknown model."""
+    _ensure_today()
+    return PRICING.get(model_key) or PRICING_FALLBACK
 
-    input_t = usage.get("input_tokens", 0) or 0
-    output_t = usage.get("output_tokens", 0) or 0
-    cache_read = usage.get("cache_read_input_tokens", 0) or 0
-    cache_write_total = usage.get("cache_creation_input_tokens", 0) or 0
+
+def cost_of(rates: dict[str, float], tokens: dict) -> float:
+    """USD for a token bundle (``input_tokens``, ``output_tokens``, cache fields).
+
+    Cache writes without a 5m/1h split are costed at the 5m rate, which is
+    the API default TTL.
+    """
+    input_t = tokens.get("input_tokens", 0) or 0
+    output_t = tokens.get("output_tokens", 0) or 0
+    cache_read = tokens.get("cache_read_input_tokens", 0) or 0
+    cache_write_total = tokens.get("cache_creation_input_tokens", 0) or 0
 
     cache_write_5m = 0
     cache_write_1h = 0
-    cc = usage.get("cache_creation")
+    cc = tokens.get("cache_creation")
     if isinstance(cc, dict):
         cache_write_5m = cc.get("ephemeral_5m_input_tokens", 0) or 0
         cache_write_1h = cc.get("ephemeral_1h_input_tokens", 0) or 0
@@ -254,11 +240,114 @@ def _compute_cost(model_key: str, usage: dict) -> float:
         # Older API shape: no breakdown — assume default 5m TTL.
         cache_write_5m = cache_write_total
 
-    cost = (
-        input_t * p["input"]
-        + output_t * p["output"]
-        + cache_read * p["cache_read"]
-        + cache_write_5m * p["cache_write_5m"]
-        + cache_write_1h * p["cache_write_1h"]
+    return (
+        input_t * rates["input"]
+        + output_t * rates["output"]
+        + cache_read * rates["cache_read"]
+        + cache_write_5m * rates["cache_write_5m"]
+        + cache_write_1h * rates["cache_write_1h"]
     ) / 1_000_000.0
-    return cost
+
+
+def _compute_cost(model_key: str, usage: dict) -> float:
+    """Compute USD cost for a single /v1/messages response usage block."""
+    # Unknown model ids fall back to a configurable rate instead of $0 so a
+    # newly released model never silently disappears from the cost total.
+    p = rates_for(model_key)
+    if not p["input"] and not p["output"]:
+        return 0.0
+    return cost_of(p, usage)
+
+
+def pricing_view() -> dict:
+    """Public shape for GET /pricing: where the table came from, and the rates."""
+    _ensure_today()
+    return {
+        **PRICING_SOURCE,
+        "effective_on": _priced_day,
+        "fallback": dict(PRICING_FALLBACK),
+        "models": [
+            {
+                "model": key,
+                **PRICING[key],
+                "scheduled": [r for r in _table.get(key, ()) if r["effective_from"] > _priced_day],
+            }
+            for key in sorted(PRICING)
+        ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Optional remote sync
+# ---------------------------------------------------------------------------
+# Off unless PRICING_REMOTE_URL is set. When on, the proxy fetches a pricing
+# document in the same format (e.g. this repository's data/pricing.json on
+# the default branch), validates it, and merges it over the bundled table —
+# so a price fix reaches every install within PRICING_REMOTE_REFRESH_HOURS
+# without an upgrade. The last good copy is cached next to .quota.json and
+# reused at startup; a failed fetch or a document that fails validation
+# leaves the current table in place.
+PRICING_REMOTE_URL = os.getenv("PRICING_REMOTE_URL", "").strip()
+PRICING_SOURCE["remote_url"] = PRICING_REMOTE_URL
+
+
+def _refresh_hours() -> float:
+    try:
+        return max(1.0, float(os.getenv("PRICING_REMOTE_REFRESH_HOURS", "24")))
+    except ValueError:
+        return 24.0
+
+
+def _cache_path() -> str:
+    return data_path(".pricing-remote.json", os.getenv("PRICING_REMOTE_CACHE_PATH", ""))
+
+
+def load_cached_remote() -> bool:
+    """Install the last successfully fetched remote table, if there is one."""
+    if not PRICING_REMOTE_URL or not os.path.exists(_cache_path()):
+        return False
+    try:
+        with open(_cache_path(), encoding="utf-8") as f:
+            doc = json.load(f)
+        table = parse_pricing(doc)
+    except (OSError, ValueError):
+        return False
+    install_table(table, "remote-cache", doc)
+    return True
+
+
+async def refresh_remote_pricing(client=None) -> bool:
+    """Fetch, validate and install the remote table. Never raises."""
+    if not PRICING_REMOTE_URL:
+        return False
+    import httpx  # local: only needed when the feature is on
+
+    own = client is None
+    client = client or httpx.AsyncClient(timeout=15.0, follow_redirects=True)
+    try:
+        resp = await client.get(PRICING_REMOTE_URL, headers={"accept": "application/json"})
+        resp.raise_for_status()
+        doc = resp.json()
+        table = parse_pricing(doc)
+    except Exception as exc:  # network, HTTP status, JSON or schema failure
+        PRICING_SOURCE["last_error"] = f"{type(exc).__name__}: {exc}"[:300]
+        return False
+    finally:
+        if own:
+            await client.aclose()
+    install_table(table, "remote", doc)
+    PRICING_SOURCE["fetched_at"] = datetime.now().isoformat(timespec="seconds")
+    PRICING_SOURCE["last_error"] = None
+    tmp = _cache_path() + ".tmp"
+    with contextlib.suppress(OSError):
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(doc, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, _cache_path())
+    return True
+
+
+async def remote_pricing_loop() -> None:
+    """Refresh the remote table at startup and then every refresh interval."""
+    while True:
+        await refresh_remote_pricing()
+        await asyncio.sleep(_refresh_hours() * 3600)
