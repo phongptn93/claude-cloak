@@ -1,4 +1,4 @@
-"""Push alerts to a webhook (Slack incoming webhook or plain JSON).
+"""Push alerts to a webhook: Slack, Microsoft Teams (Workflows) or plain JSON.
 
 Off unless ALERT_WEBHOOK_URL is set. Each alert has a key; a key fires once
 and then stays quiet until its cooldown passes, or — for keys that embed the
@@ -50,6 +50,35 @@ def _payload(key: str, level: str, text: str) -> dict:
     icon = {"danger": ":red_circle:", "warn": ":large_yellow_circle:"}.get(
         level, ":information_source:"
     )
+    if settings.ALERT_WEBHOOK_FORMAT == "teams":
+        # Teams Workflows "post to a channel when a webhook request is
+        # received" takes an Adaptive Card in a message envelope. The old
+        # Office 365 connector URLs were retired in May 2026.
+        return {
+            "type": "message",
+            "attachments": [
+                {
+                    "contentType": "application/vnd.microsoft.card.adaptive",
+                    "contentUrl": None,
+                    "content": {
+                        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                        "type": "AdaptiveCard",
+                        "version": "1.4",
+                        "body": [
+                            {
+                                "type": "TextBlock",
+                                "text": "claude-cloak",
+                                "weight": "Bolder",
+                                "color": {"danger": "Attention", "warn": "Warning"}.get(
+                                    level, "Default"
+                                ),
+                            },
+                            {"type": "TextBlock", "text": text.replace("*", "**"), "wrap": True},
+                        ],
+                    },
+                }
+            ],
+        }
     if settings.ALERT_WEBHOOK_FORMAT == "json":
         return {
             "source": "claude-cloak",

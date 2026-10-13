@@ -408,7 +408,7 @@ The four parts of the **Activity** view:
 
 **Groups.** Set `USER_GROUPS=phong:backend,huy:backend,linh:frontend` to add group filters, group rows in the heatmap and breakdown, and group-level comparison and advice. Without it, everything works per user.
 
-**Alerts.** Set `ALERT_WEBHOOK_URL` to a Slack incoming webhook (or any JSON endpoint with `ALERT_WEBHOOK_FORMAT=json`) to be told when an account passes 90% of its 5-hour or weekly window (`ALERT_ACCOUNT_THRESHOLD`), when a user reaches 80% / 100% of their cap, and when streams stall.
+**Alerts.** Set `ALERT_WEBHOOK_URL` to a Slack incoming webhook, a Microsoft Teams Workflows webhook with `ALERT_WEBHOOK_FORMAT=teams` (in Teams: channel → Workflows → "Post to a channel when a webhook request is received"; the old Office 365 connector URLs were retired in May 2026), or any JSON endpoint with `ALERT_WEBHOOK_FORMAT=json`, to be told when an account passes 90% of its 5-hour or weekly window (`ALERT_ACCOUNT_THRESHOLD`), when a user reaches 80% / 100% of their cap, and when streams stall.
 
 **Several Claude accounts.** When clients log in with different Claude subscriptions, the proxy tells them apart by the account UUID Claude Code puts in each request's `metadata.user_id` (falling back to the `anthropic-organization-id` response header). Each account gets its own 5-hour and weekly limit bars, its spend this month and the users routed through it, under `accounts` in `/quota`. Accounts show as the first 8 characters of their id; name them with `ACCOUNT_LABELS=3f2a9c1d:team-max-1,b71e0f44:team-max-2`. Only the UUID is stored, never a token.
 

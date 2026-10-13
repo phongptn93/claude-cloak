@@ -51,6 +51,18 @@ async def test_account_alert_fires_once_per_window(monkeypatch):
     assert "max-1" in posts[0]["text"] and "93%" in posts[0]["text"]
 
 
+def test_teams_format_is_an_adaptive_card(monkeypatch):
+    monkeypatch.setattr(settings, "ALERT_WEBHOOK_FORMAT", "teams")
+    body = alerts._payload("k", "danger", "Tài khoản *max-1*: 93%")
+    att = body["attachments"][0]
+    assert body["type"] == "message"
+    assert att["contentType"] == "application/vnd.microsoft.card.adaptive"
+    card = att["content"]
+    assert card["type"] == "AdaptiveCard"
+    assert card["body"][0]["color"] == "Attention"
+    assert "**max-1**" in card["body"][1]["text"]
+
+
 def test_alerts_are_off_without_a_webhook(monkeypatch):
     monkeypatch.setattr(settings, "ALERT_WEBHOOK_URL", "")
     assert alerts.notify("k", "warn", "x") is False

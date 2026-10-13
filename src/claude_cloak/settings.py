@@ -354,7 +354,8 @@ UPSTREAM_RETRY_BACKOFF_SECONDS = env_float("UPSTREAM_RETRY_BACKOFF_SECONDS", 0.2
 UPSTREAM_POOL_WAIT_WARN_MS = env_float("UPSTREAM_POOL_WAIT_WARN_MS", 1000)
 
 # Alerts to a webhook: Slack incoming-webhook URL (format "slack", the
-# default) or any endpoint taking JSON (format "json"). Empty = off.
+# default), a Microsoft Teams Workflows webhook URL (format "teams"), or any
+# endpoint taking JSON (format "json"). Empty = off.
 ALERT_WEBHOOK_URL = env_str("ALERT_WEBHOOK_URL")
 ALERT_WEBHOOK_FORMAT = env_str("ALERT_WEBHOOK_FORMAT", "slack").lower()
 # Fraction of a subscription window (5h / weekly) that triggers an alert.

@@ -97,7 +97,7 @@ Notable changes to Claude Cloak. Format follows
   that a 5m entry would have re-written. Shown in Insights with who set 1h
   (Claude Code or the proxy's `CACHE_EXTEND_TTL`), plus a recommendation when
   it costs more than it saves. On real traffic the 1h premium was ~$1,776/month.
-- **Webhook alerts** (`ALERT_WEBHOOK_URL`, Slack or JSON): an account past
+- **Webhook alerts** (`ALERT_WEBHOOK_URL`, Slack, Microsoft Teams Workflows or JSON): an account past
   `ALERT_ACCOUNT_THRESHOLD` (0.9) of its 5h/weekly window, a user at 80% /
   100% of their cap, and stream stalls. Each fires once per window / period
   or per `ALERT_COOLDOWN_MINUTES`.
