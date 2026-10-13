@@ -40,6 +40,7 @@ SUCCESSOR = {
 }
 TOP_TIER = ("fable", "mythos", "opus")
 EVERYDAY_MODEL = "sonnet-5"
+CONTEXT_FLOOR = 150_000  # context per request below this is never flagged
 SHIFT_SHARE = 0.3  # share of top-tier traffic assumed movable to EVERYDAY_MODEL
 
 
@@ -263,6 +264,10 @@ def unit_stats() -> list[dict]:
                 if u["requests"]
                 else None,
                 "cache_hit_rate": round(hit, 4) if hit is not None else None,
+                # Prompt tokens sent per request. Every turn re-reads the
+                # whole context, so this — not the hit rate — is what drives
+                # cache-read spend once caching works.
+                "context_per_request": round(denom / u["requests"]) if u["requests"] else None,
                 "top_tier_cost_share": round(top_cost / mix_cost, 4) if mix_cost else None,
                 "error_rate": round(err, 4) if err is not None else None,
                 "reads_per_edit": round(u["reads"] / u["edits"], 2) if u["edits"] else None,
@@ -423,6 +428,42 @@ def recommendations(units: list[dict], weeks: list[dict]) -> list[dict]:
                 "savings_window": f"{WINDOW_DAYS} ngày",
             }
         )
+
+    # 3b. Context far larger than the team's typical request. Cache reads are
+    # cheap per token but are paid on the whole context every turn.
+    ctx = [u["context_per_request"] for u in units if u["context_per_request"]]
+    if len(ctx) >= 2:
+        median_ctx = statistics.median(ctx)
+        for u in units:
+            raw = u["_raw"]
+            c = u["context_per_request"]
+            if not c or u["requests"] < 100 or c < CONTEXT_FLOOR or c < 1.5 * median_ctx:
+                continue
+            r_read = (
+                _blended_rate(raw["models"], "cache_read") or rates_for("unknown")["cache_read"]
+            )
+            saving = (c - median_ctx) * u["requests"] * r_read / 1_000_000
+            if saving < 0.5:
+                continue
+            recs.append(
+                {
+                    "kind": "context",
+                    "severity": "warn",
+                    "scope": "group" if settings.USER_GROUPS else "user",
+                    "target": u["name"],
+                    "title": (
+                        f"{u['name']}: {round(c / 1000):,}K token context mỗi request, "
+                        f"gấp {c / median_ctx:.1f}× mức chung"
+                    ),
+                    "detail": (
+                        f"Mỗi lượt gửi lại toàn bộ context; mức chung là {round(median_ctx / 1000):,}K. "
+                        "Dùng /compact khi phiên đã dài, /clear khi chuyển việc, và tránh đọc cả file lớn "
+                        f"khi chỉ cần một đoạn. Về mức chung sẽ tiết kiệm khoảng {_money(saving)}."
+                    ),
+                    "savings_usd": round(saving, 2),
+                    "savings_window": f"{WINDOW_DAYS} ngày",
+                }
+            )
 
     # 4. Cache written but rarely read back — paying the write premium for nothing.
     for u in units:

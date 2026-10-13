@@ -89,6 +89,21 @@ Notable changes to Claude Cloak. Format follows
   - Server mode now boots with an empty `ALLOWED_IPS` when keys are enabled and
     at least one is active, instead of aborting.
 
+### Added (context size)
+
+- **Context per request** in Coaching → Compare users: prompt tokens sent per
+  request (fresh + cache read + cache write). On a real 22-user deployment,
+  cache reads were half of all spend at ~197K tokens per request, with a 4×
+  spread between users — a bigger lever than the cache hit rate, which sat at
+  ~97% for everyone.
+- A **context recommendation** for users at 1.5× the team median (and over
+  150K tokens), with the cache-read saving from coming down to the median.
+
+### Changed (session cap)
+
+- `QUOTA_MAX_DAY_SESSIONS` default 500 → 1500; a 20-person team already
+  reached 426 sessions in a day.
+
 ### Fixed
 
 - **Pool waits over-counted.** The figure timed everything up to Anthropic's

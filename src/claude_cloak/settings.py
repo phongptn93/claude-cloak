@@ -300,7 +300,9 @@ QUOTA_MAX_SESSIONS = env_int("QUOTA_MAX_SESSIONS", 100)
 # 90 days keeps ~13 ISO weeks, enough for the 8-week trend in Insights.
 QUOTA_MAX_DAYS = env_int("QUOTA_MAX_DAYS", 90)
 # Sessions kept per day in by_day_session (oldest-active dropped first).
-QUOTA_MAX_DAY_SESSIONS = env_int("QUOTA_MAX_DAY_SESSIONS", 500)
+# A 20-person team was seen at 426 sessions in one day; past the cap the
+# day's session count (not its cost) is under-reported.
+QUOTA_MAX_DAY_SESSIONS = env_int("QUOTA_MAX_DAY_SESSIONS", 1500)
 QUOTA_MONTHLY_RESET = env_bool("QUOTA_MONTHLY_RESET", True)
 
 QUOTA_PERSIST_PATH = data_path(".quota.json", env_str("QUOTA_PERSIST_PATH"))

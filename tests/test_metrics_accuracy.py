@@ -94,3 +94,33 @@ async def test_upstream_drop_mid_stream_is_counted_and_reported(client, monkeypa
     assert b"upstream connection lost mid-stream" in r.content
     assert state.stream_stats["upstream_errors"] == 1
     assert state.stream_stats["streams_completed"] == 0
+
+
+def test_oversized_context_is_flagged_with_a_saving():
+    from datetime import datetime
+
+    from claude_cloak.coach_insights import coach_insights
+
+    today = datetime.now().date().isoformat()
+
+    def row(requests, context):
+        model = {
+            "requests": requests,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_input_tokens": requests * context,
+            "cache_creation_input_tokens": 0,
+            "cost_usd": 1.0,
+        }
+        return {**model, "models": {"opus-5.5": dict(model)}}
+
+    state.quota_stats["by_day_user"][today] = {
+        "lean": row(500, 100_000),
+        "typical": row(500, 120_000),
+        "heavy": row(500, 500_000),
+    }
+    view = coach_insights()
+    ctx = {g["name"]: g["context_per_request"] for g in view["groups"]}
+    assert ctx["heavy"] == 500_000
+    flagged = [r["target"] for r in view["recommendations"] if r["kind"] == "context"]
+    assert flagged == ["heavy"]

@@ -569,6 +569,7 @@
     display: flex; align-items: center; justify-content: center; font-size: 16px;
     background: var(--accent-bg); color: var(--accent);
   }
+  .rec.context .ic { background: var(--warn-bg); color: var(--warn); }
   .rec.cache .ic { background: rgba(34,211,238,.12); color: var(--accent-2); }
   .rec.reliability .ic, .rec.trend .ic { background: var(--warn-bg); color: var(--warn); }
   .rec.session .ic { background: var(--info-bg); color: var(--info); }
@@ -1256,6 +1257,7 @@
               <th class="sortable num" data-key="cost_per_session">$/session</th>
               <th class="sortable num" data-key="cost_per_request">$/request</th>
               <th class="sortable" data-key="cache_hit_rate">Cache hit</th>
+              <th class="sortable num" data-key="context_per_request" title="Prompt tokens sent per request (fresh + cache read + cache write)">Context/req</th>
               <th class="sortable" data-key="top_tier_cost_share">Opus/Fable share</th>
               <th class="sortable num" data-key="error_rate">Tool errors</th>
               <th class="sortable num" data-key="reads_per_edit">Reads/edit</th>
@@ -2695,7 +2697,7 @@
 
   /*  Insights  ------------------------------------------------------------ */
   let wkMetric = store.get('wk.metric', 'cost');
-  const REC_ICON = { model: '◆', cache: '⟲', session: '⏱', reliability: '⚠', trend: '↗' };
+  const REC_ICON = { model: '◆', cache: '⟲', context: '▤', session: '⏱', reliability: '⚠', trend: '↗' };
   function renderInsights() {
     const c = C;
     if (!c) return;
@@ -2762,7 +2764,7 @@
     const units = sortRows(c.groups || [], sortState.cmp);
     $('cmp-empty').hidden = units.length > 0;
     $('cmp-table').hidden = units.length === 0;
-    const dir = { cost_per_session: -1, cost_per_request: -1, cache_hit_rate: 1, top_tier_cost_share: -1, error_rate: -1, reads_per_edit: 1, score: 1 };
+    const dir = { cost_per_session: -1, cost_per_request: -1, cache_hit_rate: 1, context_per_request: -1, top_tier_cost_share: -1, error_rate: -1, reads_per_edit: 1, score: 1 };
     const extremes = {};
     for (const [k, d] of Object.entries(dir)) {
       const vals = units.map(u => u[k]).filter(v => v != null);
@@ -2784,6 +2786,7 @@
         <td class="num ${mark('cost_per_session', u.cost_per_session)}">${fmtOpt(u.cost_per_session, fmtCost)}</td>
         <td class="num ${mark('cost_per_request', u.cost_per_request)}">${fmtOpt(u.cost_per_request, fmtCostExact)}</td>
         <td>${pctMeter('cache_hit_rate', u.cache_hit_rate, false)}</td>
+        <td class="num ${mark('context_per_request', u.context_per_request)}">${fmtOpt(u.context_per_request, fmtNum)}</td>
         <td>${pctMeter('top_tier_cost_share', u.top_tier_cost_share, true)}</td>
         <td class="num ${mark('error_rate', u.error_rate)}">${fmtOpt(u.error_rate, v => fmtPct(v * 100, 1))}</td>
         <td class="num ${mark('reads_per_edit', u.reads_per_edit)}">${fmtOpt(u.reads_per_edit, v => v.toFixed(2))}</td>
