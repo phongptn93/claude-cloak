@@ -89,6 +89,24 @@ Notable changes to Claude Cloak. Format follows
   - Server mode now boots with an empty `ALLOWED_IPS` when keys are enabled and
     at least one is active, instead of aborting.
 
+### Added (accounts)
+
+- **Per-account rate limits and spend** for proxies shared by several Claude
+  subscriptions. The account comes from Claude Code's `metadata.user_id`
+  (account UUID), or the `anthropic-organization-id` response header. Before,
+  the Rate limits panel showed whichever account answered last.
+  `ACCOUNT_LABELS` names accounts; overview alerts fire at 75% / 90% of a
+  window.
+
+### Fixed (pricing)
+
+- **Claude Haiku 5.5 was costed at the Opus fallback rate** ($5/$25, ~50× its
+  price) because it had no entry; Claude Code uses it for background calls.
+  Added it with its two rate cards ($0.10/$0.50 up to a 100K-token prompt,
+  $0.50/$2.50 above) via a new optional `long_context` field in
+  `pricing.json`. Added Claude Sonnet 5.5 (same rates as Sonnet 5, now its
+  own row). Insights' "everyday model" is now Sonnet 5.5.
+
 ### Added (context size)
 
 - **Context per request** in Coaching → Compare users: prompt tokens sent per

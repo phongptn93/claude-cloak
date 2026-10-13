@@ -39,7 +39,7 @@ SUCCESSOR = {
     "sonnet-3.5": "sonnet-5",
 }
 TOP_TIER = ("fable", "mythos", "opus")
-EVERYDAY_MODEL = "sonnet-5"
+EVERYDAY_MODEL = "sonnet-5.5"
 CONTEXT_FLOOR = 150_000  # context per request below this is never flagged
 SHIFT_SHARE = 0.3  # share of top-tier traffic assumed movable to EVERYDAY_MODEL
 

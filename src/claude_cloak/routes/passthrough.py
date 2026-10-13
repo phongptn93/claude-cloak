@@ -17,6 +17,7 @@ from ..coach import _coach_record_request, _coach_record_response
 from ..echo import echo_delay, echo_response, echo_sse_events, is_streaming_request
 from ..identity import capture_identity_from_request, warn_unknown_headers
 from ..loki import _loki_enqueue
+from ..quota.accounts import account_from_body, resolve_account
 from ..quota.tap import UsageTap
 from ..quota.usage import _record_rate_limits, _record_usage
 from ..sanitize import is_blocked_path, sanitize_body
@@ -92,8 +93,11 @@ async def proxy(path: str, request: Request):
     headers = build_request_headers(request)
     body = await request.body()
 
-    # ── Body sanitization ──
     content_type = request.headers.get("content-type", "")
+    # Which Claude account sent this (several may share the proxy).
+    request_account = account_from_body(body, content_type, path)
+
+    # ── Body sanitization ──
     body = sanitize_body(body, content_type)
 
     # ── Coaching: tool-result signals (counts only, never content) ──
@@ -154,6 +158,7 @@ async def proxy(path: str, request: Request):
                     usage_tap.session_id,
                     duration_ms=int((time.monotonic() - start_time) * 1000),
                     user_label=usage_tap.user_label,
+                    account=request_account,
                 )
             if settings.COACH_ENABLED and usage_tap.is_messages:
                 with contextlib.suppress(Exception):
@@ -219,7 +224,8 @@ async def proxy(path: str, request: Request):
         status = response.status_code
 
         # Capture anthropic-ratelimit-* headers regardless of status.
-        _record_rate_limits(response.headers)
+        account = resolve_account(request_account, response.headers)
+        _record_rate_limits(response.headers, account)
 
         # Read the ORIGINAL session id from the incoming request (before the
         # proxy rewrites the header to the locked identity). Each device's
@@ -313,6 +319,7 @@ async def proxy(path: str, request: Request):
                     usage_tap.session_id,
                     duration_ms=total_ms,
                     user_label=usage_tap.user_label,
+                    account=account,
                 )
             if settings.COACH_ENABLED and usage_tap.is_messages:
                 with contextlib.suppress(Exception):
@@ -427,6 +434,7 @@ async def proxy(path: str, request: Request):
                             usage_tap.session_id,
                             duration_ms=total_ms,
                             user_label=usage_tap.user_label,
+                            account=account,
                         )
                     if settings.COACH_ENABLED and usage_tap.is_messages:
                         _coach_record_response(*usage_tap.coach_signals(), usage_tap.user_label)

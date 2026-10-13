@@ -249,6 +249,15 @@ for _pair in env_str("USER_GROUPS").split(","):
     if _label.strip() and _group.strip():
         USER_GROUPS[_label.strip()] = _group.strip()
 
+# Names for Claude accounts when several subscriptions share this proxy, keyed
+# by a prefix of the account UUID (or organization id) shown on the dashboard,
+# e.g. ACCOUNT_LABELS=3f2a9c1d:team-max-1,b71e0f44:team-max-2
+ACCOUNT_LABELS: dict[str, str] = {}
+for _pair in env_str("ACCOUNT_LABELS").split(","):
+    _prefix, _, _name = _pair.strip().partition(":")
+    if _prefix.strip() and _name.strip():
+        ACCOUNT_LABELS[_prefix.strip()] = _name.strip()
+
 # Allowed character set for URL-prefix user labels — restricted so a label
 # cannot inject path traversal or query strings into the upstream URL.
 USER_LABEL_PATTERN = env_str("USER_LABEL_PATTERN", r"[A-Za-z0-9._-]{1,64}")

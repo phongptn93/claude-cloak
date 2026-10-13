@@ -38,6 +38,7 @@ quota_stats: dict[str, Any] = {
     "messages_requests": 0,
     "last_request_at": None,
     "period_month": "",  # YYYY-MM of current tracking period; auto-reset on rollover
+    "accounts": {},  # account uuid (or "org:<id>") -> usage + last rate limits
     "unpriced_models": {},  # raw model id -> count (costed at PRICING_FALLBACK)
 }
 

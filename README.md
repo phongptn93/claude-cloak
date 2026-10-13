@@ -408,6 +408,8 @@ The four parts of the **Activity** view:
 
 **Groups.** Set `USER_GROUPS=phong:backend,huy:backend,linh:frontend` to add group filters, group rows in the heatmap and breakdown, and group-level comparison and advice. Without it, everything works per user.
 
+**Several Claude accounts.** When clients log in with different Claude subscriptions, the proxy tells them apart by the account UUID Claude Code puts in each request's `metadata.user_id` (falling back to the `anthropic-organization-id` response header). Each account gets its own 5-hour and weekly limit bars, its spend this month and the users routed through it, under `accounts` in `/quota`. Accounts show as the first 8 characters of their id; name them with `ACCOUNT_LABELS=3f2a9c1d:team-max-1,b71e0f44:team-max-2`. Only the UUID is stored, never a token.
+
 **Alerts** fire for:
 - a `retry-after` from Anthropic
 - a rate limit below 30% or 10%

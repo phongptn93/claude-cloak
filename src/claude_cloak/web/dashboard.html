@@ -433,6 +433,9 @@
   .bar-row { display: grid; grid-template-columns: 130px 1fr auto; align-items: center; gap: 14px; padding: 9px 0; }
   .bar-row + .bar-row { border-top: 1px dashed var(--border-soft); }
   .bar-label { color: var(--text-soft); font-size: 13px; }
+  .acct-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; padding: 12px 0 2px; font-size: 13px; }
+  .acct-head + .bar-row { border-top: 0; }
+  .acct-head:first-child { padding-top: 0; }
   .bar-track { height: 8px; background: var(--bg-3); border-radius: 4px; overflow: hidden; }
   .bar-fill { height: 100%; border-radius: 4px; background: var(--ok); transition: width .5s cubic-bezier(.4,0,.2,1); }
   .bar-row.warn   .bar-fill { background: var(--warn); }
@@ -1702,6 +1705,15 @@
       if (p < 10) out.push({ lvl: 'danger', view: 'performance', html: `<strong>Rate limit almost exhausted:</strong> ${esc(label)} at ${fmtPct(p)} remaining.` });
       else if (p < 30) out.push({ lvl: 'warn', view: 'performance', html: `<strong>Rate limit low:</strong> ${esc(label)} at ${fmtPct(p)} remaining.` });
     }
+    const winLabel = { '5h': '5-hour window', '7d': 'weekly limit' };
+    for (const a of Q.accounts || []) {
+      for (const w of a.rate_limits.unified || []) {
+        const used = Number(w.utilization) * 100;
+        if (!(used >= 75)) continue;
+        out.push({ lvl: used >= 90 ? 'danger' : 'warn', view: 'performance',
+          html: `<strong>${esc(a.label)}:</strong> ${esc(winLabel[w.window] || w.window)} at ${fmtPct(used)} used${w.reset ? ` · resets ${esc(fmtResetTime(w.reset))}` : ''}.` });
+      }
+    }
     const uq = Q.user_quota || {};
     if (uq.enabled) {
       const users = uq.users || [];
@@ -1876,7 +1888,25 @@
         + `<div class="bar-track"><div class="bar-fill" style="width:${pct.toFixed(1)}%"></div></div>`
         + `<div class="bar-value">${fmtNum(r)} / ${fmtNum(l)}${resetTxt}</div></div>`;
     }
+    // Subscription accounts: one block per Claude account behind the proxy,
+    // since each account has its own 5-hour and weekly windows.
+    const accts = (Q.accounts || []).filter(a => (a.rate_limits.unified || []).length);
+    if (accts.length) {
+      for (const a of accts) {
+        const who = a.users.length ? ` · ${a.users.slice(0, 4).map(esc).join(', ')}${a.users.length > 4 ? ` +${a.users.length - 4}` : ''}` : '';
+        const at = a.rate_limits.updated_at ? ` · ${fmtRelativeTime(a.rate_limits.updated_at)}` : '';
+        html += `<div class="acct-head"><strong>${esc(a.label)}</strong><span class="muted">${fmtCost(a.cost_usd)} this month${who}${at}</span></div>`;
+        html += unifiedBars(a.rate_limits);
+      }
+    } else {
+      html += unifiedBars(rl);
+    }
+    if (rl.retry_after) html += `<div class="alert danger" style="margin-top:12px"><span class="ic">!</span><span>Anthropic asked us to retry after <code>${esc(rl.retry_after)}</code> s</span></div>`;
+    container.innerHTML = html || '<div class="empty-inline">Waiting for the first <code>/v1/messages</code> response from Anthropic…</div>';
+  }
+  function unifiedBars(rl) {
     const winName = { '5h': '5-hour window', '7d': 'Weekly (all models)', '7d_opus': 'Weekly (Opus)', '7d_sonnet': 'Weekly (Sonnet)' };
+    let html = '';
     for (const w of rl.unified || []) {
       const used = Math.max(0, Math.min(100, Number(w.utilization) * 100));
       if (!Number.isFinite(used)) continue;
@@ -1886,9 +1916,8 @@
         + `<div class="bar-track"><div class="bar-fill" style="width:${used.toFixed(1)}%"></div></div>`
         + `<div class="bar-value">${fmtPct(used)} used${resetTxt}</div></div>`;
     }
-    if (rl.unified_status && rl.unified_status !== 'allowed') html += `<div class="alert warn" style="margin-top:12px"><span class="ic">!</span><span>Subscription limit status: <code>${esc(rl.unified_status)}</code></span></div>`;
-    if (rl.retry_after) html += `<div class="alert danger" style="margin-top:12px"><span class="ic">!</span><span>Anthropic asked us to retry after <code>${esc(rl.retry_after)}</code> s</span></div>`;
-    container.innerHTML = html || '<div class="empty-inline">Waiting for the first <code>/v1/messages</code> response from Anthropic…</div>';
+    if (rl.unified_status && rl.unified_status !== 'allowed') html += `<div class="alert warn" style="margin:8px 0"><span class="ic">!</span><span>Subscription limit status: <code>${esc(rl.unified_status)}</code></span></div>`;
+    return html;
   }
   function fmtResetTime(v) {
     const d = new Date(v);
@@ -1897,6 +1926,8 @@
     if (s <= 0) return 'now';
     if (s < 90) return `in ${Math.round(s)}s`;
     if (s < 5400) return `in ${Math.round(s / 60)}m`;
+    if (s < 172800) return `in ${Math.round(s / 3600)}h`;
+    if (s < 14 * 86400) return `in ${Math.round(s / 86400)}d`;
     return d.toLocaleString();
   }
 
@@ -2824,7 +2855,7 @@
     const r2 = v => '$' + Number(v).toFixed(v < 1 ? 3 : 2);
     document.querySelector('#price-table tbody').innerHTML = (P.models || []).map(m => `<tr>
         <td><strong class="mono">${esc(m.model)}</strong>${inUse.has(m.model) ? ' <span class="badge ok">in use</span>' : ''}</td>
-        <td class="num">${r2(m.input)}</td><td class="num">${r2(m.output)}</td>
+        <td class="num">${r2(m.input)}${m.long_context ? `<div class="muted" style="font-size:11px">${r2(m.long_context.input)} &gt;${fmtNum(m.long_context.above_prompt_tokens)}</div>` : ''}</td><td class="num">${r2(m.output)}${m.long_context ? `<div class="muted" style="font-size:11px">${r2(m.long_context.output)} &gt;${fmtNum(m.long_context.above_prompt_tokens)}</div>` : ''}</td>
         <td class="num">${r2(m.cache_write_5m)}</td><td class="num">${r2(m.cache_write_1h)}</td><td class="num">${r2(m.cache_read)}</td>
         <td>${(m.scheduled || []).map(x => `<span class="badge warn">${esc(x.effective_from)}: ${r2(x.input)} / ${r2(x.output)}</span>`).join('') || '<span class="muted">—</span>'}</td></tr>`).join('')
       + unpriced.map(id => `<tr><td><strong class="mono">${esc(id)}</strong> <span class="badge warn">no price — fallback rate</span></td><td colspan="6" class="muted">Seen ${fmtCount.format(P.unpriced_models[id])}× — add it to <code>data/pricing.json</code></td></tr>`).join('');
