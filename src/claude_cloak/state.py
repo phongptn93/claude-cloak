@@ -49,6 +49,8 @@ stream_stats: dict[str, Any] = {
     "connect_retries": 0,  # transport retried before any byte was forwarded
     "pool_waits": 0,  # request waited on a free upstream connection
     "pool_wait_ms_total": 0,
+    "new_connections": 0,  # TCP+TLS handshakes (keep-alive could not reuse one)
+    "connect_ms_total": 0,
     "ttfb_ms_total": 0,  # time-to-first-byte, summed over streams
     "ttfb_ms_max": 0,
     "ttfb_samples": 0,

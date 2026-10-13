@@ -91,6 +91,15 @@ Notable changes to Claude Cloak. Format follows
 
 ### Fixed
 
+- **Pool waits over-counted.** The figure timed everything up to Anthropic's
+  response headers, so ordinary prompt-processing latency (≈ every request over
+  1 s) was reported as the proxy's pool being saturated, even with
+  `UPSTREAM_MAX_CONNECTIONS=5000`. It now counts only the time spent waiting
+  for a connection slot. New `stream.new_connections` / `connect_ms_avg` show
+  how often a fresh TCP+TLS handshake was paid, and the keep-alive defaults
+  rose (`UPSTREAM_MAX_KEEPALIVE` 20 → 100, `UPSTREAM_KEEPALIVE_EXPIRY` 30 → 60 s)
+  so concurrent turns stop re-handshaking after every burst.
+
 - The `/config` hint for `USER_QUOTA_CAPS` showed `phong=50,nam=20`, but the
   parser reads `label:usd` (`phong:50,nam:20`). An entry typed from the hint
   was silently ignored.

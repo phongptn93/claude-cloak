@@ -41,7 +41,12 @@ from ..tokens import (
     inject_cache_ttl_beta,
     optimize_tokens,
 )
-from ..upstream import build_request_headers, filter_response_headers
+from ..upstream import (
+    SendTimer,
+    build_request_headers,
+    filter_response_headers,
+    record_send_timing,
+)
 
 router = APIRouter()
 
@@ -178,18 +183,19 @@ async def proxy(path: str, request: Request):
         # the request never produced output, so replaying it cannot duplicate
         # anything. Retrying costs one extra upstream call and saves the
         # client from surfacing a dead pooled connection as a stalled stream.
-        send_started = time.monotonic()
         attempt = 0
         http_client = state.runtime.http_client
         if http_client is None:  # lifespan never ran
             raise RuntimeError("upstream client is not initialised")
         while True:
+            timer = SendTimer()
             req = http_client.build_request(
                 method=request.method,
                 url=target_url,
                 headers=headers,
                 content=body,
                 params=dict(request.query_params),
+                extensions={"trace": timer},
             )
             try:
                 response = await http_client.send(req, stream=True)
@@ -205,12 +211,9 @@ async def proxy(path: str, request: Request):
                 )
                 await _async_sleep(settings.UPSTREAM_RETRY_BACKOFF_SECONDS * attempt)
 
-        # A long gap before response headers usually means the request queued
-        # for a free upstream connection — the classic silent-stall source.
-        connect_ms = int((time.monotonic() - send_started) * 1000)
-        if connect_ms >= settings.UPSTREAM_POOL_WAIT_WARN_MS:
-            state.stream_stats["pool_waits"] += 1
-            state.stream_stats["pool_wait_ms_total"] += connect_ms
+        # Only the time spent queueing for a pool slot counts as a pool wait;
+        # the rest of the gap before headers is Anthropic processing the prompt.
+        record_send_timing(timer)
 
         elapsed = time.monotonic() - start_time
         status = response.status_code

@@ -319,8 +319,10 @@ USAGE_TAP_MAX_BUFFER = env_int("USAGE_TAP_MAX_BUFFER", 5 * 1024 * 1024)
 # reports as a stalled response. Pool timeout is short and loud on purpose.
 # ============================================================
 UPSTREAM_MAX_CONNECTIONS = env_int("UPSTREAM_MAX_CONNECTIONS", 100)
-UPSTREAM_MAX_KEEPALIVE = env_int("UPSTREAM_MAX_KEEPALIVE", 20)
-UPSTREAM_KEEPALIVE_EXPIRY = env_float("UPSTREAM_KEEPALIVE_EXPIRY", 30)
+# Idle connections kept for reuse. Too few and every burst of concurrent turns
+# pays a fresh TCP+TLS handshake per request once the burst ends.
+UPSTREAM_MAX_KEEPALIVE = env_int("UPSTREAM_MAX_KEEPALIVE", 100)
+UPSTREAM_KEEPALIVE_EXPIRY = env_float("UPSTREAM_KEEPALIVE_EXPIRY", 60)
 UPSTREAM_CONNECT_TIMEOUT = env_float("UPSTREAM_CONNECT_TIMEOUT", 10)
 UPSTREAM_READ_TIMEOUT = env_float("UPSTREAM_READ_TIMEOUT", 300)
 UPSTREAM_POOL_TIMEOUT = env_float("UPSTREAM_POOL_TIMEOUT", 30)
@@ -329,7 +331,8 @@ UPSTREAM_STALL_SECONDS = env_float("UPSTREAM_STALL_SECONDS", 120)
 # Retry a transport failure only while no byte has been forwarded yet.
 UPSTREAM_CONNECT_RETRIES = env_int("UPSTREAM_CONNECT_RETRIES", 2)
 UPSTREAM_RETRY_BACKOFF_SECONDS = env_float("UPSTREAM_RETRY_BACKOFF_SECONDS", 0.25)
-# Pool contention is only worth reporting past this wait.
+# Pool contention (time queued for a free connection slot) is only worth
+# reporting past this wait.
 UPSTREAM_POOL_WAIT_WARN_MS = env_float("UPSTREAM_POOL_WAIT_WARN_MS", 1000)
 
 # Telemetry client (Loki pushes) — deliberately a tiny separate pool so a slow

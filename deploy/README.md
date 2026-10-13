@@ -421,5 +421,5 @@ curl -s https://<fqdn>/quota/users | jq '.users[] | {label, cost_usd, over_cap}'
 
 `/health`'s `stream` block is the first place to look when a client reports
 "Response stalled mid-stream": a non-zero `stalls` points at the upstream
-connection, while a high `ttfb_ms_avg` together with `pool_waits` means the
-connection pool is too small for the traffic.
+connection, while `pool_waits` means the connection pool is too small for the
+traffic. A high `ttfb_ms_avg` with no pool waits is Anthropic's own latency.

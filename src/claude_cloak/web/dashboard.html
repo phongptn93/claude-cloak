@@ -1149,7 +1149,7 @@
     <section>
       <div class="section-head">
         <h2>Stream health</h2>
-        <span class="hint">Diagnoses "Response stalled mid-stream" — stalls point upstream, pool waits point at this proxy</span>
+        <span class="hint">Diagnoses "Response stalled mid-stream" — stalls and slow first bytes point upstream, pool waits point at this proxy</span>
       </div>
       <div class="grid-cards">
         <div class="card s4" id="stream-stalls-card">
@@ -2198,9 +2198,12 @@
     $('stream-ttfb').textContent = (sh.ttfb_ms_avg || 0) > 0 ? `${fmtCount.format(sh.ttfb_ms_avg)} ms` : '—';
     $('stream-ttfb-meta').textContent = `avg · peak ${fmtCount.format(sh.ttfb_ms_max || 0)} ms`;
     $('stream-pool').textContent = fmtCount.format(sh.pool_waits || 0);
-    $('stream-pool-meta').textContent = (sh.pool_waits || 0) === 0
+    const handshakes = (sh.new_connections || 0) > 0
+      ? ` · ${fmtCount.format(sh.new_connections)} new connections, avg handshake ${fmtCount.format(sh.connect_ms_avg || 0)} ms`
+      : '';
+    $('stream-pool-meta').textContent = ((sh.pool_waits || 0) === 0
       ? `pool of ${(sh.config || {}).max_connections || '?'} connections never saturated`
-      : `avg wait ${fmtCount.format(sh.pool_wait_ms_avg || 0)} ms — consider raising UPSTREAM_MAX_CONNECTIONS`;
+      : `avg wait ${fmtCount.format(sh.pool_wait_ms_avg || 0)} ms — consider raising UPSTREAM_MAX_CONNECTIONS`) + handshakes;
     $('stream-pool-card').className = 'card s4' + ((sh.pool_waits || 0) ? ' st-warn' : '');
     $('stream-retries').textContent = fmtCount.format(sh.connect_retries || 0);
     $('stream-disconnects').textContent = fmtCount.format(sh.client_disconnects || 0);
@@ -2215,6 +2218,7 @@
     const cfg = sh.config || {};
     $('upstream-kv').innerHTML = [
       ['Max connections', cfg.max_connections, 'UPSTREAM_MAX_CONNECTIONS'],
+      ['Keep-alive connections', cfg.max_keepalive, 'UPSTREAM_MAX_KEEPALIVE'],
       ['Pool timeout', cfg.pool_timeout != null ? cfg.pool_timeout + ' s' : null, 'UPSTREAM_POOL_TIMEOUT'],
       ['Read timeout', cfg.read_timeout != null ? cfg.read_timeout + ' s' : null, 'UPSTREAM_READ_TIMEOUT'],
       ['Stall threshold', cfg.stall_seconds != null ? cfg.stall_seconds + ' s' : null, 'UPSTREAM_STALL_SECONDS'],

@@ -49,7 +49,7 @@ CONFIG_SPECS: list[dict] = [
         "section": "Stream health",
         "min": 0,
         "max": 1000,
-        "desc": "Idle connections kept alive for reuse.",
+        "desc": "Idle connections kept alive for reuse. Too few and requests keep paying a new TCP+TLS handshake.",
     },
     {
         "key": "UPSTREAM_POOL_TIMEOUT",
