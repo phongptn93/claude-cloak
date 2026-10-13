@@ -56,6 +56,8 @@ stream_stats: dict[str, Any] = {
     "ttfb_ms_total": 0,  # time-to-first-byte, summed over streams
     "ttfb_ms_max": 0,
     "ttfb_samples": 0,
+    "proxy_overhead_ms_total": 0,  # jitter + body processing before forwarding
+    "proxy_overhead_samples": 0,
     "last_stall_at": None,
 }
 

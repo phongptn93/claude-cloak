@@ -85,6 +85,7 @@ async def proxy(path: str, request: Request):
     warn_unknown_headers(request)
 
     # ── Request timing jitter ──
+    jitter_ms = 0
     if settings.TIMING_JITTER_ENABLED:
         jitter_ms = random.randint(settings.TIMING_JITTER_MIN_MS, settings.TIMING_JITTER_MAX_MS)
         await _async_sleep(jitter_ms / 1000.0)
@@ -92,6 +93,8 @@ async def proxy(path: str, request: Request):
     target_url = f"{settings.ANTHROPIC_BASE_URL}/{path}"
     headers = build_request_headers(request)
     body = await request.body()
+    # Proxy-side work starts once the body is in; the client's upload is not ours.
+    processing_started = time.monotonic()
 
     content_type = request.headers.get("content-type", "")
     # Which Claude account sent this (several may share the proxy).
@@ -113,6 +116,12 @@ async def proxy(path: str, request: Request):
         inject_cache_ttl_beta(headers)
 
     start_time = time.monotonic()
+    # TTFB below starts here, so it leaves out what the proxy itself added
+    # before forwarding: jitter and body processing. Count that separately.
+    state.stream_stats["proxy_overhead_ms_total"] += jitter_ms + int(
+        (start_time - processing_started) * 1000
+    )
+    state.stream_stats["proxy_overhead_samples"] += 1
 
     # Request log
     log(

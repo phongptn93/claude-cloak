@@ -2246,7 +2246,8 @@
       + (upErr ? ` · ${fmtCount.format(upErr)} upstream drops mid-stream` : '');
     $('stream-stalls-card').className = 'card s4' + ((sh.stalls || 0) === 0 ? '' : (sh.stall_rate || 0) >= 0.02 ? ' st-warn' : '');
     $('stream-ttfb').textContent = (sh.ttfb_ms_avg || 0) > 0 ? `${fmtCount.format(sh.ttfb_ms_avg)} ms` : '—';
-    $('stream-ttfb-meta').textContent = `avg · peak ${fmtCount.format(sh.ttfb_ms_max || 0)} ms`;
+    $('stream-ttfb-meta').textContent = `avg · peak ${fmtCount.format(sh.ttfb_ms_max || 0)} ms`
+      + (sh.proxy_overhead_ms_avg ? ` · proxy adds ${fmtCount.format(sh.proxy_overhead_ms_avg)} ms before forwarding` : '');
     $('stream-pool').textContent = fmtCount.format(sh.pool_waits || 0);
     const handshakes = (sh.new_connections || 0) > 0
       ? ` · ${fmtCount.format(sh.new_connections)} new connections, avg handshake ${fmtCount.format(sh.connect_ms_avg || 0)} ms`

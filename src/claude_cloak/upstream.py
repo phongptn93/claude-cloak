@@ -145,6 +145,12 @@ def _stream_health_view() -> dict:
         "connect_ms_avg": round(state.stream_stats["connect_ms_total"] / opened) if opened else 0,
         "ttfb_ms_avg": round(state.stream_stats["ttfb_ms_total"] / samples) if samples else 0,
         "ttfb_ms_max": state.stream_stats["ttfb_ms_max"],
+        "proxy_overhead_ms_avg": round(
+            state.stream_stats["proxy_overhead_ms_total"]
+            / state.stream_stats["proxy_overhead_samples"]
+        )
+        if state.stream_stats["proxy_overhead_samples"]
+        else 0,
         "config": {
             "stall_seconds": settings.UPSTREAM_STALL_SECONDS,
             "max_connections": settings.UPSTREAM_MAX_CONNECTIONS,

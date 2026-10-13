@@ -37,6 +37,7 @@
 .stream.new_connections:int
 .stream.pool_wait_ms_avg:int
 .stream.pool_waits:int
+.stream.proxy_overhead_ms_avg:int
 .stream.stall_rate:float
 .stream.stalls:int
 .stream.streams_completed:int
