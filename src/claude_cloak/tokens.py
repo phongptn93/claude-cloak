@@ -24,15 +24,14 @@ def optimize_tokens(body: bytes, content_type: str | None, path: str) -> bytes:
     if not isinstance(data, dict):
         return body
 
-    original_size = len(body)
     breakpoints = 0
     skipped_full = 0
-    truncated = 0
+    truncated = removed_chars = 0
 
     if settings.CACHE_EXTEND_TTL and not state.runtime.cache_ttl_runtime_disabled:
         breakpoints, skipped_full = _apply_cache_breakpoints(data)
     if settings.TOOL_RESULT_TRUNCATE:
-        truncated = _truncate_tool_results(data)
+        truncated, removed_chars = _truncate_tool_results(data)
 
     if breakpoints == 0 and truncated == 0:
         if skipped_full:
@@ -40,7 +39,10 @@ def optimize_tokens(body: bytes, content_type: str | None, path: str) -> bytes:
         return body
 
     new_body = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode()
-    saved_bytes = max(0, original_size - len(new_body))
+    # Only text the truncation dropped is a saving. Diffing body sizes also
+    # credited JSON re-serialisation (escapes, whitespace) as saved tokens,
+    # and let added cache_control bytes cancel real savings out.
+    saved_bytes = removed_chars
 
     state.token_saver_stats["requests_optimized"] += 1
     state.token_saver_stats["cache_breakpoints_added"] += breakpoints
@@ -153,22 +155,26 @@ def _apply_cache_breakpoints(data: dict) -> tuple[int, int]:
     return modified, skipped
 
 
-def _head_tail_truncate(text: str) -> str:
+def _head_tail_truncate(text: str) -> tuple[str, int]:
+    """Truncated text and the number of characters it is shorter by."""
     head = text[: settings.TOOL_RESULT_HEAD_BYTES]
     tail = text[-settings.TOOL_RESULT_TAIL_BYTES :] if settings.TOOL_RESULT_TAIL_BYTES > 0 else ""
     omitted = len(text) - len(head) - len(tail)
     marker = f"\n\n[...{omitted} chars truncated by claude-cloak token-saver...]\n\n"
-    return head + marker + tail
+    return head + marker + tail, max(0, omitted - len(marker))
 
 
-def _truncate_tool_results(data: dict) -> int:
-    """Truncate oversized tool_result blocks in older turns of messages[]."""
+def _truncate_tool_results(data: dict) -> tuple[int, int]:
+    """Truncate oversized tool_result blocks in older turns of messages[].
+
+    Returns (blocks truncated, characters removed).
+    """
     messages = data.get("messages")
     if not isinstance(messages, list):
-        return 0
+        return 0, 0
 
     cutoff = max(0, len(messages) - settings.TOOL_RESULT_KEEP_RECENT)
-    truncated = 0
+    truncated = removed = 0
 
     for msg in messages[:cutoff]:
         if not isinstance(msg, dict):
@@ -182,18 +188,20 @@ def _truncate_tool_results(data: dict) -> int:
             tc = block.get("content")
             if isinstance(tc, str):
                 if len(tc) > settings.TOOL_RESULT_MAX_BYTES:
-                    block["content"] = _head_tail_truncate(tc)
+                    block["content"], n = _head_tail_truncate(tc)
                     truncated += 1
+                    removed += n
             elif isinstance(tc, list):
                 for item in tc:
                     if not isinstance(item, dict) or item.get("type") != "text":
                         continue
                     text = item.get("text", "")
                     if isinstance(text, str) and len(text) > settings.TOOL_RESULT_MAX_BYTES:
-                        item["text"] = _head_tail_truncate(text)
+                        item["text"], n = _head_tail_truncate(text)
                         truncated += 1
+                        removed += n
 
-    return truncated
+    return truncated, removed
 
 
 def inject_cache_ttl_beta(headers: dict[str, str]) -> None:

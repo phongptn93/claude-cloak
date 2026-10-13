@@ -50,7 +50,10 @@ def _finish(acc: dict) -> dict:
     s = out["sessions"]
     out["cost_per_session"] = round(out["cost_usd"] / s, 6) if s else None
     out["requests_per_session"] = round(out["requests"] / s, 2) if s else None
-    denom = out["input_tokens"] + out["cache_read_input_tokens"]
+    # Cache writes are misses too (see coach._cache_hit_rate).
+    denom = (
+        out["input_tokens"] + out["cache_read_input_tokens"] + out["cache_creation_input_tokens"]
+    )
     out["cache_hit_rate"] = round(out["cache_read_input_tokens"] / denom, 4) if denom else None
     return out
 

@@ -382,6 +382,23 @@ async def proxy(path: str, request: Request):
                                 b'stalled, no data received"}}\n\n'
                             )
                         break
+                    except httpx.TransportError as e:
+                        # Upstream dropped the connection mid-response. Was
+                        # uncounted: it left the stream as neither completed,
+                        # stalled nor disconnected, and the client got a
+                        # truncated body with no error.
+                        state.stream_stats["upstream_errors"] += 1
+                        log(
+                            f"  {BG_RED}{BOLD} UPSTREAM ERROR {RESET} {RED}#{req_id} "
+                            f"{type(e).__name__} mid-stream{RESET}"
+                        )
+                        if is_sse:
+                            yield (
+                                b'event: error\ndata: {"type":"error","error":'
+                                b'{"type":"api_error","message":"claude-cloak: upstream '
+                                b'connection lost mid-stream"}}\n\n'
+                            )
+                        break
                     if first_byte_at is None:
                         first_byte_at = time.monotonic()
                         ttfb_ms = int((first_byte_at - start_time) * 1000)

@@ -46,6 +46,7 @@ stream_stats: dict[str, Any] = {
     "streams_completed": 0,
     "stalls": 0,  # upstream went silent past UPSTREAM_STALL_SECONDS
     "client_disconnects": 0,  # client went away mid-stream (usually benign)
+    "upstream_errors": 0,  # upstream connection failed after headers arrived
     "connect_retries": 0,  # transport retried before any byte was forwarded
     "pool_waits": 0,  # request waited on a free upstream connection
     "pool_wait_ms_total": 0,

@@ -34,10 +34,11 @@ def test_sanitize_body_leaves_non_json_untouched():
 def test_head_tail_truncate_keeps_both_ends(monkeypatch):
     monkeypatch.setattr(settings, "TOOL_RESULT_HEAD_BYTES", 10)
     monkeypatch.setattr(settings, "TOOL_RESULT_TAIL_BYTES", 5)
-    out = tokens._head_tail_truncate("A" * 100 + "B" * 100)
+    out, removed = tokens._head_tail_truncate("A" * 100 + "B" * 100)
     assert out.startswith("A" * 10)
     assert out.endswith("B" * 5)
     assert len(out) < 200
+    assert removed == 200 - len(out)
 
 
 def test_cache_breakpoints_are_counted_and_capped(monkeypatch):

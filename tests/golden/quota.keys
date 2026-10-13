@@ -19,6 +19,9 @@
 .rate_limits.tokens_limit:NoneType
 .rate_limits.tokens_remaining:NoneType
 .rate_limits.tokens_reset:NoneType
+.rate_limits.unified[]
+.rate_limits.unified_claim:NoneType
+.rate_limits.unified_status:NoneType
 .rate_limits.updated_at:NoneType
 .stream.client_disconnects:int
 .stream.config.connect_retries:int
@@ -39,6 +42,7 @@
 .stream.streams_started:int
 .stream.ttfb_ms_avg:int
 .stream.ttfb_ms_max:int
+.stream.upstream_errors:int
 .tokens.cache_creation_1h_input_tokens:int
 .tokens.cache_creation_5m_input_tokens:int
 .tokens.cache_creation_input_tokens:int

@@ -43,6 +43,7 @@
 .stream.streams_started:int
 .stream.ttfb_ms_avg:int
 .stream.ttfb_ms_max:int
+.stream.upstream_errors:int
 .telemetry_blocked:int
 .token_saver.beta_runtime_disabled:bool
 .token_saver.bytes_saved:int

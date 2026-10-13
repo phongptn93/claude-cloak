@@ -100,6 +100,29 @@ Notable changes to Claude Cloak. Format follows
   rose (`UPSTREAM_MAX_KEEPALIVE` 20 → 100, `UPSTREAM_KEEPALIVE_EXPIRY` 30 → 60 s)
   so concurrent turns stop re-handshaking after every burst.
 
+- **Rate limits panel empty on subscription accounts.** Pro/Max (OAuth)
+  traffic carries `anthropic-ratelimit-unified-*` headers, which the panel
+  never read, so it said "Waiting for the first response" beside "updated just
+  now". `/quota` now exposes `rate_limits.unified` (per-window utilization and
+  reset), and the panel shows the 5-hour and weekly windows.
+- **Cache hit rate inflated to ~99%.** It was `cache_read / (input +
+  cache_read)`, but Claude Code's `input_tokens` is only the few tokens after
+  the last breakpoint, so cache writes were never counted as misses. Every
+  hit rate (dashboard, coach score, activity, insights) now includes
+  `cache_creation_input_tokens` in the denominator. Coach scores and the
+  "low cache hit" advice drop accordingly — they now reflect real behaviour.
+- **Cache write premium priced at the 5m rate** in insights, although the
+  token saver moves prefixes to the 1h TTL (2× input, not 1.25×). The premium
+  now uses the 5m/1h mix actually billed.
+- **Upstream drops mid-stream were invisible.** A connection lost after the
+  headers counted as neither completed, stalled nor disconnected, and the
+  client got a truncated body. It is now counted as `stream.upstream_errors`
+  and closed with a proper SSE `error` event.
+- **Token saver "tokens saved" counted JSON re-serialisation.** It diffed
+  body sizes, crediting shorter escapes as savings and letting added
+  `cache_control` bytes cancel real ones. It now counts only the characters
+  truncation removed.
+
 - The `/config` hint for `USER_QUOTA_CAPS` showed `phong=50,nam=20`, but the
   parser reads `label:usd` (`phong:50,nam:20`). An entry typed from the hint
   was silently ignored.

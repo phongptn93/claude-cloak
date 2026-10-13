@@ -199,12 +199,15 @@ def _compute_coach_view() -> dict:
     errors = state.coach_stats["tool_errors"]
     error_rate = (errors / results_seen) if results_seen else 0.0
 
-    # Cache hit rate from the existing quota totals (input that was served
-    # from cache instead of paid fresh).
+    # Cache hit rate from the existing quota totals: share of all prompt
+    # tokens served from cache. Cache writes count as misses — Claude Code's
+    # input_tokens is only the handful of tokens after the last breakpoint,
+    # so a rate over input + reads alone sits near 100% whatever happens.
     ut = state.quota_stats["usage_total"]
     paid_in = ut.get("input_tokens", 0) or 0
     cache_read = ut.get("cache_read_input_tokens", 0) or 0
-    cache_denom = paid_in + cache_read
+    cache_write = ut.get("cache_creation_input_tokens", 0) or 0
+    cache_denom = paid_in + cache_read + cache_write
     cache_hit_rate = (cache_read / cache_denom) if cache_denom else 0.0
 
     # Conversation depth: requests per distinct session (≈ turns / session).

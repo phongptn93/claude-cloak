@@ -137,6 +137,7 @@ def _stream_health_view() -> dict:
         "stall_rate": round(state.stream_stats["stalls"] / started, 4) if started else 0.0,
         "last_stall_at": state.stream_stats["last_stall_at"],
         "client_disconnects": state.stream_stats["client_disconnects"],
+        "upstream_errors": state.stream_stats["upstream_errors"],
         "connect_retries": state.stream_stats["connect_retries"],
         "pool_waits": waits,
         "pool_wait_ms_avg": round(state.stream_stats["pool_wait_ms_total"] / waits) if waits else 0,

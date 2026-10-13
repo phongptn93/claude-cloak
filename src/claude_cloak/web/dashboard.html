@@ -1430,9 +1430,13 @@
     const w = Math.max(0, Math.min(100, Number(pct) || 0));
     return `<div class="meter ok"><div class="meter-track"><div class="meter-fill" style="width:${w.toFixed(1)}%"></div></div><span class="meter-text">${fmtPct(pct)}</span></div>`;
   }
+  // Share of prompt tokens served from cache. Cache writes are misses: in
+  // Claude Code input_tokens is only the few tokens after the last
+  // breakpoint, so leaving writes out reads ~99% no matter what.
   function cacheHit(o) {
     const inT = Number(o.input_tokens) || 0, cr = Number(o.cache_read_input_tokens) || 0;
-    return inT + cr > 0 ? (cr / (inT + cr)) * 100 : null;
+    const cw = Number(o.cache_creation_input_tokens) || 0;
+    return inT + cr + cw > 0 ? (cr / (inT + cr + cw)) * 100 : null;
   }
 
   let toastTimer = null;
@@ -1870,6 +1874,17 @@
         + `<div class="bar-track"><div class="bar-fill" style="width:${pct.toFixed(1)}%"></div></div>`
         + `<div class="bar-value">${fmtNum(r)} / ${fmtNum(l)}${resetTxt}</div></div>`;
     }
+    const winName = { '5h': '5-hour window', '7d': 'Weekly (all models)', '7d_opus': 'Weekly (Opus)', '7d_sonnet': 'Weekly (Sonnet)' };
+    for (const w of rl.unified || []) {
+      const used = Math.max(0, Math.min(100, Number(w.utilization) * 100));
+      if (!Number.isFinite(used)) continue;
+      const cls = used >= 90 ? 'danger' : used >= 70 ? 'warn' : 'ok';
+      const resetTxt = w.reset ? `<span class="reset">resets ${esc(fmtResetTime(w.reset))}</span>` : '';
+      html += `<div class="bar-row ${cls}"><div class="bar-label">${esc(winName[w.window] || w.window)}</div>`
+        + `<div class="bar-track"><div class="bar-fill" style="width:${used.toFixed(1)}%"></div></div>`
+        + `<div class="bar-value">${fmtPct(used)} used${resetTxt}</div></div>`;
+    }
+    if (rl.unified_status && rl.unified_status !== 'allowed') html += `<div class="alert warn" style="margin-top:12px"><span class="ic">!</span><span>Subscription limit status: <code>${esc(rl.unified_status)}</code></span></div>`;
     if (rl.retry_after) html += `<div class="alert danger" style="margin-top:12px"><span class="ic">!</span><span>Anthropic asked us to retry after <code>${esc(rl.retry_after)}</code> s</span></div>`;
     container.innerHTML = html || '<div class="empty-inline">Waiting for the first <code>/v1/messages</code> response from Anthropic…</div>';
   }
@@ -2191,9 +2206,11 @@
     const sh = Q.stream || {};
     const started = sh.streams_started || 0;
     $('stream-stalls').textContent = fmtCount.format(sh.stalls || 0);
-    $('stream-stalls-meta').textContent = (sh.stalls || 0) === 0
+    const upErr = sh.upstream_errors || 0;
+    $('stream-stalls-meta').textContent = ((sh.stalls || 0) === 0
       ? `no stalls in ${fmtCount.format(started)} streams`
-      : `${fmtPct(100 * (sh.stall_rate || 0))} of streams · last ${sh.last_stall_at || '—'}`;
+      : `${fmtPct(100 * (sh.stall_rate || 0))} of streams · last ${sh.last_stall_at || '—'}`)
+      + (upErr ? ` · ${fmtCount.format(upErr)} upstream drops mid-stream` : '');
     $('stream-stalls-card').className = 'card s4' + ((sh.stalls || 0) === 0 ? '' : (sh.stall_rate || 0) >= 0.02 ? ' st-warn' : '');
     $('stream-ttfb').textContent = (sh.ttfb_ms_avg || 0) > 0 ? `${fmtCount.format(sh.ttfb_ms_avg)} ms` : '—';
     $('stream-ttfb-meta').textContent = `avg · peak ${fmtCount.format(sh.ttfb_ms_max || 0)} ms`;
@@ -2354,12 +2371,13 @@
     return out;
   }
   function agg(rows) {
-    const a = { sessions: 0, sessKnown: rows.length > 0, requests: 0, cost: 0, costTracked: 0, reqTracked: 0, in: 0, cr: 0, users: new Set() };
+    const a = { sessions: 0, sessKnown: rows.length > 0, requests: 0, cost: 0, costTracked: 0, reqTracked: 0, in: 0, cr: 0, cw: 0, users: new Set() };
     for (const r of rows) {
       a.requests += r.requests || 0;
       a.cost += Number(r.cost_usd) || 0;
       a.in += r.input_tokens || 0;
       a.cr += r.cache_read_input_tokens || 0;
+      a.cw += r.cache_creation_input_tokens || 0;
       if (r.user_label != null) a.users.add(r.user_label);
       if (r.sessions == null) { a.sessKnown = false; continue; }
       a.sessions += r.sessions;
@@ -2371,7 +2389,7 @@
     a.sess = a.sessions || (rows.some(r => r.sessions != null) ? 0 : null);
     a.cps = a.sessions ? a.costTracked / a.sessions : null;
     a.rps = a.sessions ? a.reqTracked / a.sessions : null;
-    a.hit = a.in + a.cr > 0 ? a.cr / (a.in + a.cr) * 100 : null;
+    a.hit = a.in + a.cr + a.cw > 0 ? a.cr / (a.in + a.cr + a.cw) * 100 : null;
     return a;
   }
 

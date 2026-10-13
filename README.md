@@ -374,6 +374,7 @@ When Claude Code reports a stalled response, it means no bytes reached it for a 
 | `new_connections` / `connect_ms_avg` | Fresh TCP+TLS handshakes because no kept-alive connection was free, and what each cost | If it tracks request count, raise `UPSTREAM_MAX_KEEPALIVE` (default 100) |
 | `connect_retries` > 0 | Dead pooled connections that were retried before any byte was forwarded — recovered, not user-visible | Nothing, unless it climbs steadily |
 | `client_disconnects` | The client hung up mid-stream (closed tab, cancelled turn) | Benign |
+| `upstream_errors` | Anthropic's connection dropped after the response started; the client gets an SSE `error` event | Transient unless it climbs |
 | `ttfb_ms_avg` / `ttfb_ms_max` | Time to first byte through the proxy | High values with no pool waits point upstream |
 
 Telemetry shipping (Loki) uses its own connection pool, so a slow log push can never take a connection slot away from an API request.
