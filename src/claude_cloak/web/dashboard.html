@@ -569,6 +569,7 @@
     display: flex; align-items: center; justify-content: center; font-size: 16px;
     background: var(--accent-bg); color: var(--accent);
   }
+  .rec.context .ic { background: var(--warn-bg); color: var(--warn); }
   .rec.cache .ic { background: rgba(34,211,238,.12); color: var(--accent-2); }
   .rec.reliability .ic, .rec.trend .ic { background: var(--warn-bg); color: var(--warn); }
   .rec.session .ic { background: var(--info-bg); color: var(--info); }
@@ -1149,7 +1150,7 @@
     <section>
       <div class="section-head">
         <h2>Stream health</h2>
-        <span class="hint">Diagnoses "Response stalled mid-stream" — stalls point upstream, pool waits point at this proxy</span>
+        <span class="hint">Diagnoses "Response stalled mid-stream" — stalls and slow first bytes point upstream, pool waits point at this proxy</span>
       </div>
       <div class="grid-cards">
         <div class="card s4" id="stream-stalls-card">
@@ -1256,6 +1257,7 @@
               <th class="sortable num" data-key="cost_per_session">$/session</th>
               <th class="sortable num" data-key="cost_per_request">$/request</th>
               <th class="sortable" data-key="cache_hit_rate">Cache hit</th>
+              <th class="sortable num" data-key="context_per_request" title="Prompt tokens sent per request (fresh + cache read + cache write)">Context/req</th>
               <th class="sortable" data-key="top_tier_cost_share">Opus/Fable share</th>
               <th class="sortable num" data-key="error_rate">Tool errors</th>
               <th class="sortable num" data-key="reads_per_edit">Reads/edit</th>
@@ -1430,9 +1432,13 @@
     const w = Math.max(0, Math.min(100, Number(pct) || 0));
     return `<div class="meter ok"><div class="meter-track"><div class="meter-fill" style="width:${w.toFixed(1)}%"></div></div><span class="meter-text">${fmtPct(pct)}</span></div>`;
   }
+  // Share of prompt tokens served from cache. Cache writes are misses: in
+  // Claude Code input_tokens is only the few tokens after the last
+  // breakpoint, so leaving writes out reads ~99% no matter what.
   function cacheHit(o) {
     const inT = Number(o.input_tokens) || 0, cr = Number(o.cache_read_input_tokens) || 0;
-    return inT + cr > 0 ? (cr / (inT + cr)) * 100 : null;
+    const cw = Number(o.cache_creation_input_tokens) || 0;
+    return inT + cr + cw > 0 ? (cr / (inT + cr + cw)) * 100 : null;
   }
 
   let toastTimer = null;
@@ -1870,6 +1876,17 @@
         + `<div class="bar-track"><div class="bar-fill" style="width:${pct.toFixed(1)}%"></div></div>`
         + `<div class="bar-value">${fmtNum(r)} / ${fmtNum(l)}${resetTxt}</div></div>`;
     }
+    const winName = { '5h': '5-hour window', '7d': 'Weekly (all models)', '7d_opus': 'Weekly (Opus)', '7d_sonnet': 'Weekly (Sonnet)' };
+    for (const w of rl.unified || []) {
+      const used = Math.max(0, Math.min(100, Number(w.utilization) * 100));
+      if (!Number.isFinite(used)) continue;
+      const cls = used >= 90 ? 'danger' : used >= 70 ? 'warn' : 'ok';
+      const resetTxt = w.reset ? `<span class="reset">resets ${esc(fmtResetTime(w.reset))}</span>` : '';
+      html += `<div class="bar-row ${cls}"><div class="bar-label">${esc(winName[w.window] || w.window)}</div>`
+        + `<div class="bar-track"><div class="bar-fill" style="width:${used.toFixed(1)}%"></div></div>`
+        + `<div class="bar-value">${fmtPct(used)} used${resetTxt}</div></div>`;
+    }
+    if (rl.unified_status && rl.unified_status !== 'allowed') html += `<div class="alert warn" style="margin-top:12px"><span class="ic">!</span><span>Subscription limit status: <code>${esc(rl.unified_status)}</code></span></div>`;
     if (rl.retry_after) html += `<div class="alert danger" style="margin-top:12px"><span class="ic">!</span><span>Anthropic asked us to retry after <code>${esc(rl.retry_after)}</code> s</span></div>`;
     container.innerHTML = html || '<div class="empty-inline">Waiting for the first <code>/v1/messages</code> response from Anthropic…</div>';
   }
@@ -2191,16 +2208,21 @@
     const sh = Q.stream || {};
     const started = sh.streams_started || 0;
     $('stream-stalls').textContent = fmtCount.format(sh.stalls || 0);
-    $('stream-stalls-meta').textContent = (sh.stalls || 0) === 0
+    const upErr = sh.upstream_errors || 0;
+    $('stream-stalls-meta').textContent = ((sh.stalls || 0) === 0
       ? `no stalls in ${fmtCount.format(started)} streams`
-      : `${fmtPct(100 * (sh.stall_rate || 0))} of streams · last ${sh.last_stall_at || '—'}`;
+      : `${fmtPct(100 * (sh.stall_rate || 0))} of streams · last ${sh.last_stall_at || '—'}`)
+      + (upErr ? ` · ${fmtCount.format(upErr)} upstream drops mid-stream` : '');
     $('stream-stalls-card').className = 'card s4' + ((sh.stalls || 0) === 0 ? '' : (sh.stall_rate || 0) >= 0.02 ? ' st-warn' : '');
     $('stream-ttfb').textContent = (sh.ttfb_ms_avg || 0) > 0 ? `${fmtCount.format(sh.ttfb_ms_avg)} ms` : '—';
     $('stream-ttfb-meta').textContent = `avg · peak ${fmtCount.format(sh.ttfb_ms_max || 0)} ms`;
     $('stream-pool').textContent = fmtCount.format(sh.pool_waits || 0);
-    $('stream-pool-meta').textContent = (sh.pool_waits || 0) === 0
+    const handshakes = (sh.new_connections || 0) > 0
+      ? ` · ${fmtCount.format(sh.new_connections)} new connections, avg handshake ${fmtCount.format(sh.connect_ms_avg || 0)} ms`
+      : '';
+    $('stream-pool-meta').textContent = ((sh.pool_waits || 0) === 0
       ? `pool of ${(sh.config || {}).max_connections || '?'} connections never saturated`
-      : `avg wait ${fmtCount.format(sh.pool_wait_ms_avg || 0)} ms — consider raising UPSTREAM_MAX_CONNECTIONS`;
+      : `avg wait ${fmtCount.format(sh.pool_wait_ms_avg || 0)} ms — consider raising UPSTREAM_MAX_CONNECTIONS`) + handshakes;
     $('stream-pool-card').className = 'card s4' + ((sh.pool_waits || 0) ? ' st-warn' : '');
     $('stream-retries').textContent = fmtCount.format(sh.connect_retries || 0);
     $('stream-disconnects').textContent = fmtCount.format(sh.client_disconnects || 0);
@@ -2215,6 +2237,7 @@
     const cfg = sh.config || {};
     $('upstream-kv').innerHTML = [
       ['Max connections', cfg.max_connections, 'UPSTREAM_MAX_CONNECTIONS'],
+      ['Keep-alive connections', cfg.max_keepalive, 'UPSTREAM_MAX_KEEPALIVE'],
       ['Pool timeout', cfg.pool_timeout != null ? cfg.pool_timeout + ' s' : null, 'UPSTREAM_POOL_TIMEOUT'],
       ['Read timeout', cfg.read_timeout != null ? cfg.read_timeout + ' s' : null, 'UPSTREAM_READ_TIMEOUT'],
       ['Stall threshold', cfg.stall_seconds != null ? cfg.stall_seconds + ' s' : null, 'UPSTREAM_STALL_SECONDS'],
@@ -2350,12 +2373,13 @@
     return out;
   }
   function agg(rows) {
-    const a = { sessions: 0, sessKnown: rows.length > 0, requests: 0, cost: 0, costTracked: 0, reqTracked: 0, in: 0, cr: 0, users: new Set() };
+    const a = { sessions: 0, sessKnown: rows.length > 0, requests: 0, cost: 0, costTracked: 0, reqTracked: 0, in: 0, cr: 0, cw: 0, users: new Set() };
     for (const r of rows) {
       a.requests += r.requests || 0;
       a.cost += Number(r.cost_usd) || 0;
       a.in += r.input_tokens || 0;
       a.cr += r.cache_read_input_tokens || 0;
+      a.cw += r.cache_creation_input_tokens || 0;
       if (r.user_label != null) a.users.add(r.user_label);
       if (r.sessions == null) { a.sessKnown = false; continue; }
       a.sessions += r.sessions;
@@ -2367,7 +2391,7 @@
     a.sess = a.sessions || (rows.some(r => r.sessions != null) ? 0 : null);
     a.cps = a.sessions ? a.costTracked / a.sessions : null;
     a.rps = a.sessions ? a.reqTracked / a.sessions : null;
-    a.hit = a.in + a.cr > 0 ? a.cr / (a.in + a.cr) * 100 : null;
+    a.hit = a.in + a.cr + a.cw > 0 ? a.cr / (a.in + a.cr + a.cw) * 100 : null;
     return a;
   }
 
@@ -2673,7 +2697,7 @@
 
   /*  Insights  ------------------------------------------------------------ */
   let wkMetric = store.get('wk.metric', 'cost');
-  const REC_ICON = { model: '◆', cache: '⟲', session: '⏱', reliability: '⚠', trend: '↗' };
+  const REC_ICON = { model: '◆', cache: '⟲', context: '▤', session: '⏱', reliability: '⚠', trend: '↗' };
   function renderInsights() {
     const c = C;
     if (!c) return;
@@ -2740,7 +2764,7 @@
     const units = sortRows(c.groups || [], sortState.cmp);
     $('cmp-empty').hidden = units.length > 0;
     $('cmp-table').hidden = units.length === 0;
-    const dir = { cost_per_session: -1, cost_per_request: -1, cache_hit_rate: 1, top_tier_cost_share: -1, error_rate: -1, reads_per_edit: 1, score: 1 };
+    const dir = { cost_per_session: -1, cost_per_request: -1, cache_hit_rate: 1, context_per_request: -1, top_tier_cost_share: -1, error_rate: -1, reads_per_edit: 1, score: 1 };
     const extremes = {};
     for (const [k, d] of Object.entries(dir)) {
       const vals = units.map(u => u[k]).filter(v => v != null);
@@ -2762,6 +2786,7 @@
         <td class="num ${mark('cost_per_session', u.cost_per_session)}">${fmtOpt(u.cost_per_session, fmtCost)}</td>
         <td class="num ${mark('cost_per_request', u.cost_per_request)}">${fmtOpt(u.cost_per_request, fmtCostExact)}</td>
         <td>${pctMeter('cache_hit_rate', u.cache_hit_rate, false)}</td>
+        <td class="num ${mark('context_per_request', u.context_per_request)}">${fmtOpt(u.context_per_request, fmtNum)}</td>
         <td>${pctMeter('top_tier_cost_share', u.top_tier_cost_share, true)}</td>
         <td class="num ${mark('error_rate', u.error_rate)}">${fmtOpt(u.error_rate, v => fmtPct(v * 100, 1))}</td>
         <td class="num ${mark('reads_per_edit', u.reads_per_edit)}">${fmtOpt(u.reads_per_edit, v => v.toFixed(2))}</td>

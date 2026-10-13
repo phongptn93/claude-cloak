@@ -40,6 +40,7 @@ SUCCESSOR = {
 }
 TOP_TIER = ("fable", "mythos", "opus")
 EVERYDAY_MODEL = "sonnet-5"
+CONTEXT_FLOOR = 150_000  # context per request below this is never flagged
 SHIFT_SHARE = 0.3  # share of top-tier traffic assumed movable to EVERYDAY_MODEL
 
 
@@ -53,6 +54,11 @@ def _tokens(row: dict) -> dict:
             "cache_creation_input_tokens",
         )
     }
+
+
+def _prompt_tokens(row: dict) -> int:
+    """Every prompt token: fresh input, cache reads and cache writes."""
+    return row["input_tokens"] + row["cache_read_input_tokens"] + row["cache_creation_input_tokens"]
 
 
 def _is_top_tier(key: str) -> bool:
@@ -98,7 +104,7 @@ def weekly_trend() -> list[dict]:
     out = []
     for start in weeks:
         end = start + timedelta(days=6)
-        cost = requests = in_t = cr_t = days = 0
+        cost = requests = in_t = cr_t = cw_t = days = 0
         sessions: set[str] = set()
         tracked = False
         d = start
@@ -110,6 +116,7 @@ def weekly_trend() -> list[dict]:
                 requests += row.get("requests", 0) or 0
                 in_t += row.get("input_tokens", 0) or 0
                 cr_t += row.get("cache_read_input_tokens", 0) or 0
+                cw_t += row.get("cache_creation_input_tokens", 0) or 0
             if d.isoformat() in by_day_session:
                 tracked = True
                 sessions.update(by_day_session[d.isoformat()])
@@ -129,7 +136,9 @@ def weekly_trend() -> list[dict]:
                 "sessions": len(sessions) if tracked else None,
                 "cost_per_request": round(cost / requests, 6) if requests else None,
                 "cost_per_session": round(cost / len(sessions), 4) if sessions else None,
-                "cache_hit_rate": round(cr_t / (in_t + cr_t), 4) if in_t + cr_t else None,
+                "cache_hit_rate": round(cr_t / (in_t + cr_t + cw_t), 4)
+                if in_t + cr_t + cw_t
+                else None,
                 "turns": c.get("turns", 0),
                 "error_rate": round(c.get("tool_errors", 0) / results, 4) if results else None,
                 "reads_per_edit": round(c.get("reads", 0) / edits, 2) if edits else None,
@@ -231,7 +240,7 @@ def unit_stats() -> list[dict]:
 
     out = []
     for u in units.values():
-        denom = u["input_tokens"] + u["cache_read_input_tokens"]
+        denom = _prompt_tokens(u)
         hit = u["cache_read_input_tokens"] / denom if denom else None
         mix_cost = sum(m["cost_usd"] for m in u["models"].values())
         top_cost = sum(m["cost_usd"] for k, m in u["models"].items() if _is_top_tier(k))
@@ -255,6 +264,10 @@ def unit_stats() -> list[dict]:
                 if u["requests"]
                 else None,
                 "cache_hit_rate": round(hit, 4) if hit is not None else None,
+                # Prompt tokens sent per request. Every turn re-reads the
+                # whole context, so this — not the hit rate — is what drives
+                # cache-read spend once caching works.
+                "context_per_request": round(denom / u["requests"]) if u["requests"] else None,
                 "top_tier_cost_share": round(top_cost / mix_cost, 4) if mix_cost else None,
                 "error_rate": round(err, 4) if err is not None else None,
                 "reads_per_edit": round(u["reads"] / u["edits"], 2) if u["edits"] else None,
@@ -277,16 +290,27 @@ def _reprice(tokens: dict, key: str) -> float:
 
 
 def _blended_rate(models: dict, tier: str) -> float | None:
-    weight = sum(m["input_tokens"] + m["cache_read_input_tokens"] for m in models.values())
+    weight = sum(_prompt_tokens(m) for m in models.values())
     if not weight:
         return None
-    return (
-        sum(
-            (m["input_tokens"] + m["cache_read_input_tokens"]) * rates_for(k)[tier]
-            for k, m in models.items()
-        )
-        / weight
-    )
+    return sum(_prompt_tokens(m) * rates_for(k)[tier] for k, m in models.items()) / weight
+
+
+def _cache_write_rate(models: dict) -> float:
+    """Blended write rate at the 5m/1h TTL mix actually billed.
+
+    Per-user rows keep no TTL split, so the proxy-wide mix stands in. The
+    token saver moves prefixes to the 1h TTL, which bills writes at 2x input
+    rather than 1.25x — pricing every write at the 5m rate understated it.
+    """
+    ut = state.quota_stats["usage_total"]
+    w5 = ut.get("cache_creation_5m_input_tokens", 0) or 0
+    w1 = ut.get("cache_creation_1h_input_tokens", 0) or 0
+    share_1h = w1 / (w5 + w1) if w5 + w1 else 0.0
+    fallback = rates_for("unknown")
+    r5 = _blended_rate(models, "cache_write_5m") or fallback["cache_write_5m"]
+    r1 = _blended_rate(models, "cache_write_1h") or fallback["cache_write_1h"]
+    return (1 - share_1h) * r5 + share_1h * r1
 
 
 def _money(v: float) -> str:
@@ -378,7 +402,7 @@ def recommendations(units: list[dict], weeks: list[dict]) -> list[dict]:
     for u in units:
         raw = u["_raw"]
         hit = u["cache_hit_rate"]
-        volume = raw["input_tokens"] + raw["cache_read_input_tokens"]
+        volume = _prompt_tokens(raw)
         if hit is None or volume < 2_000_000 or hit >= target - 0.1:
             continue
         r_in = _blended_rate(raw["models"], "input") or rates_for("unknown")["input"]
@@ -405,6 +429,42 @@ def recommendations(units: list[dict], weeks: list[dict]) -> list[dict]:
             }
         )
 
+    # 3b. Context far larger than the team's typical request. Cache reads are
+    # cheap per token but are paid on the whole context every turn.
+    ctx = [u["context_per_request"] for u in units if u["context_per_request"]]
+    if len(ctx) >= 2:
+        median_ctx = statistics.median(ctx)
+        for u in units:
+            raw = u["_raw"]
+            c = u["context_per_request"]
+            if not c or u["requests"] < 100 or c < CONTEXT_FLOOR or c < 1.5 * median_ctx:
+                continue
+            r_read = (
+                _blended_rate(raw["models"], "cache_read") or rates_for("unknown")["cache_read"]
+            )
+            saving = (c - median_ctx) * u["requests"] * r_read / 1_000_000
+            if saving < 0.5:
+                continue
+            recs.append(
+                {
+                    "kind": "context",
+                    "severity": "warn",
+                    "scope": "group" if settings.USER_GROUPS else "user",
+                    "target": u["name"],
+                    "title": (
+                        f"{u['name']}: {round(c / 1000):,}K token context mỗi request, "
+                        f"gấp {c / median_ctx:.1f}× mức chung"
+                    ),
+                    "detail": (
+                        f"Mỗi lượt gửi lại toàn bộ context; mức chung là {round(median_ctx / 1000):,}K. "
+                        "Dùng /compact khi phiên đã dài, /clear khi chuyển việc, và tránh đọc cả file lớn "
+                        f"khi chỉ cần một đoạn. Về mức chung sẽ tiết kiệm khoảng {_money(saving)}."
+                    ),
+                    "savings_usd": round(saving, 2),
+                    "savings_window": f"{WINDOW_DAYS} ngày",
+                }
+            )
+
     # 4. Cache written but rarely read back — paying the write premium for nothing.
     for u in units:
         raw = u["_raw"]
@@ -412,9 +472,7 @@ def recommendations(units: list[dict], weeks: list[dict]) -> list[dict]:
         if cw < 1_000_000 or cr >= cw:
             continue
         r_in = _blended_rate(raw["models"], "input") or rates_for("unknown")["input"]
-        r_w = (
-            _blended_rate(raw["models"], "cache_write_5m") or rates_for("unknown")["cache_write_5m"]
-        )
+        r_w = _cache_write_rate(raw["models"])
         premium = cw * (r_w - r_in) / 1_000_000
         if premium < 0.5:
             continue

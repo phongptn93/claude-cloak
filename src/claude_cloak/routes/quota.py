@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -15,6 +16,44 @@ from ..upstream import _stream_health_view
 router = APIRouter()
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+_UNIFIED_UTIL_RE = re.compile(r"^unified-(.+)-utilization$")
+
+
+def _unified_windows(rl: dict) -> list[dict]:
+    """Subscription (OAuth) limits from ``anthropic-ratelimit-unified-*``.
+
+    Claude Code on a Pro/Max plan never gets the API-key style
+    ``requests-remaining`` headers; it gets a utilization fraction and a
+    unix reset time per window (5h, 7d, ...). Without this the panel waited
+    for headers that never come while showing "updated just now".
+    """
+    out = []
+    for key, value in rl.items():
+        m = _UNIFIED_UTIL_RE.match(key)
+        if not m:
+            continue
+        window = m.group(1)
+        try:
+            utilization = float(value)
+        except (TypeError, ValueError):
+            continue
+        reset = rl.get(f"unified-{window}-reset")
+        try:
+            reset_iso = datetime.fromtimestamp(int(float(reset))).isoformat(timespec="seconds")
+        except (TypeError, ValueError, OverflowError, OSError):
+            reset_iso = reset
+        out.append(
+            {
+                "window": window,
+                "utilization": utilization,
+                "status": rl.get(f"unified-{window}-status"),
+                "reset": reset_iso,
+            }
+        )
+    out.sort(key=lambda w: w["window"])
+    return out
 
 
 @router.get("/quota")
@@ -164,6 +203,9 @@ async def quota():
             "tokens_limit": rl.get("tokens-limit"),
             "tokens_reset": rl.get("tokens-reset"),
             "retry_after": rl.get("retry-after"),
+            "unified_status": rl.get("unified-status"),
+            "unified_claim": rl.get("unified-representative-claim"),
+            "unified": _unified_windows(rl),
             "updated_at": state.quota_stats["rate_limits_updated_at"],
         },
     }

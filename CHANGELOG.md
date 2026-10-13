@@ -89,7 +89,54 @@ Notable changes to Claude Cloak. Format follows
   - Server mode now boots with an empty `ALLOWED_IPS` when keys are enabled and
     at least one is active, instead of aborting.
 
+### Added (context size)
+
+- **Context per request** in Coaching → Compare users: prompt tokens sent per
+  request (fresh + cache read + cache write). On a real 22-user deployment,
+  cache reads were half of all spend at ~197K tokens per request, with a 4×
+  spread between users — a bigger lever than the cache hit rate, which sat at
+  ~97% for everyone.
+- A **context recommendation** for users at 1.5× the team median (and over
+  150K tokens), with the cache-read saving from coming down to the median.
+
+### Changed (session cap)
+
+- `QUOTA_MAX_DAY_SESSIONS` default 500 → 1500; a 20-person team already
+  reached 426 sessions in a day.
+
 ### Fixed
+
+- **Pool waits over-counted.** The figure timed everything up to Anthropic's
+  response headers, so ordinary prompt-processing latency (≈ every request over
+  1 s) was reported as the proxy's pool being saturated, even with
+  `UPSTREAM_MAX_CONNECTIONS=5000`. It now counts only the time spent waiting
+  for a connection slot. New `stream.new_connections` / `connect_ms_avg` show
+  how often a fresh TCP+TLS handshake was paid, and the keep-alive defaults
+  rose (`UPSTREAM_MAX_KEEPALIVE` 20 → 100, `UPSTREAM_KEEPALIVE_EXPIRY` 30 → 60 s)
+  so concurrent turns stop re-handshaking after every burst.
+
+- **Rate limits panel empty on subscription accounts.** Pro/Max (OAuth)
+  traffic carries `anthropic-ratelimit-unified-*` headers, which the panel
+  never read, so it said "Waiting for the first response" beside "updated just
+  now". `/quota` now exposes `rate_limits.unified` (per-window utilization and
+  reset), and the panel shows the 5-hour and weekly windows.
+- **Cache hit rate inflated to ~99%.** It was `cache_read / (input +
+  cache_read)`, but Claude Code's `input_tokens` is only the few tokens after
+  the last breakpoint, so cache writes were never counted as misses. Every
+  hit rate (dashboard, coach score, activity, insights) now includes
+  `cache_creation_input_tokens` in the denominator. Coach scores and the
+  "low cache hit" advice drop accordingly — they now reflect real behaviour.
+- **Cache write premium priced at the 5m rate** in insights, although the
+  token saver moves prefixes to the 1h TTL (2× input, not 1.25×). The premium
+  now uses the 5m/1h mix actually billed.
+- **Upstream drops mid-stream were invisible.** A connection lost after the
+  headers counted as neither completed, stalled nor disconnected, and the
+  client got a truncated body. It is now counted as `stream.upstream_errors`
+  and closed with a proper SSE `error` event.
+- **Token saver "tokens saved" counted JSON re-serialisation.** It diffed
+  body sizes, crediting shorter escapes as savings and letting added
+  `cache_control` bytes cancel real ones. It now counts only the characters
+  truncation removed.
 
 - The `/config` hint for `USER_QUOTA_CAPS` showed `phong=50,nam=20`, but the
   parser reads `label:usd` (`phong:50,nam:20`). An entry typed from the hint
