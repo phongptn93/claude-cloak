@@ -433,6 +433,8 @@
   .bar-row { display: grid; grid-template-columns: 130px 1fr auto; align-items: center; gap: 14px; padding: 9px 0; }
   .bar-row + .bar-row { border-top: 1px dashed var(--border-soft); }
   .bar-label { color: var(--text-soft); font-size: 13px; }
+  .ttl-line { margin: 14px 0 0; font-size: 12.5px; color: var(--text-soft); }
+  .ttl-line .neg { color: var(--danger); } .ttl-line .pos { color: var(--ok); }
   .acct-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; padding: 12px 0 2px; font-size: 13px; }
   .acct-head + .bar-row { border-top: 0; }
   .acct-head:first-child { padding-top: 0; }
@@ -1215,6 +1217,7 @@
         <div class="savings-total" id="savings-total" hidden><span style="font-size:12px;color:var(--muted)">Potential savings</span><b id="savings-sum">$0</b></div>
       </div>
       <div class="recs" id="recs"></div>
+      <p class="ttl-line" id="ttl-line" hidden></p>
     </section>
 
     <section>
@@ -2270,6 +2273,7 @@
     $('upstream-kv').innerHTML = [
       ['Max connections', cfg.max_connections, 'UPSTREAM_MAX_CONNECTIONS'],
       ['Keep-alive connections', cfg.max_keepalive, 'UPSTREAM_MAX_KEEPALIVE'],
+      ['HTTP/2', cfg.http2 == null ? null : (cfg.http2 ? 'on' : 'off'), 'UPSTREAM_HTTP2'],
       ['Pool timeout', cfg.pool_timeout != null ? cfg.pool_timeout + ' s' : null, 'UPSTREAM_POOL_TIMEOUT'],
       ['Read timeout', cfg.read_timeout != null ? cfg.read_timeout + ' s' : null, 'UPSTREAM_READ_TIMEOUT'],
       ['Stall threshold', cfg.stall_seconds != null ? cfg.stall_seconds + ' s' : null, 'UPSTREAM_STALL_SECONDS'],
@@ -2733,6 +2737,15 @@
   function renderInsights() {
     const c = C;
     if (!c) return;
+    const t = c.cache_ttl;
+    const turns = t ? Object.values(t.gaps || {}).reduce((a, b) => a + b, 0) : 0;
+    $('ttl-line').hidden = !t || !turns;
+    if (t && turns) {
+      const who = t.requests_proxy_1h ? 'proxy (CACHE_EXTEND_TTL)' : t.requests_client_1h ? 'Claude Code' : '—';
+      $('ttl-line').innerHTML = `<strong>Cache TTL 1h this period:</strong> premium ${fmtCost(t.premium_usd)} · saved ${fmtCost(t.saved_usd)}`
+        + ` · <span class="${t.net_usd < 0 ? 'neg' : 'pos'}">net ${t.net_usd < 0 ? '−' : '+'}${fmtCost(Math.abs(t.net_usd))}</span>`
+        + ` · pauses of 5–60 min: ${fmtPct((t.share_5m_to_1h || 0) * 100)} of ${fmtCount.format(turns)} turns · 1h set by ${who}`;
+    }
     const recs = c.recommendations || [];
     $('recs').innerHTML = recs.length ? recs.map(r => `<article class="rec ${esc(r.kind)}">
         <div class="ic" aria-hidden="true">${REC_ICON[r.kind] || '•'}</div>

@@ -13,14 +13,16 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from .. import settings, state
-from ..coach import _coach_record_request, _coach_record_response
+from ..alerts import check_stall
+from ..coach import _coach_record_data, _coach_record_response
 from ..echo import echo_delay, echo_response, echo_sse_events, is_streaming_request
 from ..identity import capture_identity_from_request, warn_unknown_headers
 from ..loki import _loki_enqueue
-from ..quota.accounts import account_from_body, resolve_account
+from ..quota.accounts import account_from_data, resolve_account
+from ..quota.cache_ttl import record_client_cache_ttl
 from ..quota.tap import UsageTap
 from ..quota.usage import _record_rate_limits, _record_usage
-from ..sanitize import is_blocked_path, sanitize_body
+from ..sanitize import dump_json_body, is_blocked_path, parse_json_body, sanitize_data
 from ..terminal import (
     BG_GREEN,
     BG_RED,
@@ -40,7 +42,7 @@ from ..tokens import (
     _looks_like_cache_ttl_beta_error,
     disable_cache_ttl_runtime,
     inject_cache_ttl_beta,
-    optimize_tokens,
+    optimize_data,
 )
 from ..upstream import (
     SendTimer,
@@ -97,22 +99,31 @@ async def proxy(path: str, request: Request):
     processing_started = time.monotonic()
 
     content_type = request.headers.get("content-type", "")
-    # Which Claude account sent this (several may share the proxy).
-    request_account = account_from_body(body, content_type, path)
+    # Parsed once; every step below works on the same dict and the body is
+    # re-serialised at most once, only when a step changed it.
+    data = parse_json_body(body, content_type)
+    request_account = None
+    if data is not None:
+        # Which Claude account sent this (several may share the proxy).
+        request_account = account_from_data(data, path)
+        # Did the client itself ask for the 1h cache TTL? (before the saver)
+        record_client_cache_ttl(data, path)
 
-    # ── Body sanitization ──
-    body = sanitize_body(body, content_type)
+        # ── Body sanitization ──
+        changed = sanitize_data(data)
 
-    # ── Coaching: tool-result signals (counts only, never content) ──
-    if settings.COACH_ENABLED:
-        with contextlib.suppress(Exception):
-            _coach_record_request(
-                body, content_type, path, getattr(request.state, "user_label", None)
-            )
+        # ── Coaching: tool-result signals (counts only, never content) ──
+        if settings.COACH_ENABLED:
+            with contextlib.suppress(Exception):
+                _coach_record_data(data, path, getattr(request.state, "user_label", None))
 
-    # ── Token saver ──
+        # ── Token saver ──
+        if settings.TOKEN_SAVER_ENABLED and optimize_data(data, path):
+            changed = True
+
+        if changed:
+            body = dump_json_body(data)
     if settings.TOKEN_SAVER_ENABLED:
-        body = optimize_tokens(body, content_type, path)
         inject_cache_ttl_beta(headers)
 
     start_time = time.monotonic()
@@ -369,6 +380,7 @@ async def proxy(path: str, request: Request):
                         # leaving the client waiting on a stream that will
                         # never produce another byte.
                         state.stream_stats["stalls"] += 1
+                        check_stall(req_id)
                         state.stream_stats["last_stall_at"] = datetime.now().isoformat(
                             timespec="seconds"
                         )

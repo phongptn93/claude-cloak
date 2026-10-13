@@ -278,8 +278,11 @@ if not SESSION_SECRET:
 # REQUEST TIMING JITTER
 # ============================================================
 TIMING_JITTER_ENABLED = env_bool("TIMING_JITTER", True)
-TIMING_JITTER_MIN_MS = env_int("TIMING_JITTER_MIN_MS", 10)
-TIMING_JITTER_MAX_MS = env_int("TIMING_JITTER_MAX_MS", 150)
+# Every request waits this long before it is forwarded, and an agent turn is
+# dozens of requests: 10-150 ms (the old default, ~80 ms mean) added ~2.4 s
+# to a 30-call task. 5-40 ms still breaks up identical timing.
+TIMING_JITTER_MIN_MS = env_int("TIMING_JITTER_MIN_MS", 5)
+TIMING_JITTER_MAX_MS = env_int("TIMING_JITTER_MAX_MS", 40)
 
 # ============================================================
 # TOKEN SAVER
@@ -337,6 +340,10 @@ UPSTREAM_KEEPALIVE_EXPIRY = env_float("UPSTREAM_KEEPALIVE_EXPIRY", 60)
 UPSTREAM_CONNECT_TIMEOUT = env_float("UPSTREAM_CONNECT_TIMEOUT", 10)
 UPSTREAM_READ_TIMEOUT = env_float("UPSTREAM_READ_TIMEOUT", 300)
 UPSTREAM_POOL_TIMEOUT = env_float("UPSTREAM_POOL_TIMEOUT", 30)
+# Multiplex upstream requests over HTTP/2: concurrent streams share a few TLS
+# connections instead of opening one each. Off by default; turn on when the
+# Performance tab shows a high count of new connections.
+UPSTREAM_HTTP2 = env_bool("UPSTREAM_HTTP2", False)
 # Fail a stream that receives no bytes for this long; 0 disables the watchdog.
 UPSTREAM_STALL_SECONDS = env_float("UPSTREAM_STALL_SECONDS", 120)
 # Retry a transport failure only while no byte has been forwarded yet.
@@ -345,6 +352,15 @@ UPSTREAM_RETRY_BACKOFF_SECONDS = env_float("UPSTREAM_RETRY_BACKOFF_SECONDS", 0.2
 # Pool contention (time queued for a free connection slot) is only worth
 # reporting past this wait.
 UPSTREAM_POOL_WAIT_WARN_MS = env_float("UPSTREAM_POOL_WAIT_WARN_MS", 1000)
+
+# Alerts to a webhook: Slack incoming-webhook URL (format "slack", the
+# default) or any endpoint taking JSON (format "json"). Empty = off.
+ALERT_WEBHOOK_URL = env_str("ALERT_WEBHOOK_URL")
+ALERT_WEBHOOK_FORMAT = env_str("ALERT_WEBHOOK_FORMAT", "slack").lower()
+# Fraction of a subscription window (5h / weekly) that triggers an alert.
+ALERT_ACCOUNT_THRESHOLD = env_float("ALERT_ACCOUNT_THRESHOLD", 0.9)
+# Minimum gap between repeated alerts of a recurring kind (stalls).
+ALERT_COOLDOWN_MINUTES = env_float("ALERT_COOLDOWN_MINUTES", 60)
 
 # Telemetry client (Loki pushes) — deliberately a tiny separate pool so a slow
 # log endpoint cannot starve API traffic.

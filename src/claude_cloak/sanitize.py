@@ -23,27 +23,40 @@ def is_blocked_path(path: str) -> bool:
 def sanitize_body(body: bytes, content_type: str | None) -> bytes:
     """Strip device-identifying fields from JSON request bodies."""
 
-    if not body:
+    data = parse_json_body(body, content_type)
+    if data is None:
         return body
+    if sanitize_data(data):
+        return dump_json_body(data)
+    return body
 
-    if not content_type or "json" not in content_type.lower():
-        return body
 
+def parse_json_body(body: bytes, content_type: str | None) -> dict | None:
+    """The request body as a dict, or None when it is not a JSON object.
+
+    The proxy parses each body once and hands the dict to every step
+    (account, sanitizer, coach, token saver); a 200K-token Claude Code body
+    is ~1 MB, and each parse blocks the event loop for every open stream.
+    """
+    if not body or not content_type or "json" not in content_type.lower():
+        return None
     try:
         data = json.loads(body)
     except (json.JSONDecodeError, UnicodeDecodeError):
-        return body
+        return None
+    return data if isinstance(data, dict) else None
 
-    if not isinstance(data, dict):
-        return body
 
+def dump_json_body(data: dict) -> bytes:
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode()
+
+
+def sanitize_data(data: dict) -> bool:
+    """Scrub device-identifying fields in place. True when anything changed."""
     changed = _sanitize_dict(data)
-
     if changed:
         state.runtime.sanitized_bodies_count += 1
-        return json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode()
-
-    return body
+    return changed
 
 
 def _sanitize_dict(data: dict) -> bool:

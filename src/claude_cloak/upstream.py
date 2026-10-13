@@ -155,6 +155,7 @@ def _stream_health_view() -> dict:
             "stall_seconds": settings.UPSTREAM_STALL_SECONDS,
             "max_connections": settings.UPSTREAM_MAX_CONNECTIONS,
             "max_keepalive": settings.UPSTREAM_MAX_KEEPALIVE,
+            "http2": settings.UPSTREAM_HTTP2,
             "pool_timeout": settings.UPSTREAM_POOL_TIMEOUT,
             "read_timeout": settings.UPSTREAM_READ_TIMEOUT,
             "connect_retries": settings.UPSTREAM_CONNECT_RETRIES,

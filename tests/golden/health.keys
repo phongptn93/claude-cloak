@@ -26,6 +26,7 @@
 .status:str
 .stream.client_disconnects:int
 .stream.config.connect_retries:int
+.stream.config.http2:bool
 .stream.config.max_connections:int
 .stream.config.max_keepalive:int
 .stream.config.pool_timeout:float
@@ -54,6 +55,7 @@
 .token_saver.cache_extend_ttl_configured:bool
 .token_saver.enabled:bool
 .token_saver.requests_optimized:int
+.token_saver.requests_ttl_upgraded:int
 .token_saver.tokens_saved_est:int
 .token_saver.tool_result_max_bytes:int
 .token_saver.tool_result_truncate:bool

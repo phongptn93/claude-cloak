@@ -6,6 +6,7 @@ from datetime import datetime
 
 from .. import settings, state
 from ..access import cap_for_label, current_user_period_key
+from ..alerts import check_user_cap
 
 
 def _new_user_bucket(label: str) -> dict:
@@ -92,6 +93,8 @@ def record_user_usage(label: str, usage: dict, cost: float, model_key: str | Non
     b["cache_read_input_tokens"] += cr_t
     b["cache_creation_input_tokens"] += cw_t
     b["last_seen"] = datetime.now().isoformat(timespec="seconds")
+    if settings.USER_QUOTA_ENABLED:
+        check_user_cap(label, b["cost_usd"], float(b.get("cap_usd") or 0.0), b.get("period_key"))
 
     if model_key:
         # Older buckets loaded from v3 .quota.json don't have this dict yet.

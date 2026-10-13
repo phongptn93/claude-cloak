@@ -31,7 +31,14 @@ ADDED_SINCE_BASELINE = {
     "health": [".tls"],
     # Coach insights: weekly trend, per-group/user comparison and
     # recommendations priced from real usage.
-    "coach": [".group_by", ".groups", ".recommendations", ".weekly", ".window_days"],
+    "coach": [
+        ".cache_ttl",
+        ".group_by",
+        ".groups",
+        ".recommendations",
+        ".weekly",
+        ".window_days",
+    ],
 }
 
 ENDPOINTS = {

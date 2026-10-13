@@ -2,27 +2,28 @@
 
 from __future__ import annotations
 
-import json
-
 from . import settings, state
+from .sanitize import dump_json_body, parse_json_body
 from .terminal import BG_YELLOW, BOLD, RESET, YELLOW, log
 
 
 def optimize_tokens(body: bytes, content_type: str | None, path: str) -> bytes:
     """Apply token-saving transforms to /v1/messages JSON bodies."""
-    if not settings.TOKEN_SAVER_ENABLED or not body:
+    if not settings.TOKEN_SAVER_ENABLED or "v1/messages" not in path:
         return body
-    if not content_type or "json" not in content_type.lower():
+    data = parse_json_body(body, content_type)
+    if data is None or not optimize_data(data, path):
         return body
-    if "v1/messages" not in path:
-        return body
+    return dump_json_body(data)
 
-    try:
-        data = json.loads(body)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return body
-    if not isinstance(data, dict):
-        return body
+
+def optimize_data(data: dict, path: str) -> bool:
+    """Apply the token saver to a parsed /v1/messages body in place.
+
+    True when the body changed and must be re-serialised.
+    """
+    if not settings.TOKEN_SAVER_ENABLED or "v1/messages" not in path:
+        return False
 
     breakpoints = 0
     skipped_full = 0
@@ -36,9 +37,8 @@ def optimize_tokens(body: bytes, content_type: str | None, path: str) -> bytes:
     if breakpoints == 0 and truncated == 0:
         if skipped_full:
             state.token_saver_stats["cache_breakpoints_skipped_full"] += skipped_full
-        return body
+        return False
 
-    new_body = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode()
     # Only text the truncation dropped is a saving. Diffing body sizes also
     # credited JSON re-serialisation (escapes, whitespace) as saved tokens,
     # and let added cache_control bytes cancel real savings out.
@@ -50,8 +50,9 @@ def optimize_tokens(body: bytes, content_type: str | None, path: str) -> bytes:
     state.token_saver_stats["tool_results_truncated"] += truncated
     state.token_saver_stats["bytes_saved"] += saved_bytes
     state.token_saver_stats["tokens_saved_est"] += saved_bytes // settings.CHARS_PER_TOKEN
-
-    return new_body
+    if breakpoints:
+        state.token_saver_stats["requests_ttl_upgraded"] += 1
+    return True
 
 
 def _count_cache_breakpoints(data: dict) -> int:

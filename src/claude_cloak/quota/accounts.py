@@ -21,6 +21,7 @@ import re
 from datetime import datetime
 
 from .. import settings, state
+from ..alerts import check_account_limits
 
 _UUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 _ACCOUNT_IN_USER_ID = re.compile(rf"account_({_UUID})")
@@ -40,7 +41,14 @@ def account_from_body(body: bytes, content_type: str | None, path: str) -> str |
         data = json.loads(body)
     except (json.JSONDecodeError, UnicodeDecodeError):
         return None
-    meta = data.get("metadata") if isinstance(data, dict) else None
+    return account_from_data(data, path) if isinstance(data, dict) else None
+
+
+def account_from_data(data: dict, path: str) -> str | None:
+    """Account UUID from an already-parsed /v1/messages body, or None."""
+    if "v1/messages" not in path:
+        return None
+    meta = data.get("metadata")
     user_id = meta.get("user_id") if isinstance(meta, dict) else None
     if not isinstance(user_id, str):
         return None
@@ -97,6 +105,7 @@ def record_account_rate_limits(account: str | None, latest: dict) -> None:
     b = _bucket(account)
     b["rate_limits"] = latest
     b["rate_limits_updated_at"] = datetime.now().isoformat(timespec="seconds")
+    check_account_limits(account_label(account), account, unified_windows(latest))
 
 
 def record_account_usage(account: str | None, cost: float, user_label: str | None) -> None:

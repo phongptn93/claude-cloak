@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager, suppress
 import httpx
 from fastapi import FastAPI
 
-from . import pricing, settings, state
+from . import alerts, pricing, settings, state
 from .banner import print_banner, print_status
 from .coach import _load_coach_stats, _save_coach_stats
 from .env import ENV_PATH, save_to_env
@@ -23,6 +23,7 @@ from .terminal import RESET, YELLOW, log
 
 def build_upstream_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(
+        http2=settings.UPSTREAM_HTTP2,
         timeout=httpx.Timeout(
             settings.UPSTREAM_READ_TIMEOUT,
             connect=settings.UPSTREAM_CONNECT_TIMEOUT,
@@ -107,6 +108,7 @@ async def lifespan(app: FastAPI):
                     break
                 if not await _loki_flush_once():
                     break
+        await alerts.drain()
         _save_quota_stats(force=True)
         _save_coach_stats(force=True)
         save_keys(force=True)

@@ -18,6 +18,7 @@ from itertools import pairwise
 from . import settings, state
 from .pricing import PRICING, cost_of, rates_for
 from .quota.activity import group_of
+from .quota.cache_ttl import cache_ttl_view
 
 WINDOW_DAYS = 30
 WEEKS_SHOWN = 8
@@ -247,7 +248,6 @@ def unit_stats() -> list[dict]:
         err = u["tool_errors"] / u["tool_results"] if u["tool_results"] else None
         discipline = min(100.0, u["reads"] / u["edits"] * 100) if u["edits"] else None
         reliability = (1 - err) * 100 if err is not None else None
-        cache_score = min(100.0, hit / 0.85 * 100) if hit is not None else None
         n_sessions = len(u["sessions"])
         out.append(
             {
@@ -272,10 +272,22 @@ def unit_stats() -> list[dict]:
                 "error_rate": round(err, 4) if err is not None else None,
                 "reads_per_edit": round(u["reads"] / u["edits"], 2) if u["edits"] else None,
                 "turns": u["turns"],
-                "score": _score(discipline, reliability, cache_score),
+                "_parts": (discipline, reliability),
                 "_raw": u,
             }
         )
+    # Cache is scored against the team, on the miss rate: hit rates all sit
+    # around 95-98%, so a fixed "85% = full marks" gave everyone 100. A unit
+    # missing twice as often as the team median scores 50.
+    misses = [1 - x["cache_hit_rate"] for x in out if x["cache_hit_rate"] is not None]
+    team_miss = statistics.median(misses) if misses else None
+    for x in out:
+        cache_score = None
+        if x["cache_hit_rate"] is not None and team_miss is not None:
+            miss = 1 - x["cache_hit_rate"]
+            cache_score = 100.0 if miss <= team_miss else team_miss / miss * 100
+        x["cache_score"] = round(cache_score) if cache_score is not None else None
+        x["score"] = _score(*x.pop("_parts"), cache_score)
     out.sort(key=lambda x: x["cost_usd"], reverse=True)
     return out
 
@@ -493,6 +505,50 @@ def recommendations(units: list[dict], weeks: list[dict]) -> list[dict]:
             }
         )
 
+    # 4b. Is the 1h cache TTL paying for itself? (current quota period)
+    ttl = cache_ttl_view()
+    turns = sum(ttl["gaps"].values())
+    if ttl["premium_usd"] >= 5 and turns >= 200:
+        by_proxy = ttl["requests_proxy_1h"] > 0
+        if ttl["net_usd"] < 0:
+            recs.append(
+                {
+                    "kind": "cache",
+                    "severity": "warn",
+                    "scope": "all",
+                    "target": "cache-ttl",
+                    "title": "Cache TTL 1 giờ đang tốn hơn số tiền nó tiết kiệm",
+                    "detail": (
+                        f"Phụ phí ghi cache 1 giờ kỳ này {_money(ttl['premium_usd'])}, chỉ tiết kiệm "
+                        f"{_money(ttl['saved_usd'])} ở những lượt sau khi nghỉ 5–60 phút "
+                        f"({round((ttl['share_5m_to_1h'] or 0) * 100)}% số lượt). "
+                        + (
+                            "Proxy đang tự nâng TTL lên 1 giờ — đặt CACHE_EXTEND_TTL=false."
+                            if by_proxy
+                            else "Chính Claude Code yêu cầu TTL 1 giờ; proxy không nâng TTL."
+                        )
+                    ),
+                    "savings_usd": round(-ttl["net_usd"], 2),
+                    "savings_window": "kỳ này",
+                }
+            )
+        else:
+            recs.append(
+                {
+                    "kind": "cache",
+                    "severity": "info",
+                    "scope": "all",
+                    "target": "cache-ttl",
+                    "title": "Cache TTL 1 giờ đang có lời",
+                    "detail": (
+                        f"Tiết kiệm {_money(ttl['saved_usd'])} ở các lượt sau khi nghỉ 5–60 phút, "
+                        f"so với phụ phí {_money(ttl['premium_usd'])}. Giữ nguyên."
+                    ),
+                    "savings_usd": None,
+                    "savings_window": None,
+                }
+            )
+
     # 5. Sessions far more expensive than the team's typical session.
     cps = [u["cost_per_session"] for u in units if u["cost_per_session"] and u["sessions"] >= 3]
     if len(cps) >= 2:
@@ -579,4 +635,6 @@ def coach_insights() -> dict:
         "weekly": weeks,
         "groups": units,
         "recommendations": recs,
+        # Whether the 1h cache TTL pays for itself this period.
+        "cache_ttl": cache_ttl_view(),
     }

@@ -9,6 +9,7 @@ from ..loki import _loki_enqueue
 from ..pricing import _compute_cost, _normalize_model_key
 from ..terminal import CYAN, DIM, RESET, log
 from .accounts import record_account_rate_limits, record_account_usage
+from .cache_ttl import record_cache_ttl_usage
 from .persist import (
     _check_monthly_reset,
     _evict_by_day_user_to_match_by_day,
@@ -218,6 +219,7 @@ def _record_usage(
     if user_label:
         record_user_usage(user_label, usage, cost, model_key=model_key)
     record_account_usage(account, cost, user_label)
+    record_cache_ttl_usage(session_id, model_key, usage)
 
     # by_day_user — same per-day aggregation as by_day but split per user.
     if user_label:

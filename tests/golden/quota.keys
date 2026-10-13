@@ -26,6 +26,7 @@
 .rate_limits.updated_at:NoneType
 .stream.client_disconnects:int
 .stream.config.connect_retries:int
+.stream.config.http2:bool
 .stream.config.max_connections:int
 .stream.config.max_keepalive:int
 .stream.config.pool_timeout:float

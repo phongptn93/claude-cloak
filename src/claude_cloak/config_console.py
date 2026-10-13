@@ -38,7 +38,7 @@ CONFIG_SPECS: list[dict] = [
         "scope": "restart",
         "section": "Stream health",
         "min": 1,
-        "max": 1000,
+        "max": 10000,
         "desc": "Upstream connection pool size. Too small and concurrent requests queue silently, which clients report as a stall.",
     },
     {
@@ -50,6 +50,14 @@ CONFIG_SPECS: list[dict] = [
         "min": 0,
         "max": 1000,
         "desc": "Idle connections kept alive for reuse. Too few and requests keep paying a new TCP+TLS handshake.",
+    },
+    {
+        "key": "UPSTREAM_HTTP2",
+        "var": "UPSTREAM_HTTP2",
+        "type": "bool",
+        "scope": "restart",
+        "section": "Stream health",
+        "desc": "Multiplex upstream requests over HTTP/2 instead of one TLS connection per concurrent stream.",
     },
     {
         "key": "UPSTREAM_POOL_TIMEOUT",

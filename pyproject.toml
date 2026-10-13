@@ -13,7 +13,7 @@ dependencies = [
     # Without these decoders httpx cannot decompress a br/zstd response, and
     # since content-encoding is stripped on the way out the client would
     # receive undecodable bytes.
-    "httpx[brotli,zstd]>=0.28.1",
+    "httpx[brotli,zstd,http2]>=0.28.1",
     "python-dotenv>=1.2.3",
     "uvicorn>=0.52.4",
 ]
