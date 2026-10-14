@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "updated": "2026-09-27",
+  "updated": "2026-10-13",
   "currency": "USD",
   "unit": "per million tokens",
   "source": "https://platform.claude.com/docs/en/about-claude/pricing",
@@ -9,7 +9,8 @@
     "Keys match the response `model` field by substring (family-version or version-family); longer keys win, so opus-5.5 is picked over opus-5.",
     "Each model holds a list of rates. A rate applies from its effective_from date (YYYY-MM-DD, local time) until the next one; a rate with no effective_from applies from the beginning. Add a new entry to schedule a price change instead of editing the old one.",
     "Opus 4.5 and newer are $5/$25 (Opus 5.5: $4/$20); only Opus 4.0/4.1 and Opus 3 carry $15/$75.",
-    "Fable 5.1 and Mythos 5.1 read cache at 0.025x input ($0.25/MTok) and Opus 5.5 at 0.05x ($0.20/MTok), not the usual 0.1x."
+    "Fable 5.1 and Mythos 5.1 read cache at 0.025x input ($0.25/MTok) and Opus 5.5 at 0.05x ($0.20/MTok), not the usual 0.1x.",
+    "Sonnet 5.5 keeps Sonnet 5's rates. Haiku 5.5 is $0.10/$0.50 for prompts up to 100K tokens and $0.50/$2.50 above (long_context); cache tiers follow 1.25x / 2x / 0.1x input."
   ],
   "models": {
     "fable-5.1": [
@@ -64,6 +65,15 @@
         "cache_write_5m": 6.25,
         "cache_write_1h": 10.0,
         "cache_read": 0.5
+      }
+    ],
+    "sonnet-5.5": [
+      {
+        "input": 2.0,
+        "output": 10.0,
+        "cache_write_5m": 2.5,
+        "cache_write_1h": 4.0,
+        "cache_read": 0.2
       }
     ],
     "sonnet-5": [
@@ -145,6 +155,23 @@
         "cache_write_5m": 3.75,
         "cache_write_1h": 6.0,
         "cache_read": 0.3
+      }
+    ],
+    "haiku-5.5": [
+      {
+        "input": 0.1,
+        "output": 0.5,
+        "cache_write_5m": 0.125,
+        "cache_write_1h": 0.2,
+        "cache_read": 0.01,
+        "long_context": {
+          "above_prompt_tokens": 100000,
+          "input": 0.5,
+          "output": 2.5,
+          "cache_write_5m": 0.625,
+          "cache_write_1h": 1.0,
+          "cache_read": 0.05
+        }
       }
     ],
     "haiku-4": [

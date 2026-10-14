@@ -38,6 +38,15 @@ quota_stats: dict[str, Any] = {
     "messages_requests": 0,
     "last_request_at": None,
     "period_month": "",  # YYYY-MM of current tracking period; auto-reset on rollover
+    "accounts": {},
+    "cache_ttl": {
+        "requests_client_1h": 0,
+        "gaps": {"under_5m": 0, "5m_to_1h": 0, "over_1h": 0},
+        "premium_usd": 0.0,
+        "saved_usd": 0.0,
+        "requests_forced_5m": 0,
+        "rewrite_usd": 0.0,
+    },  # account uuid (or "org:<id>") -> usage + last rate limits
     "unpriced_models": {},  # raw model id -> count (costed at PRICING_FALLBACK)
 }
 
@@ -55,6 +64,8 @@ stream_stats: dict[str, Any] = {
     "ttfb_ms_total": 0,  # time-to-first-byte, summed over streams
     "ttfb_ms_max": 0,
     "ttfb_samples": 0,
+    "proxy_overhead_ms_total": 0,  # jitter + body processing before forwarding
+    "proxy_overhead_samples": 0,
     "last_stall_at": None,
 }
 
@@ -78,6 +89,7 @@ token_saver_stats: dict[str, Any] = {
     "tool_results_truncated": 0,
     "bytes_saved": 0,
     "tokens_saved_est": 0,
+    "requests_ttl_upgraded": 0,  # requests where the proxy moved a prefix to the 1h TTL
     "beta_runtime_disabled": False,
 }
 

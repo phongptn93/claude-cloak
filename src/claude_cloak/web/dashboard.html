@@ -433,6 +433,11 @@
   .bar-row { display: grid; grid-template-columns: 130px 1fr auto; align-items: center; gap: 14px; padding: 9px 0; }
   .bar-row + .bar-row { border-top: 1px dashed var(--border-soft); }
   .bar-label { color: var(--text-soft); font-size: 13px; }
+  .ttl-line { margin: 14px 0 0; font-size: 12.5px; color: var(--text-soft); }
+  .ttl-line .neg { color: var(--danger); } .ttl-line .pos { color: var(--ok); }
+  .acct-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; padding: 12px 0 2px; font-size: 13px; }
+  .acct-head + .bar-row { border-top: 0; }
+  .acct-head:first-child { padding-top: 0; }
   .bar-track { height: 8px; background: var(--bg-3); border-radius: 4px; overflow: hidden; }
   .bar-fill { height: 100%; border-radius: 4px; background: var(--ok); transition: width .5s cubic-bezier(.4,0,.2,1); }
   .bar-row.warn   .bar-fill { background: var(--warn); }
@@ -1212,6 +1217,7 @@
         <div class="savings-total" id="savings-total" hidden><span style="font-size:12px;color:var(--muted)">Potential savings</span><b id="savings-sum">$0</b></div>
       </div>
       <div class="recs" id="recs"></div>
+      <p class="ttl-line" id="ttl-line" hidden></p>
     </section>
 
     <section>
@@ -1702,6 +1708,15 @@
       if (p < 10) out.push({ lvl: 'danger', view: 'performance', html: `<strong>Rate limit almost exhausted:</strong> ${esc(label)} at ${fmtPct(p)} remaining.` });
       else if (p < 30) out.push({ lvl: 'warn', view: 'performance', html: `<strong>Rate limit low:</strong> ${esc(label)} at ${fmtPct(p)} remaining.` });
     }
+    const winLabel = { '5h': '5-hour window', '7d': 'weekly limit' };
+    for (const a of Q.accounts || []) {
+      for (const w of a.rate_limits.unified || []) {
+        const used = Number(w.utilization) * 100;
+        if (!(used >= 75)) continue;
+        out.push({ lvl: used >= 90 ? 'danger' : 'warn', view: 'performance',
+          html: `<strong>${esc(a.label)}:</strong> ${esc(winLabel[w.window] || w.window)} at ${fmtPct(used)} used${w.reset ? ` · resets ${esc(fmtResetTime(w.reset))}` : ''}.` });
+      }
+    }
     const uq = Q.user_quota || {};
     if (uq.enabled) {
       const users = uq.users || [];
@@ -1876,7 +1891,25 @@
         + `<div class="bar-track"><div class="bar-fill" style="width:${pct.toFixed(1)}%"></div></div>`
         + `<div class="bar-value">${fmtNum(r)} / ${fmtNum(l)}${resetTxt}</div></div>`;
     }
+    // Subscription accounts: one block per Claude account behind the proxy,
+    // since each account has its own 5-hour and weekly windows.
+    const accts = (Q.accounts || []).filter(a => (a.rate_limits.unified || []).length);
+    if (accts.length) {
+      for (const a of accts) {
+        const who = a.users.length ? ` · ${a.users.slice(0, 4).map(esc).join(', ')}${a.users.length > 4 ? ` +${a.users.length - 4}` : ''}` : '';
+        const at = a.rate_limits.updated_at ? ` · ${fmtRelativeTime(a.rate_limits.updated_at)}` : '';
+        html += `<div class="acct-head"><strong>${esc(a.label)}</strong><span class="muted">${fmtCost(a.cost_usd)} this month${who}${at}</span></div>`;
+        html += unifiedBars(a.rate_limits);
+      }
+    } else {
+      html += unifiedBars(rl);
+    }
+    if (rl.retry_after) html += `<div class="alert danger" style="margin-top:12px"><span class="ic">!</span><span>Anthropic asked us to retry after <code>${esc(rl.retry_after)}</code> s</span></div>`;
+    container.innerHTML = html || '<div class="empty-inline">Waiting for the first <code>/v1/messages</code> response from Anthropic…</div>';
+  }
+  function unifiedBars(rl) {
     const winName = { '5h': '5-hour window', '7d': 'Weekly (all models)', '7d_opus': 'Weekly (Opus)', '7d_sonnet': 'Weekly (Sonnet)' };
+    let html = '';
     for (const w of rl.unified || []) {
       const used = Math.max(0, Math.min(100, Number(w.utilization) * 100));
       if (!Number.isFinite(used)) continue;
@@ -1886,9 +1919,8 @@
         + `<div class="bar-track"><div class="bar-fill" style="width:${used.toFixed(1)}%"></div></div>`
         + `<div class="bar-value">${fmtPct(used)} used${resetTxt}</div></div>`;
     }
-    if (rl.unified_status && rl.unified_status !== 'allowed') html += `<div class="alert warn" style="margin-top:12px"><span class="ic">!</span><span>Subscription limit status: <code>${esc(rl.unified_status)}</code></span></div>`;
-    if (rl.retry_after) html += `<div class="alert danger" style="margin-top:12px"><span class="ic">!</span><span>Anthropic asked us to retry after <code>${esc(rl.retry_after)}</code> s</span></div>`;
-    container.innerHTML = html || '<div class="empty-inline">Waiting for the first <code>/v1/messages</code> response from Anthropic…</div>';
+    if (rl.unified_status && rl.unified_status !== 'allowed') html += `<div class="alert warn" style="margin:8px 0"><span class="ic">!</span><span>Subscription limit status: <code>${esc(rl.unified_status)}</code></span></div>`;
+    return html;
   }
   function fmtResetTime(v) {
     const d = new Date(v);
@@ -1897,6 +1929,8 @@
     if (s <= 0) return 'now';
     if (s < 90) return `in ${Math.round(s)}s`;
     if (s < 5400) return `in ${Math.round(s / 60)}m`;
+    if (s < 172800) return `in ${Math.round(s / 3600)}h`;
+    if (s < 14 * 86400) return `in ${Math.round(s / 86400)}d`;
     return d.toLocaleString();
   }
 
@@ -2215,7 +2249,8 @@
       + (upErr ? ` · ${fmtCount.format(upErr)} upstream drops mid-stream` : '');
     $('stream-stalls-card').className = 'card s4' + ((sh.stalls || 0) === 0 ? '' : (sh.stall_rate || 0) >= 0.02 ? ' st-warn' : '');
     $('stream-ttfb').textContent = (sh.ttfb_ms_avg || 0) > 0 ? `${fmtCount.format(sh.ttfb_ms_avg)} ms` : '—';
-    $('stream-ttfb-meta').textContent = `avg · peak ${fmtCount.format(sh.ttfb_ms_max || 0)} ms`;
+    $('stream-ttfb-meta').textContent = `avg · peak ${fmtCount.format(sh.ttfb_ms_max || 0)} ms`
+      + (sh.proxy_overhead_ms_avg ? ` · proxy adds ${fmtCount.format(sh.proxy_overhead_ms_avg)} ms before forwarding` : '');
     $('stream-pool').textContent = fmtCount.format(sh.pool_waits || 0);
     const handshakes = (sh.new_connections || 0) > 0
       ? ` · ${fmtCount.format(sh.new_connections)} new connections, avg handshake ${fmtCount.format(sh.connect_ms_avg || 0)} ms`
@@ -2238,6 +2273,7 @@
     $('upstream-kv').innerHTML = [
       ['Max connections', cfg.max_connections, 'UPSTREAM_MAX_CONNECTIONS'],
       ['Keep-alive connections', cfg.max_keepalive, 'UPSTREAM_MAX_KEEPALIVE'],
+      ['HTTP/2', cfg.http2 == null ? null : (cfg.http2 ? 'on' : 'off'), 'UPSTREAM_HTTP2'],
       ['Pool timeout', cfg.pool_timeout != null ? cfg.pool_timeout + ' s' : null, 'UPSTREAM_POOL_TIMEOUT'],
       ['Read timeout', cfg.read_timeout != null ? cfg.read_timeout + ' s' : null, 'UPSTREAM_READ_TIMEOUT'],
       ['Stall threshold', cfg.stall_seconds != null ? cfg.stall_seconds + ' s' : null, 'UPSTREAM_STALL_SECONDS'],
@@ -2701,6 +2737,16 @@
   function renderInsights() {
     const c = C;
     if (!c) return;
+    const t = c.cache_ttl;
+    const turns = t ? Object.values(t.gaps || {}).reduce((a, b) => a + b, 0) : 0;
+    $('ttl-line').hidden = !t || !turns;
+    if (t && turns) {
+      const who = t.requests_proxy_1h ? 'proxy (CACHE_EXTEND_TTL)' : t.requests_client_1h ? 'Claude Code' : '—';
+      $('ttl-line').innerHTML = `<strong>Cache TTL 1h this period:</strong> premium ${fmtCost(t.premium_usd)} · saved ${fmtCost(t.saved_usd)}`
+        + ` · <span class="${t.net_usd < 0 ? 'neg' : 'pos'}">net ${t.net_usd < 0 ? '−' : '+'}${fmtCost(Math.abs(t.net_usd))}</span>`
+        + ` · pauses of 5–60 min: ${fmtPct((t.share_5m_to_1h || 0) * 100)} of ${fmtCount.format(turns)} turns · 1h set by ${who}`
+        + (t.forced_5m ? ` · <strong>CACHE_FORCE_TTL=5m on</strong> (${fmtCount.format(t.requests_forced_5m)} requests rewritten; re-writes after pauses cost ${fmtCost(t.rewrite_usd)})` : '');
+    }
     const recs = c.recommendations || [];
     $('recs').innerHTML = recs.length ? recs.map(r => `<article class="rec ${esc(r.kind)}">
         <div class="ic" aria-hidden="true">${REC_ICON[r.kind] || '•'}</div>
@@ -2824,7 +2870,7 @@
     const r2 = v => '$' + Number(v).toFixed(v < 1 ? 3 : 2);
     document.querySelector('#price-table tbody').innerHTML = (P.models || []).map(m => `<tr>
         <td><strong class="mono">${esc(m.model)}</strong>${inUse.has(m.model) ? ' <span class="badge ok">in use</span>' : ''}</td>
-        <td class="num">${r2(m.input)}</td><td class="num">${r2(m.output)}</td>
+        <td class="num">${r2(m.input)}${m.long_context ? `<div class="muted" style="font-size:11px">${r2(m.long_context.input)} &gt;${fmtNum(m.long_context.above_prompt_tokens)}</div>` : ''}</td><td class="num">${r2(m.output)}${m.long_context ? `<div class="muted" style="font-size:11px">${r2(m.long_context.output)} &gt;${fmtNum(m.long_context.above_prompt_tokens)}</div>` : ''}</td>
         <td class="num">${r2(m.cache_write_5m)}</td><td class="num">${r2(m.cache_write_1h)}</td><td class="num">${r2(m.cache_read)}</td>
         <td>${(m.scheduled || []).map(x => `<span class="badge warn">${esc(x.effective_from)}: ${r2(x.input)} / ${r2(x.output)}</span>`).join('') || '<span class="muted">—</span>'}</td></tr>`).join('')
       + unpriced.map(id => `<tr><td><strong class="mono">${esc(id)}</strong> <span class="badge warn">no price — fallback rate</span></td><td colspan="6" class="muted">Seen ${fmtCount.format(P.unpriced_models[id])}× — add it to <code>data/pricing.json</code></td></tr>`).join('');

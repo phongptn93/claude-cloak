@@ -38,7 +38,7 @@ The proxy captures the device fingerprint (23 headers) from the first request, s
 | **Body Sanitization** | Strips 38 device-identifying fields + 10 nested objects from JSON request bodies |
 | **IP Header Stripping** | Removes 15 IP-leaking headers (X-Forwarded-For, Via, CF-Connecting-IP, etc.) |
 | **Cookie Isolation** | Strips outgoing `Cookie` + incoming `Set-Cookie` to prevent cross-device tracking |
-| **Timing Jitter** | Random delay (10-150ms) per request to mask multi-device timing patterns |
+| **Timing Jitter** | Random delay (5-40ms) per request to mask multi-device timing patterns |
 | **Response Sanitization** | Strips 11 tracking headers from responses (Server-Timing, X-Trace-Id, NEL, etc.) |
 | **Consistent IDs** | HMAC-SHA256 based IDs — all devices produce identical derived values |
 | **Error Masking** | Internal errors never leak proxy details upstream |
@@ -179,12 +179,12 @@ X-Ray-Trace-Id, NEL, Report-To, Reporting-Endpoints
 
 ### Layer 7: Timing Jitter
 
-Adds a random async delay (default 10-150ms) to each request to prevent timing-based detection of multi-device usage. Configurable via `.env`:
+Adds a random async delay (default 5-40ms) to each request to prevent timing-based detection of multi-device usage. Configurable via `.env`:
 
 ```env
 TIMING_JITTER=true
-TIMING_JITTER_MIN_MS=10
-TIMING_JITTER_MAX_MS=150
+TIMING_JITTER_MIN_MS=5
+TIMING_JITTER_MAX_MS=40
 ```
 
 ### Layer 8: Error Masking
@@ -407,6 +407,12 @@ The four parts of the **Activity** view:
 - **Breakdown** — grouped by **day, ISO week, user or group**. Expand any row to see its users or days.
 
 **Groups.** Set `USER_GROUPS=phong:backend,huy:backend,linh:frontend` to add group filters, group rows in the heatmap and breakdown, and group-level comparison and advice. Without it, everything works per user.
+
+**Cache TTL.** Insights shows whether the 1h prompt-cache TTL pays for itself: the 1h-write premium against the reads after 5–60 minute pauses it saved, and who set it. When it loses money and Claude Code itself asks for 1h, `CACHE_FORCE_TTL=5m` makes the proxy rewrite every 1h breakpoint to 5 minutes; the panel then prices the re-writes it causes, so you can switch back if they outweigh the premium.
+
+**Alerts.** Set `ALERT_WEBHOOK_URL` to a Slack incoming webhook, a Microsoft Teams Workflows webhook with `ALERT_WEBHOOK_FORMAT=teams` (in Teams: channel → Workflows → "Post to a channel when a webhook request is received"; the old Office 365 connector URLs were retired in May 2026), or any JSON endpoint with `ALERT_WEBHOOK_FORMAT=json`, to be told when an account passes 90% of its 5-hour or weekly window (`ALERT_ACCOUNT_THRESHOLD`), when a user reaches 80% / 100% of their cap, and when streams stall.
+
+**Several Claude accounts.** When clients log in with different Claude subscriptions, the proxy tells them apart by the account UUID Claude Code puts in each request's `metadata.user_id` (falling back to the `anthropic-organization-id` response header). Each account gets its own 5-hour and weekly limit bars, its spend this month and the users routed through it, under `accounts` in `/quota`. Accounts show as the first 8 characters of their id; name them with `ACCOUNT_LABELS=3f2a9c1d:team-max-1,b71e0f44:team-max-2`. Only the UUID is stored, never a token.
 
 **Alerts** fire for:
 - a `retry-after` from Anthropic

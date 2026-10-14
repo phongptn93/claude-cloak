@@ -14,7 +14,8 @@ scheduled ahead of time. ``PRICING`` always holds today's rates with
 ``PRICING_<KEY>_<TIER>`` env overrides applied on top.
 
 Tiers: input, output, cache_write_5m, cache_write_1h, cache_read — USD per
-million tokens. Model key is matched by substring against the response
+million tokens. A rate may add ``long_context`` — ``above_prompt_tokens`` plus
+the same five tiers — for models priced higher on long prompts (Haiku 5.5). Model key is matched by substring against the response
 ``model`` field; longer keys win, so ``opus-5.5`` is picked over ``opus-5``.
 """
 
@@ -37,6 +38,16 @@ _KEY_RE = re.compile(r"^[a-z]+-[0-9][0-9.]*$|^[a-z]+$")
 
 class PricingError(ValueError):
     """A pricing document failed validation; the current table stays in use."""
+
+
+def _parse_tiers(key: str, rate: dict) -> dict[str, float]:
+    out = {}
+    for tier in TIERS:
+        v = rate.get(tier)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 <= v < 10_000:
+            raise PricingError(f"{key}: {tier} must be a non-negative number")
+        out[tier] = float(v)
+    return out
 
 
 def parse_pricing(doc: object) -> dict[str, list[dict]]:
@@ -68,12 +79,18 @@ def parse_pricing(doc: object) -> dict[str, list[dict]]:
             if eff in seen:
                 raise PricingError(f"{key}: two rates share effective_from {eff or '(none)'}")
             seen.add(eff)
-            row = {"effective_from": eff}
-            for tier in TIERS:
-                v = rate.get(tier)
-                if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 <= v < 10_000:
-                    raise PricingError(f"{key}: {tier} must be a non-negative number")
-                row[tier] = float(v)
+            row = {"effective_from": eff, **_parse_tiers(key, rate)}
+            long_ctx = rate.get("long_context")
+            if long_ctx is not None:
+                if not isinstance(long_ctx, dict):
+                    raise PricingError(f"{key}: long_context must be an object")
+                above = long_ctx.get("above_prompt_tokens")
+                if isinstance(above, bool) or not isinstance(above, int) or above <= 0:
+                    raise PricingError(f"{key}: long_context.above_prompt_tokens must be > 0")
+                row["long_context"] = {
+                    "above_prompt_tokens": above,
+                    **_parse_tiers(f"{key}.long_context", long_ctx),
+                }
             clean.append(row)
         table[key] = sorted(clean, key=lambda r: r["effective_from"])
     return table
@@ -87,7 +104,10 @@ def rates_on(table: dict[str, list[dict]], key: str, day: str) -> dict[str, floa
             current = rate
     if current is None:
         return None
-    return {tier: current[tier] for tier in TIERS}
+    rates = {tier: current[tier] for tier in TIERS}
+    if "long_context" in current:
+        rates["long_context"] = dict(current["long_context"])
+    return rates
 
 
 def _load_bundled() -> tuple[dict[str, list[dict]], dict]:
@@ -213,7 +233,7 @@ def _normalize_model_key(model: str | None) -> str:
     return "unknown"
 
 
-def rates_for(model_key: str) -> dict[str, float]:
+def rates_for(model_key: str) -> dict:
     """Today's rates for a PRICING key, or the fallback for an unknown model."""
     _ensure_today()
     return PRICING.get(model_key) or PRICING_FALLBACK
@@ -229,6 +249,15 @@ def cost_of(rates: dict[str, float], tokens: dict) -> float:
     output_t = tokens.get("output_tokens", 0) or 0
     cache_read = tokens.get("cache_read_input_tokens", 0) or 0
     cache_write_total = tokens.get("cache_creation_input_tokens", 0) or 0
+
+    # Some models (Haiku 5.5) switch to a second rate card when the prompt —
+    # fresh input plus cache reads and writes — is longer than a threshold.
+    long_ctx = rates.get("long_context")
+    if (
+        isinstance(long_ctx, dict)
+        and input_t + cache_read + cache_write_total > long_ctx["above_prompt_tokens"]
+    ):
+        rates = long_ctx
 
     cache_write_5m = 0
     cache_write_1h = 0

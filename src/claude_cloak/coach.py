@@ -49,13 +49,17 @@ def _coach_record_request(
     """
     if not settings.COACH_ENABLED or "v1/messages" not in path:
         return
-    if not content_type or "json" not in content_type.lower():
-        return
     try:
-        data = json.loads(body)
+        data = json.loads(body) if content_type and "json" in content_type.lower() else None
     except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError):
         return
-    if not isinstance(data, dict):
+    if isinstance(data, dict):
+        _coach_record_data(data, path, user_label)
+
+
+def _coach_record_data(data: dict, path: str, user_label: str | None = None) -> None:
+    """Same as _coach_record_request, on a body the proxy already parsed."""
+    if not settings.COACH_ENABLED or "v1/messages" not in path:
         return
     messages = data.get("messages")
     if not isinstance(messages, list) or not messages:

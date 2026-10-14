@@ -89,6 +89,54 @@ Notable changes to Claude Cloak. Format follows
   - Server mode now boots with an empty `ALLOWED_IPS` when keys are enabled and
     at least one is active, instead of aborting.
 
+### Added (cost & operations)
+
+- **Is the 1h cache TTL paying off?** Per (session, model) the proxy now
+  records the pause before each turn and prices both sides: the 1h-write
+  premium (2× vs 1.25× input) against the cache reads after 5–60 minute pauses
+  that a 5m entry would have re-written. Shown in Insights with who set 1h
+  (Claude Code or the proxy's `CACHE_EXTEND_TTL`), plus a recommendation when
+  it costs more than it saves. On real traffic the 1h premium was ~$1,776/month.
+- **`CACHE_FORCE_TTL=5m`** (opt-in, also in `/config`): rewrites every 1h
+  cache TTL in a request to the default 5 minutes, including the 1h Claude
+  Code sets itself — the token saver could only raise TTLs. While on, the
+  proxy prices the re-writes after 5–60 minute pauses, so both settings can be
+  compared on the same traffic.
+- **Webhook alerts** (`ALERT_WEBHOOK_URL`, Slack, Microsoft Teams Workflows or JSON): an account past
+  `ALERT_ACCOUNT_THRESHOLD` (0.9) of its 5h/weekly window, a user at 80% /
+  100% of their cap, and stream stalls. Each fires once per window / period
+  or per `ALERT_COOLDOWN_MINUTES`.
+- **`UPSTREAM_HTTP2`** (opt-in): multiplex upstream requests over HTTP/2.
+
+### Changed (latency & scoring)
+
+- Request bodies are parsed **once** and re-serialised at most once (they were
+  parsed up to 4×): ~10.6 → ~3.5 ms of event-loop time on a 200K-token body.
+- Timing jitter default **10–150 ms → 5–40 ms** (mean ~80 → ~22 ms per
+  request; an agent task makes dozens). An existing `.env` that sets
+  `TIMING_JITTER_MAX_MS` keeps its value.
+- Coach **cache score is relative to the team**, on the miss rate: hit rates
+  cluster at 95–98%, so the old "85% = full marks" gave every user 100.
+- `/config` accepts `UPSTREAM_MAX_CONNECTIONS` up to 10000 (was 1000).
+
+### Added (accounts)
+
+- **Per-account rate limits and spend** for proxies shared by several Claude
+  subscriptions. The account comes from Claude Code's `metadata.user_id`
+  (account UUID), or the `anthropic-organization-id` response header. Before,
+  the Rate limits panel showed whichever account answered last.
+  `ACCOUNT_LABELS` names accounts; overview alerts fire at 75% / 90% of a
+  window.
+
+### Fixed (pricing)
+
+- **Claude Haiku 5.5 was costed at the Opus fallback rate** ($5/$25, ~50× its
+  price) because it had no entry; Claude Code uses it for background calls.
+  Added it with its two rate cards ($0.10/$0.50 up to a 100K-token prompt,
+  $0.50/$2.50 above) via a new optional `long_context` field in
+  `pricing.json`. Added Claude Sonnet 5.5 (same rates as Sonnet 5, now its
+  own row). Insights' "everyday model" is now Sonnet 5.5.
+
 ### Added (context size)
 
 - **Context per request** in Coaching → Compare users: prompt tokens sent per

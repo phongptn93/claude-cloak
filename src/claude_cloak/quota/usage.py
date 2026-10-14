@@ -8,6 +8,8 @@ from .. import settings, state
 from ..loki import _loki_enqueue
 from ..pricing import _compute_cost, _normalize_model_key
 from ..terminal import CYAN, DIM, RESET, log
+from .accounts import record_account_rate_limits, record_account_usage
+from .cache_ttl import record_cache_ttl_usage
 from .persist import (
     _check_monthly_reset,
     _evict_by_day_user_to_match_by_day,
@@ -17,8 +19,12 @@ from .persist import (
 from .users import record_user_usage
 
 
-def _record_rate_limits(headers) -> None:
-    """Capture anthropic-ratelimit-* and retry-after headers from a response."""
+def _record_rate_limits(headers, account: str | None = None) -> None:
+    """Capture anthropic-ratelimit-* and retry-after headers from a response.
+
+    Kept both as the latest snapshot and per account: with several Claude
+    accounts behind one proxy the global snapshot is whichever answered last.
+    """
     if not settings.QUOTA_TRACKING_ENABLED:
         return
     latest = {}
@@ -31,6 +37,7 @@ def _record_rate_limits(headers) -> None:
     if latest:
         state.quota_stats["rate_limits"] = latest
         state.quota_stats["rate_limits_updated_at"] = datetime.now().isoformat(timespec="seconds")
+        record_account_rate_limits(account, latest)
 
 
 def _record_day_session(
@@ -86,6 +93,7 @@ def _record_usage(
     session_id: str | None = None,
     duration_ms: int | None = None,
     user_label: str | None = None,
+    account: str | None = None,
 ) -> None:
     """Accumulate a single response's usage into quota_stats and log it.
 
@@ -210,6 +218,8 @@ def _record_usage(
 
     if user_label:
         record_user_usage(user_label, usage, cost, model_key=model_key)
+    record_account_usage(account, cost, user_label)
+    record_cache_ttl_usage(session_id, model_key, usage)
 
     # by_day_user — same per-day aggregation as by_day but split per user.
     if user_label:

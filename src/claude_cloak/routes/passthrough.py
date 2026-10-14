@@ -13,13 +13,16 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from .. import settings, state
-from ..coach import _coach_record_request, _coach_record_response
+from ..alerts import check_stall
+from ..coach import _coach_record_data, _coach_record_response
 from ..echo import echo_delay, echo_response, echo_sse_events, is_streaming_request
 from ..identity import capture_identity_from_request, warn_unknown_headers
 from ..loki import _loki_enqueue
+from ..quota.accounts import account_from_data, resolve_account
+from ..quota.cache_ttl import force_short_ttl, record_client_cache_ttl
 from ..quota.tap import UsageTap
 from ..quota.usage import _record_rate_limits, _record_usage
-from ..sanitize import is_blocked_path, sanitize_body
+from ..sanitize import dump_json_body, is_blocked_path, parse_json_body, sanitize_data
 from ..terminal import (
     BG_GREEN,
     BG_RED,
@@ -39,7 +42,7 @@ from ..tokens import (
     _looks_like_cache_ttl_beta_error,
     disable_cache_ttl_runtime,
     inject_cache_ttl_beta,
-    optimize_tokens,
+    optimize_data,
 )
 from ..upstream import (
     SendTimer,
@@ -84,6 +87,7 @@ async def proxy(path: str, request: Request):
     warn_unknown_headers(request)
 
     # ── Request timing jitter ──
+    jitter_ms = 0
     if settings.TIMING_JITTER_ENABLED:
         jitter_ms = random.randint(settings.TIMING_JITTER_MIN_MS, settings.TIMING_JITTER_MAX_MS)
         await _async_sleep(jitter_ms / 1000.0)
@@ -91,24 +95,48 @@ async def proxy(path: str, request: Request):
     target_url = f"{settings.ANTHROPIC_BASE_URL}/{path}"
     headers = build_request_headers(request)
     body = await request.body()
+    # Proxy-side work starts once the body is in; the client's upload is not ours.
+    processing_started = time.monotonic()
 
-    # ── Body sanitization ──
     content_type = request.headers.get("content-type", "")
-    body = sanitize_body(body, content_type)
+    # Parsed once; every step below works on the same dict and the body is
+    # re-serialised at most once, only when a step changed it.
+    data = parse_json_body(body, content_type)
+    request_account = None
+    if data is not None:
+        # Which Claude account sent this (several may share the proxy).
+        request_account = account_from_data(data, path)
+        # Did the client itself ask for the 1h cache TTL? (before the saver)
+        record_client_cache_ttl(data, path)
 
-    # ── Coaching: tool-result signals (counts only, never content) ──
-    if settings.COACH_ENABLED:
-        with contextlib.suppress(Exception):
-            _coach_record_request(
-                body, content_type, path, getattr(request.state, "user_label", None)
-            )
+        # ── Body sanitization ──
+        changed = sanitize_data(data)
 
-    # ── Token saver ──
+        # ── Coaching: tool-result signals (counts only, never content) ──
+        if settings.COACH_ENABLED:
+            with contextlib.suppress(Exception):
+                _coach_record_data(data, path, getattr(request.state, "user_label", None))
+
+        # ── Token saver ──
+        if settings.TOKEN_SAVER_ENABLED and optimize_data(data, path):
+            changed = True
+
+        # ── Cache TTL override (CACHE_FORCE_TTL=5m) ──
+        if force_short_ttl(data, path):
+            changed = True
+
+        if changed:
+            body = dump_json_body(data)
     if settings.TOKEN_SAVER_ENABLED:
-        body = optimize_tokens(body, content_type, path)
         inject_cache_ttl_beta(headers)
 
     start_time = time.monotonic()
+    # TTFB below starts here, so it leaves out what the proxy itself added
+    # before forwarding: jitter and body processing. Count that separately.
+    state.stream_stats["proxy_overhead_ms_total"] += jitter_ms + int(
+        (start_time - processing_started) * 1000
+    )
+    state.stream_stats["proxy_overhead_samples"] += 1
 
     # Request log
     log(
@@ -154,6 +182,7 @@ async def proxy(path: str, request: Request):
                     usage_tap.session_id,
                     duration_ms=int((time.monotonic() - start_time) * 1000),
                     user_label=usage_tap.user_label,
+                    account=request_account,
                 )
             if settings.COACH_ENABLED and usage_tap.is_messages:
                 with contextlib.suppress(Exception):
@@ -219,7 +248,8 @@ async def proxy(path: str, request: Request):
         status = response.status_code
 
         # Capture anthropic-ratelimit-* headers regardless of status.
-        _record_rate_limits(response.headers)
+        account = resolve_account(request_account, response.headers)
+        _record_rate_limits(response.headers, account)
 
         # Read the ORIGINAL session id from the incoming request (before the
         # proxy rewrites the header to the locked identity). Each device's
@@ -313,6 +343,7 @@ async def proxy(path: str, request: Request):
                     usage_tap.session_id,
                     duration_ms=total_ms,
                     user_label=usage_tap.user_label,
+                    account=account,
                 )
             if settings.COACH_ENABLED and usage_tap.is_messages:
                 with contextlib.suppress(Exception):
@@ -353,6 +384,7 @@ async def proxy(path: str, request: Request):
                         # leaving the client waiting on a stream that will
                         # never produce another byte.
                         state.stream_stats["stalls"] += 1
+                        check_stall(req_id)
                         state.stream_stats["last_stall_at"] = datetime.now().isoformat(
                             timespec="seconds"
                         )
@@ -427,6 +459,7 @@ async def proxy(path: str, request: Request):
                             usage_tap.session_id,
                             duration_ms=total_ms,
                             user_label=usage_tap.user_label,
+                            account=account,
                         )
                     if settings.COACH_ENABLED and usage_tap.is_messages:
                         _coach_record_response(*usage_tap.coach_signals(), usage_tap.user_label)

@@ -10,8 +10,8 @@ import pytest
 from claude_cloak import settings, state, tokens
 from claude_cloak.app import create_app
 from claude_cloak.coach import _compute_coach_view
+from claude_cloak.quota.accounts import unified_windows as _unified_windows
 from claude_cloak.quota.activity import _empty, _finish
-from claude_cloak.routes.quota import _unified_windows
 
 
 @pytest.fixture
@@ -124,3 +124,87 @@ def test_oversized_context_is_flagged_with_a_saving():
     assert ctx["heavy"] == 500_000
     flagged = [r["target"] for r in view["recommendations"] if r["kind"] == "context"]
     assert flagged == ["heavy"]
+
+
+# --- several Claude accounts behind one proxy -------------------------------
+
+ACCT_A = "3f2a9c1d-1111-4222-8333-444455556666"
+ACCT_B = "b71e0f44-aaaa-4bbb-8ccc-ddddeeeeffff"
+
+
+def test_account_is_read_from_claude_code_metadata():
+    from claude_cloak.quota.accounts import account_from_body
+
+    legacy = json.dumps(
+        {"metadata": {"user_id": f"user_abc123_account_{ACCT_A}_session_{ACCT_B}"}}
+    ).encode()
+    assert account_from_body(legacy, "application/json", "v1/messages") == ACCT_A
+    newer = json.dumps(
+        {"metadata": {"user_id": json.dumps({"device_id": "x", "account_uuid": ACCT_B})}}
+    ).encode()
+    assert account_from_body(newer, "application/json", "v1/messages") == ACCT_B
+    assert account_from_body(b'{"messages":[]}', "application/json", "v1/messages") is None
+
+
+async def test_rate_limits_and_spend_are_kept_per_account(client, monkeypatch):
+    monkeypatch.setattr(settings, "ACCOUNT_LABELS", {"3f2a9c1d": "max-1"})
+    utilization = {ACCT_A: "0.10", ACCT_B: "0.85"}
+
+    def answer(req):
+        acct = ACCT_A if ACCT_A.encode() in req.content else ACCT_B
+        return httpx.Response(
+            200,
+            headers={
+                "content-type": "application/json",
+                "anthropic-ratelimit-unified-5h-utilization": utilization[acct],
+                "anthropic-ratelimit-unified-5h-reset": "1760000000",
+            },
+            json={
+                "model": "claude-haiku-5-5",
+                "usage": {"input_tokens": 1000, "output_tokens": 100},
+                "content": [],
+            },
+        )
+
+    upstream = httpx.AsyncClient(transport=httpx.MockTransport(answer))
+    monkeypatch.setattr(state.runtime, "http_client", upstream)
+    async with client, upstream:
+        for acct in (ACCT_A, ACCT_B, ACCT_A):
+            body = {
+                "model": "x",
+                "messages": [],
+                "metadata": {"user_id": f"user_h_account_{acct}_session_s"},
+            }
+            r = await client.post("/v1/messages", json=body)
+            assert r.status_code == 200
+        accounts = {a["label"]: a for a in (await client.get("/quota")).json()["accounts"]}
+
+    assert set(accounts) == {"max-1", "b71e0f44"}
+    assert accounts["max-1"]["requests"] == 2
+    assert accounts["max-1"]["rate_limits"]["unified"][0]["utilization"] == pytest.approx(0.10)
+    assert accounts["b71e0f44"]["rate_limits"]["unified"][0]["utilization"] == pytest.approx(0.85)
+
+
+# --- pricing ------------------------------------------------------------------
+
+
+def test_new_models_are_priced_not_costed_at_the_fallback():
+    from claude_cloak.pricing import _compute_cost, _normalize_model_key
+
+    assert _normalize_model_key("claude-haiku-5-5") == "haiku-5.5"
+    assert _normalize_model_key("claude-sonnet-5-5") == "sonnet-5.5"
+    short = {"input_tokens": 50_000, "output_tokens": 1_000}
+    assert _compute_cost("haiku-5.5", short) == pytest.approx((50_000 * 0.10 + 1_000 * 0.50) / 1e6)
+    # Over 100K prompt tokens (cache reads included) the long-context card applies.
+    long = {"input_tokens": 1_000, "cache_read_input_tokens": 150_000, "output_tokens": 1_000}
+    expected = (1_000 * 0.50 + 150_000 * 0.05 + 1_000 * 2.50) / 1e6
+    assert _compute_cost("haiku-5.5", long) == pytest.approx(expected)
+
+
+def test_long_context_rates_are_validated():
+    from claude_cloak.pricing import PricingError, parse_pricing
+
+    tiers = {"input": 1, "output": 2, "cache_write_5m": 1, "cache_write_1h": 2, "cache_read": 0.1}
+    bad = {"schema": 1, "models": {"haiku-9": [{**tiers, "long_context": {**tiers}}]}}
+    with pytest.raises(PricingError):
+        parse_pricing(bad)

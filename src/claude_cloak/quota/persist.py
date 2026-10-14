@@ -9,6 +9,8 @@ from datetime import datetime
 
 from .. import settings, state
 from ..terminal import RESET, YELLOW, log
+from .accounts import reset_account_usage
+from .cache_ttl import empty_stats as empty_ttl_stats
 
 
 def _load_quota_stats() -> bool:
@@ -104,6 +106,17 @@ def _load_quota_stats() -> bool:
                 if cleaned:
                     state.quota_stats["by_day_session"][date_str] = cleaned
 
+    # Optional, schema-compatible: Claude accounts seen behind this proxy.
+    acc = data.get("accounts")
+    if isinstance(acc, dict):
+        for key, bucket in acc.items():
+            if isinstance(bucket, dict) and "account" in bucket:
+                state.quota_stats["accounts"][key] = bucket
+
+    ttl = data.get("cache_ttl")
+    if isinstance(ttl, dict) and isinstance(ttl.get("gaps"), dict):
+        state.quota_stats["cache_ttl"] = ttl
+
     _check_monthly_reset()
     return True
 
@@ -137,6 +150,8 @@ def _save_quota_stats(force: bool = False) -> None:
         "by_day_session": state.quota_stats["by_day_session"],
         "by_user": state.quota_stats["by_user"],
         "period_month": state.quota_stats["period_month"],
+        "accounts": state.quota_stats["accounts"],
+        "cache_ttl": state.quota_stats["cache_ttl"],
     }
     tmp_path = settings.QUOTA_PERSIST_PATH + ".tmp"
     try:
@@ -173,6 +188,8 @@ def _check_monthly_reset() -> None:
         state.quota_stats["last_request_at"] = None
         state.quota_stats["by_model"] = {}
         state.quota_stats["by_session"] = {}
+        reset_account_usage()
+        state.quota_stats["cache_ttl"] = empty_ttl_stats()
         # by_day kept intentionally — dashboard trend chart spans multiple months
         _save_quota_stats(force=True)
     state.quota_stats["period_month"] = current_month

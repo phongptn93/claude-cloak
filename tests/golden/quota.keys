@@ -1,3 +1,4 @@
+.accounts[]
 .by_day[]
 .by_model[]
 .by_session[]
@@ -25,6 +26,7 @@
 .rate_limits.updated_at:NoneType
 .stream.client_disconnects:int
 .stream.config.connect_retries:int
+.stream.config.http2:bool
 .stream.config.max_connections:int
 .stream.config.max_keepalive:int
 .stream.config.pool_timeout:float
@@ -36,6 +38,7 @@
 .stream.new_connections:int
 .stream.pool_wait_ms_avg:int
 .stream.pool_waits:int
+.stream.proxy_overhead_ms_avg:int
 .stream.stall_rate:float
 .stream.stalls:int
 .stream.streams_completed:int

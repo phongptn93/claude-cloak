@@ -249,6 +249,15 @@ for _pair in env_str("USER_GROUPS").split(","):
     if _label.strip() and _group.strip():
         USER_GROUPS[_label.strip()] = _group.strip()
 
+# Names for Claude accounts when several subscriptions share this proxy, keyed
+# by a prefix of the account UUID (or organization id) shown on the dashboard,
+# e.g. ACCOUNT_LABELS=3f2a9c1d:team-max-1,b71e0f44:team-max-2
+ACCOUNT_LABELS: dict[str, str] = {}
+for _pair in env_str("ACCOUNT_LABELS").split(","):
+    _prefix, _, _name = _pair.strip().partition(":")
+    if _prefix.strip() and _name.strip():
+        ACCOUNT_LABELS[_prefix.strip()] = _name.strip()
+
 # Allowed character set for URL-prefix user labels — restricted so a label
 # cannot inject path traversal or query strings into the upstream URL.
 USER_LABEL_PATTERN = env_str("USER_LABEL_PATTERN", r"[A-Za-z0-9._-]{1,64}")
@@ -269,8 +278,11 @@ if not SESSION_SECRET:
 # REQUEST TIMING JITTER
 # ============================================================
 TIMING_JITTER_ENABLED = env_bool("TIMING_JITTER", True)
-TIMING_JITTER_MIN_MS = env_int("TIMING_JITTER_MIN_MS", 10)
-TIMING_JITTER_MAX_MS = env_int("TIMING_JITTER_MAX_MS", 150)
+# Every request waits this long before it is forwarded, and an agent turn is
+# dozens of requests: 10-150 ms (the old default, ~80 ms mean) added ~2.4 s
+# to a 30-call task. 5-40 ms still breaks up identical timing.
+TIMING_JITTER_MIN_MS = env_int("TIMING_JITTER_MIN_MS", 5)
+TIMING_JITTER_MAX_MS = env_int("TIMING_JITTER_MAX_MS", 40)
 
 # ============================================================
 # TOKEN SAVER
@@ -286,6 +298,15 @@ TOOL_RESULT_MAX_BYTES = env_int("TOOL_RESULT_MAX_BYTES", 8000)
 TOOL_RESULT_HEAD_BYTES = env_int("TOOL_RESULT_HEAD_BYTES", 4000)
 TOOL_RESULT_TAIL_BYTES = env_int("TOOL_RESULT_TAIL_BYTES", 2000)
 TOOL_RESULT_KEEP_RECENT = env_int("TOOL_RESULT_KEEP_RECENT", 2)
+
+# "5m" rewrites every 1h cache TTL in a request back to the default 5 minutes,
+# including the 1h that Claude Code sets itself (CACHE_EXTEND_TTL only ever
+# raises it). Worth it when Insights shows the 1h premium exceeding what it
+# saves — i.e. users rarely pause 5-60 minutes mid-session. "off" leaves the
+# client's choice alone.
+CACHE_FORCE_TTL = env_str("CACHE_FORCE_TTL", "off").lower()
+if CACHE_FORCE_TTL not in ("off", "5m"):
+    CACHE_FORCE_TTL = "off"
 
 CACHE_TTL_BETA = env_str("CACHE_TTL_BETA", "extended-cache-ttl-2025-04-11")
 CACHE_TTL_LONG = env_str("CACHE_TTL_LONG", "1h")
@@ -328,6 +349,10 @@ UPSTREAM_KEEPALIVE_EXPIRY = env_float("UPSTREAM_KEEPALIVE_EXPIRY", 60)
 UPSTREAM_CONNECT_TIMEOUT = env_float("UPSTREAM_CONNECT_TIMEOUT", 10)
 UPSTREAM_READ_TIMEOUT = env_float("UPSTREAM_READ_TIMEOUT", 300)
 UPSTREAM_POOL_TIMEOUT = env_float("UPSTREAM_POOL_TIMEOUT", 30)
+# Multiplex upstream requests over HTTP/2: concurrent streams share a few TLS
+# connections instead of opening one each. Off by default; turn on when the
+# Performance tab shows a high count of new connections.
+UPSTREAM_HTTP2 = env_bool("UPSTREAM_HTTP2", False)
 # Fail a stream that receives no bytes for this long; 0 disables the watchdog.
 UPSTREAM_STALL_SECONDS = env_float("UPSTREAM_STALL_SECONDS", 120)
 # Retry a transport failure only while no byte has been forwarded yet.
@@ -336,6 +361,16 @@ UPSTREAM_RETRY_BACKOFF_SECONDS = env_float("UPSTREAM_RETRY_BACKOFF_SECONDS", 0.2
 # Pool contention (time queued for a free connection slot) is only worth
 # reporting past this wait.
 UPSTREAM_POOL_WAIT_WARN_MS = env_float("UPSTREAM_POOL_WAIT_WARN_MS", 1000)
+
+# Alerts to a webhook: Slack incoming-webhook URL (format "slack", the
+# default), a Microsoft Teams Workflows webhook URL (format "teams"), or any
+# endpoint taking JSON (format "json"). Empty = off.
+ALERT_WEBHOOK_URL = env_str("ALERT_WEBHOOK_URL")
+ALERT_WEBHOOK_FORMAT = env_str("ALERT_WEBHOOK_FORMAT", "slack").lower()
+# Fraction of a subscription window (5h / weekly) that triggers an alert.
+ALERT_ACCOUNT_THRESHOLD = env_float("ALERT_ACCOUNT_THRESHOLD", 0.9)
+# Minimum gap between repeated alerts of a recurring kind (stalls).
+ALERT_COOLDOWN_MINUTES = env_float("ALERT_COOLDOWN_MINUTES", 60)
 
 # Telemetry client (Loki pushes) — deliberately a tiny separate pool so a slow
 # log endpoint cannot starve API traffic.
