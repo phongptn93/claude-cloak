@@ -29,7 +29,11 @@ def optimize_data(data: dict, path: str) -> bool:
     skipped_full = 0
     truncated = removed_chars = 0
 
-    if settings.CACHE_EXTEND_TTL and not state.runtime.cache_ttl_runtime_disabled:
+    if (
+        settings.CACHE_EXTEND_TTL
+        and settings.CACHE_FORCE_TTL != "5m"
+        and not state.runtime.cache_ttl_runtime_disabled
+    ):
         breakpoints, skipped_full = _apply_cache_breakpoints(data)
     if settings.TOOL_RESULT_TRUNCATE:
         truncated, removed_chars = _truncate_tool_results(data)
@@ -208,6 +212,8 @@ def _truncate_tool_results(data: dict) -> tuple[int, int]:
 def inject_cache_ttl_beta(headers: dict[str, str]) -> None:
     """Append the extended-cache-ttl beta to anthropic-beta header (if not present)."""
     if not (settings.TOKEN_SAVER_ENABLED and settings.CACHE_EXTEND_TTL):
+        return
+    if settings.CACHE_FORCE_TTL == "5m":
         return
     if state.runtime.cache_ttl_runtime_disabled:
         return

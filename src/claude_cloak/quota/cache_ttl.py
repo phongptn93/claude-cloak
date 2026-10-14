@@ -9,6 +9,12 @@ read at the cache-read rate. So for every response this tracks:
 - saved:   cache-read tokens on a turn that followed a 5-60 minute pause in
            the same session and model, x (5m write rate - cache-read rate)
 
+With CACHE_FORCE_TTL=5m the proxy rewrites every 1h cache_control back to
+the default 5m, whoever set it. The other side of the trade is then tracked
+too — rewrite: 5m cache writes on a turn after a 5-60 minute pause, x (5m
+write rate - cache-read rate), i.e. what a still-live 1h entry would have
+saved — so both settings can be compared on the same traffic.
+
 Pauses are measured per (session, model). Subagents share their parent's
 session id, so interleaved calls can make pauses look shorter than they
 were; "saved" therefore errs low.
@@ -19,7 +25,7 @@ from __future__ import annotations
 import time
 from collections import OrderedDict
 
-from .. import state
+from .. import settings, state
 from ..pricing import rates_for
 
 FIVE_MIN = 300
@@ -34,6 +40,8 @@ def empty_stats() -> dict:
         "gaps": {"under_5m": 0, "5m_to_1h": 0, "over_1h": 0},
         "premium_usd": 0.0,
         "saved_usd": 0.0,
+        "requests_forced_5m": 0,  # 1h TTL rewritten to 5m by CACHE_FORCE_TTL
+        "rewrite_usd": 0.0,  # 5m re-writes after 5-60 min pauses
     }
 
 
@@ -54,15 +62,41 @@ def record_client_cache_ttl(data: dict, path: str) -> None:
     token saver touches it). Looks only where cache_control can sit."""
     if "v1/messages" not in path:
         return
-    blocks = []
+    if any(_asks_for_1h(b) for b in _cache_blocks(data)):
+        _stats()["requests_client_1h"] += 1
+
+
+def _cache_blocks(data: dict):
+    """Every block that may carry cache_control: tools, system, message
+    content, and the content of tool results."""
     for field in ("tools", "system"):
         if isinstance(data.get(field), list):
-            blocks.extend(data[field])
+            yield from data[field]
     for msg in data.get("messages") or []:
-        if isinstance(msg, dict) and isinstance(msg.get("content"), list):
-            blocks.extend(msg["content"])
-    if any(_asks_for_1h(b) for b in blocks):
-        _stats()["requests_client_1h"] += 1
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            yield block
+            inner = block.get("content") if isinstance(block, dict) else None
+            if isinstance(inner, list):
+                yield from inner
+
+
+def force_short_ttl(data: dict, path: str) -> bool:
+    """CACHE_FORCE_TTL=5m: drop ``ttl: "1h"`` so every breakpoint uses the
+    default 5-minute TTL. All-5m satisfies the API rule that a 1h entry may
+    not follow a 5m one. True when the body changed."""
+    if settings.CACHE_FORCE_TTL != "5m" or "v1/messages" not in path:
+        return False
+    changed = False
+    for block in _cache_blocks(data):
+        if _asks_for_1h(block):
+            del block["cache_control"]["ttl"]
+            changed = True
+    if changed:
+        _stats()["requests_forced_5m"] = _stats().get("requests_forced_5m", 0) + 1
+    return changed
 
 
 def record_cache_ttl_usage(session_id: str | None, model_key: str, usage: dict) -> None:
@@ -89,6 +123,10 @@ def record_cache_ttl_usage(session_id: str | None, model_key: str, usage: dict) 
         s["gaps"]["5m_to_1h"] += 1
         read = usage.get("cache_read_input_tokens", 0) or 0
         s["saved_usd"] += read * (rates["cache_write_5m"] - rates["cache_read"]) / 1e6
+        w5m = cc.get("ephemeral_5m_input_tokens", 0) or 0
+        s["rewrite_usd"] = (
+            s.get("rewrite_usd", 0.0) + w5m * (rates["cache_write_5m"] - rates["cache_read"]) / 1e6
+        )
     else:
         s["gaps"]["over_1h"] += 1
 
@@ -104,4 +142,7 @@ def cache_ttl_view() -> dict:
         "premium_usd": round(s["premium_usd"], 2),
         "saved_usd": round(s["saved_usd"], 2),
         "net_usd": round(s["saved_usd"] - s["premium_usd"], 2),
+        "forced_5m": settings.CACHE_FORCE_TTL == "5m",
+        "requests_forced_5m": s.get("requests_forced_5m", 0),
+        "rewrite_usd": round(s.get("rewrite_usd", 0.0), 2),
     }

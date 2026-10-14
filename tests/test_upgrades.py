@@ -171,3 +171,79 @@ async def test_http2_is_opt_in(monkeypatch):
     c = build_upstream_client()
     assert c._transport._pool._http2 is True
     await c.aclose()
+
+
+# --- CACHE_FORCE_TTL --------------------------------------------------------------
+
+
+def test_force_5m_rewrites_every_1h_breakpoint(monkeypatch):
+    monkeypatch.setattr(settings, "CACHE_FORCE_TTL", "5m")
+    one_h = {"type": "ephemeral", "ttl": "1h"}
+    data = {
+        "tools": [{"name": "t", "cache_control": dict(one_h)}],
+        "system": [{"type": "text", "text": "s", "cache_control": dict(one_h)}],
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "content": [{"type": "text", "text": "x", "cache_control": dict(one_h)}],
+                    },
+                    {"type": "text", "text": "y", "cache_control": {"type": "ephemeral"}},
+                ],
+            }
+        ],
+    }
+    assert cache_ttl.force_short_ttl(data, "v1/messages") is True
+    assert "1h" not in json.dumps(data)
+    assert data["tools"][0]["cache_control"] == {"type": "ephemeral"}
+    assert cache_ttl.cache_ttl_view()["requests_forced_5m"] == 1
+    assert cache_ttl.force_short_ttl(data, "v1/messages") is False  # nothing left
+
+
+def test_force_off_leaves_the_client_alone(monkeypatch):
+    monkeypatch.setattr(settings, "CACHE_FORCE_TTL", "off")
+    data = {
+        "system": [
+            {"type": "text", "text": "s", "cache_control": {"type": "ephemeral", "ttl": "1h"}}
+        ]
+    }
+    assert cache_ttl.force_short_ttl(data, "v1/messages") is False
+    assert data["system"][0]["cache_control"]["ttl"] == "1h"
+
+
+async def test_force_5m_wins_over_the_token_saver(client, monkeypatch):
+    monkeypatch.setattr(settings, "TOKEN_SAVER_ENABLED", True)
+    monkeypatch.setattr(settings, "CACHE_EXTEND_TTL", True)
+    monkeypatch.setattr(settings, "CACHE_FORCE_TTL", "5m")
+    seen = {}
+
+    def answer(req):
+        seen["body"] = req.content
+        seen["beta"] = req.headers.get("anthropic-beta", "")
+        return httpx.Response(200, json={"usage": {}, "content": []})
+
+    upstream = httpx.AsyncClient(transport=httpx.MockTransport(answer))
+    monkeypatch.setattr(state.runtime, "http_client", upstream)
+    body = {
+        "model": "claude-opus-5-5",
+        "system": [
+            {"type": "text", "text": "s", "cache_control": {"type": "ephemeral", "ttl": "1h"}}
+        ],
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+    async with client, upstream:
+        assert (await client.post("/v1/messages", json=body)).status_code == 200
+    assert b'"1h"' not in seen["body"]
+    assert settings.CACHE_TTL_BETA not in seen["beta"]
+
+
+def test_rewrites_after_pauses_are_priced(monkeypatch):
+    clock = iter([0.0, 900.0])  # 15-minute pause
+    monkeypatch.setattr(cache_ttl.time, "monotonic", lambda: next(clock))
+    cache_ttl.record_cache_ttl_usage("s1", "opus-5.5", {})
+    rewrite = {"cache_creation": {"ephemeral_5m_input_tokens": 100_000}}
+    cache_ttl.record_cache_ttl_usage("s1", "opus-5.5", rewrite)
+    # Opus 5.5: 5m write $5 vs read $0.20 per MTok.
+    assert cache_ttl.cache_ttl_view()["rewrite_usd"] == pytest.approx(0.48)

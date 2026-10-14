@@ -299,6 +299,15 @@ TOOL_RESULT_HEAD_BYTES = env_int("TOOL_RESULT_HEAD_BYTES", 4000)
 TOOL_RESULT_TAIL_BYTES = env_int("TOOL_RESULT_TAIL_BYTES", 2000)
 TOOL_RESULT_KEEP_RECENT = env_int("TOOL_RESULT_KEEP_RECENT", 2)
 
+# "5m" rewrites every 1h cache TTL in a request back to the default 5 minutes,
+# including the 1h that Claude Code sets itself (CACHE_EXTEND_TTL only ever
+# raises it). Worth it when Insights shows the 1h premium exceeding what it
+# saves — i.e. users rarely pause 5-60 minutes mid-session. "off" leaves the
+# client's choice alone.
+CACHE_FORCE_TTL = env_str("CACHE_FORCE_TTL", "off").lower()
+if CACHE_FORCE_TTL not in ("off", "5m"):
+    CACHE_FORCE_TTL = "off"
+
 CACHE_TTL_BETA = env_str("CACHE_TTL_BETA", "extended-cache-ttl-2025-04-11")
 CACHE_TTL_LONG = env_str("CACHE_TTL_LONG", "1h")
 MAX_CACHE_BREAKPOINTS = env_int("MAX_CACHE_BREAKPOINTS", 4)

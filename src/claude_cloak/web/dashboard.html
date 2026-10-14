@@ -2744,7 +2744,8 @@
       const who = t.requests_proxy_1h ? 'proxy (CACHE_EXTEND_TTL)' : t.requests_client_1h ? 'Claude Code' : '—';
       $('ttl-line').innerHTML = `<strong>Cache TTL 1h this period:</strong> premium ${fmtCost(t.premium_usd)} · saved ${fmtCost(t.saved_usd)}`
         + ` · <span class="${t.net_usd < 0 ? 'neg' : 'pos'}">net ${t.net_usd < 0 ? '−' : '+'}${fmtCost(Math.abs(t.net_usd))}</span>`
-        + ` · pauses of 5–60 min: ${fmtPct((t.share_5m_to_1h || 0) * 100)} of ${fmtCount.format(turns)} turns · 1h set by ${who}`;
+        + ` · pauses of 5–60 min: ${fmtPct((t.share_5m_to_1h || 0) * 100)} of ${fmtCount.format(turns)} turns · 1h set by ${who}`
+        + (t.forced_5m ? ` · <strong>CACHE_FORCE_TTL=5m on</strong> (${fmtCount.format(t.requests_forced_5m)} requests rewritten; re-writes after pauses cost ${fmtCost(t.rewrite_usd)})` : '');
     }
     const recs = c.recommendations || [];
     $('recs').innerHTML = recs.length ? recs.map(r => `<article class="rec ${esc(r.kind)}">

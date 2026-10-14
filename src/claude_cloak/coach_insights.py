@@ -525,7 +525,8 @@ def recommendations(units: list[dict], weeks: list[dict]) -> list[dict]:
                         + (
                             "Proxy đang tự nâng TTL lên 1 giờ — đặt CACHE_EXTEND_TTL=false."
                             if by_proxy
-                            else "Chính Claude Code yêu cầu TTL 1 giờ; proxy không nâng TTL."
+                            else "Chính Claude Code yêu cầu TTL 1 giờ — đặt CACHE_FORCE_TTL=5m "
+                            "để proxy hạ về 5 phút."
                         )
                     ),
                     "savings_usd": round(-ttl["net_usd"], 2),

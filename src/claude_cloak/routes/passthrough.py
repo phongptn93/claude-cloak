@@ -19,7 +19,7 @@ from ..echo import echo_delay, echo_response, echo_sse_events, is_streaming_requ
 from ..identity import capture_identity_from_request, warn_unknown_headers
 from ..loki import _loki_enqueue
 from ..quota.accounts import account_from_data, resolve_account
-from ..quota.cache_ttl import record_client_cache_ttl
+from ..quota.cache_ttl import force_short_ttl, record_client_cache_ttl
 from ..quota.tap import UsageTap
 from ..quota.usage import _record_rate_limits, _record_usage
 from ..sanitize import dump_json_body, is_blocked_path, parse_json_body, sanitize_data
@@ -119,6 +119,10 @@ async def proxy(path: str, request: Request):
 
         # ── Token saver ──
         if settings.TOKEN_SAVER_ENABLED and optimize_data(data, path):
+            changed = True
+
+        # ── Cache TTL override (CACHE_FORCE_TTL=5m) ──
+        if force_short_ttl(data, path):
             changed = True
 
         if changed:

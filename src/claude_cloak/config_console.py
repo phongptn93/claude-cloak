@@ -153,6 +153,15 @@ CONFIG_SPECS: list[dict] = [
         "desc": "Bump the prompt-cache TTL from 5m to 1h on the stable prefix.",
     },
     {
+        "key": "CACHE_FORCE_TTL",
+        "var": "CACHE_FORCE_TTL",
+        "type": "str",
+        "scope": "live",
+        "section": "Token saver",
+        "choices": ["off", "5m"],
+        "desc": "5m rewrites every 1h cache TTL (including Claude Code's own) to 5 minutes. Use when Insights shows the 1h premium exceeding its savings.",
+    },
+    {
         "key": "TOOL_RESULT_TRUNCATE",
         "var": "TOOL_RESULT_TRUNCATE",
         "type": "bool",

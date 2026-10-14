@@ -44,6 +44,8 @@ quota_stats: dict[str, Any] = {
         "gaps": {"under_5m": 0, "5m_to_1h": 0, "over_1h": 0},
         "premium_usd": 0.0,
         "saved_usd": 0.0,
+        "requests_forced_5m": 0,
+        "rewrite_usd": 0.0,
     },  # account uuid (or "org:<id>") -> usage + last rate limits
     "unpriced_models": {},  # raw model id -> count (costed at PRICING_FALLBACK)
 }
