@@ -183,6 +183,36 @@ PROXY_KEY_HEADER = (env_str("PROXY_KEY_HEADER", "x-cloak-key") or "x-cloak-key")
 PROXY_KEY_BYTES = min(64, max(16, env_int("PROXY_KEY_BYTES", 24)))
 
 # ============================================================
+# UPSTREAM AUTH — whose credential reaches Anthropic
+# ============================================================
+# client (default): each client's own Authorization / x-api-key is forwarded,
+#   exactly as before — every user is billed to the subscription they log in
+#   with.
+# server: the client's credential is dropped and one held here is sent
+#   instead, so members need no Claude login of their own. A proxy key can
+#   override this per key (auth mode + which credential).
+UPSTREAM_AUTH_MODE = env_str("UPSTREAM_AUTH_MODE", "client").strip().lower() or "client"
+if UPSTREAM_AUTH_MODE not in ("client", "server"):
+    print(
+        f"  [WARN] UPSTREAM_AUTH_MODE={UPSTREAM_AUTH_MODE!r} is not client|server — using client",
+        file=sys.stderr,
+    )
+    UPSTREAM_AUTH_MODE = "client"
+
+# Server-held credentials, name:secret pairs, e.g.
+#   UPSTREAM_CREDENTIALS=team-max-1:sk-ant-oat01-...,api:sk-ant-api03-...
+# sk-ant-oat… is a Claude subscription OAuth token (`claude setup-token`) and
+# is sent as a Bearer token; anything else is sent as x-api-key.
+UPSTREAM_CREDENTIALS: dict[str, str] = {}
+for _pair in env_str("UPSTREAM_CREDENTIALS").split(","):
+    _name, _, _secret = _pair.strip().partition(":")
+    if _name.strip() and _secret.strip():
+        UPSTREAM_CREDENTIALS[_name.strip()] = _secret.strip()
+# Credential used when server auth applies and the proxy key names none.
+# Empty = the first one listed.
+UPSTREAM_CREDENTIAL_DEFAULT = env_str("UPSTREAM_CREDENTIAL_DEFAULT").strip()
+
+# ============================================================
 # IDENTITY
 # ============================================================
 # When set, only this exact IP may lock the device identity on the first

@@ -26,6 +26,7 @@ from datetime import datetime, timedelta
 from . import settings, state
 from .access import is_valid_label
 from .terminal import RESET, YELLOW, log
+from .upstream_auth import KEY_AUTH_MODES
 
 # The alphabet secrets.token_urlsafe emits. Anything else in the key position
 # of a URL is rejected before it reaches the store, so a scan for /k/../.. or
@@ -95,6 +96,17 @@ def key_status(rec: dict) -> str:
     return "active"
 
 
+def _check_auth(auth_mode, credential) -> tuple[str, str]:
+    """Validate a key's upstream-auth override (see upstream_auth)."""
+    mode = str(auth_mode or "inherit").strip().lower()
+    if mode not in KEY_AUTH_MODES:
+        raise ValueError(f"auth mode must be one of {', '.join(KEY_AUTH_MODES)}")
+    cred = str(credential or "").strip()
+    if cred and cred not in settings.UPSTREAM_CREDENTIALS:
+        raise ValueError(f"credential {cred!r} is not in UPSTREAM_CREDENTIALS")
+    return mode, cred
+
+
 def public_view(rec: dict) -> dict:
     """Everything the console renders — never the digest, never the secret."""
     return {
@@ -110,6 +122,10 @@ def public_view(rec: dict) -> dict:
         "last_used_at": rec.get("last_used_at", ""),
         "last_used_ip": rec.get("last_used_ip", ""),
         "use_count": int(rec.get("use_count", 0) or 0),
+        # Upstream auth override: inherit UPSTREAM_AUTH_MODE, or force client
+        # / server, and which server credential (empty = the default one).
+        "auth_mode": rec.get("auth_mode") or "inherit",
+        "credential": rec.get("credential") or "",
     }
 
 
@@ -129,6 +145,8 @@ def create_key(
     note: str = "",
     expires_in_days: int = 0,
     created_ip: str = "",
+    auth_mode: str = "inherit",
+    credential: str = "",
 ) -> tuple[str, dict]:
     """Mint a key for `label`. Returns (plaintext secret, record).
 
@@ -144,6 +162,7 @@ def create_key(
         raise ValueError("expiry must be a whole number of days") from None
     if days < 0 or days > MAX_TTL_DAYS:
         raise ValueError(f"expiry must be between 0 and {MAX_TTL_DAYS} days")
+    auth_mode, credential = _check_auth(auth_mode, credential)
 
     secret = generate_secret()
     record = {
@@ -161,6 +180,8 @@ def create_key(
         "last_used_at": "",
         "last_used_ip": "",
         "use_count": 0,
+        "auth_mode": auth_mode,
+        "credential": credential,
     }
     _keys()[record["id"]] = record
     _reindex()
@@ -181,11 +202,18 @@ def update_key(
     note: str | None = None,
     label: str | None = None,
     expires_in_days: int | None = None,
+    auth_mode: str | None = None,
+    credential: str | None = None,
 ) -> dict | None:
     """Patch one key in place. Returns the record, or None when unknown."""
     rec = get_key(key_id)
     if rec is None:
         return None
+    if auth_mode is not None or credential is not None:
+        rec["auth_mode"], rec["credential"] = _check_auth(
+            rec.get("auth_mode") if auth_mode is None else auth_mode,
+            rec.get("credential") if credential is None else credential,
+        )
     if enabled is not None:
         rec["enabled"] = bool(enabled)
     if note is not None:
@@ -286,6 +314,8 @@ def load_keys() -> bool:
         rec.setdefault("last_used_at", "")
         rec.setdefault("last_used_ip", "")
         rec.setdefault("use_count", 0)
+        rec.setdefault("auth_mode", "inherit")
+        rec.setdefault("credential", "")
         _keys()[key_id] = rec
     _reindex()
     return True

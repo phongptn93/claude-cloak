@@ -72,6 +72,9 @@
   th.num{text-align:right}
   td.actions{text-align:right;white-space:nowrap}
   td.actions .btn{margin-left:6px}
+  select.auth-sel{width:auto;max-width:180px;padding:4px 8px;font-size:12px}
+  .tbl-scroll{overflow-x:auto}
+  .tbl-scroll th,.tbl-scroll td{padding:9px 12px}
   .user-head{display:flex;align-items:center;gap:10px;padding:12px 18px;background:var(--bg-2);
              border-bottom:1px solid var(--border);font-weight:600}
   .user-head .spend{font:12px var(--font-mono);color:var(--text-soft);font-weight:400}
@@ -179,6 +182,18 @@ function notesHtml() {
       Header form also works: <code>${esc(VIEW.header_name)}: &lt;key&gt;</code>.</div>`;
   }
 
+  const ua = VIEW.upstream_auth || {mode: 'client', credentials: []};
+  if (ua.mode === 'server') {
+    html += `<div class="note warn"><strong>Upstream auth: server.</strong> Requests reach Anthropic with a
+      credential held by this proxy (${ua.credentials.length ? ua.credentials.map(c => `<code>${esc(c.name)}</code>`).join(', ') : '<strong>none configured — requests fail with 503</strong>'}),
+      not the client's own login, unless a key below overrides it. Anyone who gets past the access
+      gates uses that subscription.</div>`;
+  } else if (ua.credentials.length) {
+    html += `<div class="note"><strong>Upstream auth: client</strong> (default). Each client's own login is
+      forwarded. Keys set to <em>server</em> below use a proxy-held credential instead:
+      ${ua.credentials.map(c => `<code>${esc(c.name)}</code>`).join(', ')}.</div>`;
+  }
+
   if (location.protocol !== 'https:' && !['localhost','127.0.0.1','::1'].includes(location.hostname)) {
     html += `<div class="note danger"><strong>This page is not on HTTPS.</strong> A key travels in
       the URL, so over plain HTTP every hop on the path can read it — and replay it. Terminate TLS
@@ -186,6 +201,32 @@ function notesHtml() {
       <code>TRUSTED_PROXY_IPS</code>) before handing keys out.</div>`;
   }
   return html;
+}
+
+// One select covers both per-key fields: auth mode and credential.
+function authOptions(selected) {
+  const ua = VIEW.upstream_auth || {mode: 'client', credentials: []};
+  const creds = ua.credentials || [];
+  const def = creds.find(c => c.default);
+  const none = creds.length ? '' : ' disabled';
+  const kind = c => c.kind === 'oauth' ? 'subscription' : 'API key';
+  const opts = [
+    ['inherit|', `Inherit (${ua.mode}${ua.mode === 'server' && def ? ' · ' + def.name : ''})`, ''],
+    ['client|', "Client's own login", ''],
+    ['server|', `Server · default${def ? ' (' + def.name + ')' : ''}`, none],
+    ...creds.map(c => [`server|${c.name}`, `Server · ${c.name} (${kind(c)} …${c.tail})`, '']),
+  ];
+  if (!creds.length) opts[2][1] += ' — no UPSTREAM_CREDENTIALS';
+  return opts.map(([v, t, d]) => `<option value="${esc(v)}"${v === selected ? ' selected' : ''}${d}>${esc(t)}</option>`).join('');
+}
+const authValue = k => `${k.auth_mode || 'inherit'}|${k.auth_mode === 'server' ? (k.credential || '') : ''}`;
+function splitAuth(v) {
+  const [auth_mode, credential] = String(v || 'inherit|').split('|');
+  return {auth_mode, credential: credential || ''};
+}
+function effectiveMode(v) {
+  const {auth_mode} = splitAuth(v);
+  return auth_mode === 'inherit' ? (VIEW.upstream_auth || {}).mode : auth_mode;
 }
 
 function issueHtml() {
@@ -212,6 +253,10 @@ function issueHtml() {
             <option value="365">in 365 days</option>
           </select>
         </div>
+        <div>
+          <label class="fld" for="f-auth">Upstream auth</label>
+          <select id="f-auth">${authOptions('inherit|')}</select>
+        </div>
         <div><button class="btn" id="do-create">Create key</button></div>
       </div>
       <div class="msg" id="create-msg"></div>
@@ -232,7 +277,11 @@ uv run claude-cloak-setup --remote ${esc(url)}
 export ANTHROPIC_BASE_URL=${esc(url)}
 
 # check it works
-curl ${esc(url)}/whoami</pre>
+curl ${esc(url)}/whoami${issued.server ? `
+
+# this key uses a credential held by the proxy: no Claude login needed,
+# but Claude Code wants some token set — any value works
+export ANTHROPIC_AUTH_TOKEN=cloak` : ''}</pre>
   </div>`;
 }
 
@@ -260,9 +309,9 @@ function keysHtml() {
     html += `<div class="panel" style="margin-bottom:16px">
       <div class="user-head"><span>${esc(label)}</span><span class="spacer"></span>
         <span class="spend">${esc(spend)}</span></div>
-      <table><thead><tr>
+      <div class="tbl-scroll"><table><thead><tr>
         <th>Key</th><th>Note</th><th>Status</th><th>Created</th><th>Expires</th>
-        <th>Last used</th><th class="num">Uses</th><th></th>
+        <th>Last used</th><th class="num">Uses</th><th>Upstream auth</th><th></th>
       </tr></thead><tbody>`;
     for (const k of byLabel[label]) {
       html += `<tr>
@@ -273,13 +322,16 @@ function keysHtml() {
         <td>${k.expires_at ? when(k.expires_at) : 'never'}</td>
         <td>${when(k.last_used_at)}${k.last_used_ip ? ` <span style="color:var(--muted)">from ${esc(k.last_used_ip)}</span>` : ''}</td>
         <td class="num">${k.use_count}</td>
+        <td>${VIEW.editable
+          ? `<select class="auth-sel" data-auth="${esc(k.id)}">${authOptions(authValue(k))}</select>`
+          : esc(k.auth_mode === 'server' ? 'server · ' + (k.credential || 'default') : k.auth_mode)}</td>
         <td class="actions">${VIEW.editable ? `
           <button class="btn ghost sm" data-toggle="${esc(k.id)}" data-enabled="${k.enabled}">
             ${k.enabled ? 'Disable' : 'Enable'}</button>
           <button class="btn danger sm" data-delete="${esc(k.id)}">Delete</button>` : ''}</td>
       </tr>`;
     }
-    html += `</tbody></table></div>`;
+    html += `</tbody></table></div></div>`;
   }
   return html;
 }
@@ -305,10 +357,11 @@ function wire() {
       label: document.getElementById('f-label').value,
       note: document.getElementById('f-note').value,
       expires_in_days: Number(document.getElementById('f-exp').value),
+      ...splitAuth(document.getElementById('f-auth').value),
     });
     if (status === 401) { LAST_ISSUED = null; await load(); return; }
     if (!data.ok) { msg.className = 'msg err'; msg.textContent = data.error || 'could not create key'; return; }
-    LAST_ISSUED = {secret: data.secret, key: data.key};
+    LAST_ISSUED = {secret: data.secret, key: data.key, server: effectiveMode(authValue(data.key)) === 'server'};
     await load();
     document.getElementById('issued-url').select();
   };
@@ -327,6 +380,14 @@ function wire() {
     const {status} = await post('/keys/update',
       {id: b.dataset.toggle, enabled: b.dataset.enabled !== 'true'});
     if (status === 401) LAST_ISSUED = null;
+    await load();
+  });
+
+  document.querySelectorAll('[data-auth]').forEach(sel => sel.onchange = async () => {
+    sel.disabled = true;
+    const {status, data} = await post('/keys/update', {id: sel.dataset.auth, ...splitAuth(sel.value)});
+    if (status === 401) LAST_ISSUED = null;
+    else if (!data.ok) alert(data.error || 'could not update key');
     await load();
   });
 

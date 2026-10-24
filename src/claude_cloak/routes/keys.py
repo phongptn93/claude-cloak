@@ -11,7 +11,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from .. import proxy_keys, settings, state
+from .. import proxy_keys, settings, state, upstream_auth
 from ..access import cap_for_label
 from ..admin import _request_is_admin
 from ..env import ENV_PATH
@@ -91,6 +91,11 @@ async def keys_data(request: Request):
         "env_path": ENV_PATH,
         "keys_path": settings.PROXY_KEYS_PATH,
         "known_labels": labels,
+        # Names, kinds and a 4-char tail only — never a secret.
+        "upstream_auth": {
+            "mode": settings.UPSTREAM_AUTH_MODE,
+            "credentials": upstream_auth.credentials_view(),
+        },
         "keys": keys,
         "users": [_spend_for(label) for label in sorted({k["label"] for k in keys})],
     }
@@ -109,6 +114,8 @@ async def keys_create(request: Request):
             note=str(payload.get("note") or ""),
             expires_in_days=payload.get("expires_in_days") or 0,
             created_ip=getattr(request.state, "client_ip", "") or "",
+            auth_mode=str(payload.get("auth_mode") or "inherit"),
+            credential=str(payload.get("credential") or ""),
         )
     except ValueError as exc:
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
@@ -142,6 +149,8 @@ async def keys_update(request: Request):
             expires_in_days=(
                 payload.get("expires_in_days") if "expires_in_days" in payload else None
             ),
+            auth_mode=payload.get("auth_mode") if "auth_mode" in payload else None,
+            credential=payload.get("credential") if "credential" in payload else None,
         )
     except ValueError as exc:
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
