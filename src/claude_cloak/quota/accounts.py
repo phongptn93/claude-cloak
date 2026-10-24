@@ -71,7 +71,10 @@ def resolve_account(from_body: str | None, response_headers) -> str | None:
 
 
 def account_label(account: str) -> str:
-    """Operator-given name (ACCOUNT_LABELS, matched by id prefix) or a short id."""
+    """Operator-given name (ACCOUNT_LABELS, matched by id prefix) or a short id.
+    A server-held credential (``cred:<name>``) is shown by its name."""
+    if account.startswith("cred:"):
+        return account.removeprefix("cred:")
     bare = account.removeprefix("org:")
     for prefix, name in settings.ACCOUNT_LABELS.items():
         if bare.startswith(prefix.lower()):
@@ -220,9 +223,15 @@ def accounts_view() -> list[dict]:
         users = b.get("users") or {}
         rows.append(
             {
-                "id": b["account"].removeprefix("org:")[:8],
+                "id": b["account"]
+                if b["account"].startswith("cred:")
+                else b["account"].removeprefix("org:")[:8],
                 "label": account_label(b["account"]),
-                "source": "organization" if b["account"].startswith("org:") else "account",
+                "source": "server credential"
+                if b["account"].startswith("cred:")
+                else "organization"
+                if b["account"].startswith("org:")
+                else "account",
                 "requests": b.get("requests", 0),
                 "cost_usd": round(b.get("cost_usd", 0.0), 4),
                 "users": sorted(users, key=users.get, reverse=True),

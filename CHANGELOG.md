@@ -127,6 +127,18 @@ Notable changes to Claude Cloak. Format follows
   the Rate limits panel showed whichever account answered last.
   `ACCOUNT_LABELS` names accounts; overview alerts fire at 75% / 90% of a
   window.
+- **Upstream auth mode** (`UPSTREAM_AUTH_MODE`):
+  - `client` (default) forwards each client's own login, as before.
+  - `server` replaces it with a credential from `UPSTREAM_CREDENTIALS`
+    (`name:secret` pairs). An OAuth subscription token is sent as Bearer with
+    the OAuth beta; an API key is sent as `x-api-key`.
+  - Each proxy key can override the mode (`auth_mode`:
+    inherit/client/server) and pick a `credential`. Both can be set from the
+    `/keys` console.
+  - Server-auth traffic is attributed to the credential's name.
+  - A missing credential returns 503 instead of falling back to another one.
+  - Secrets are never shown: only the name, the kind and the last 4
+    characters.
 - **Subscriptions by member** (Users view): a members × subscriptions table
   of what each member used on each Claude subscription this period. It can
   show spend, requests or tokens, flags members on more than one

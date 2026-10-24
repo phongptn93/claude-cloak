@@ -12,12 +12,13 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from .. import settings, state
+from .. import settings, state, upstream_auth
 from ..alerts import check_stall
 from ..coach import _coach_record_data, _coach_record_response
 from ..echo import echo_delay, echo_response, echo_sse_events, is_streaming_request
 from ..identity import capture_identity_from_request, warn_unknown_headers
 from ..loki import _loki_enqueue
+from ..proxy_keys import get_key
 from ..quota.accounts import account_from_data, resolve_account
 from ..quota.cache_ttl import force_short_ttl, record_client_cache_ttl
 from ..quota.tap import UsageTap
@@ -94,6 +95,23 @@ async def proxy(path: str, request: Request):
 
     target_url = f"{settings.ANTHROPIC_BASE_URL}/{path}"
     headers = build_request_headers(request)
+    # Client credential, or one held by the proxy (UPSTREAM_AUTH_MODE / key).
+    try:
+        server_credential = upstream_auth.apply(
+            headers, get_key(getattr(request.state, "proxy_key_id", None) or "")
+        )
+    except upstream_auth.UpstreamAuthError as e:
+        log(
+            f"  {DIM}{now}{RESET}  {CYAN}{BOLD}#{req_id}{RESET}  {BG_RED}{BOLD} AUTH {RESET} {RED}{e}{RESET}"
+        )
+        log("")
+        return JSONResponse(
+            status_code=503,
+            content={
+                "type": "error",
+                "error": {"type": "upstream_auth_unavailable", "message": f"Proxy: {e}"},
+            },
+        )
     body = await request.body()
     # Proxy-side work starts once the body is in; the client's upload is not ours.
     processing_started = time.monotonic()
@@ -103,9 +121,13 @@ async def proxy(path: str, request: Request):
     # re-serialised at most once, only when a step changed it.
     data = parse_json_body(body, content_type)
     request_account = None
-    if data is not None:
+    if data is not None and not server_credential:
         # Which Claude account sent this (several may share the proxy).
         request_account = account_from_data(data, path)
+    if server_credential:
+        # The account billed is the server's credential, not the client login.
+        request_account = f"cred:{server_credential}"
+    if data is not None:
         # Did the client itself ask for the 1h cache TTL? (before the saver)
         record_client_cache_ttl(data, path)
 
@@ -143,6 +165,10 @@ async def proxy(path: str, request: Request):
         f"  {DIM}{now}{RESET}  {CYAN}{BOLD}#{req_id}{RESET}  {BLUE}{BOLD}{request.method}{RESET} /{path}"
     )
 
+    if server_credential:
+        log(
+            f"           {DIM}upstream auth: {RESET}{MAGENTA}server credential '{server_credential}'{RESET}"
+        )
     # Headers log (minimal - don't leak info in logs)
     sensitive = {"authorization", "x-api-key", "cookie"}
     spoofed = set(state.captured_identity.keys())

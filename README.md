@@ -736,6 +736,32 @@ Claude Code sends `/k/<key>/v1/messages`; the proxy authenticates the key, strip
 - **Keys-only deployments** are allowed: with `PROXY_KEYS_ENABLED=true` and at least one active key, server mode boots with an empty `ALLOWED_IPS` instead of aborting.
 - Keys do **not** bypass `STATS_PRIVATE`. Dashboard and `/quota` stay gated to `STATS_VIEW_IPS`; `/whoami` stays open so a keyed client can still self-check.
 
+### Upstream Auth: client login or a server-held credential
+
+By default (`UPSTREAM_AUTH_MODE=client`) the proxy forwards each client's own `Authorization` / `x-api-key` untouched, so everyone is billed to the subscription they log in with.
+
+With `UPSTREAM_AUTH_MODE=server`, the proxy drops the client's credential and sends one it holds instead. Members then need no Claude login of their own.
+
+```bash
+# .env on the VM
+UPSTREAM_AUTH_MODE=server            # or keep client and enable it per key
+UPSTREAM_CREDENTIALS=team-max-1:sk-ant-oat01-...,team-max-2:sk-ant-oat01-...,api:sk-ant-api03-...
+UPSTREAM_CREDENTIAL_DEFAULT=team-max-1   # empty = the first one
+```
+
+- **Kinds of credential.** `sk-ant-oat…` is a subscription token from `claude setup-token` (valid for a year). It is sent as `Authorization: Bearer` with the `oauth-2025-04-20` beta. Anything else is sent as `x-api-key`, and the OAuth beta is removed.
+- **Per-key override.** In `/keys` (on create, or later from the key's row), each proxy key has an **Upstream auth** setting:
+  - **Inherit** follows `UPSTREAM_AUTH_MODE`.
+  - **Client's own login** always forwards the client's credential.
+  - **Server · default** uses `UPSTREAM_CREDENTIAL_DEFAULT`.
+  - **Server · `<name>`** uses that specific credential. This lets you pin members to a subscription.
+
+  The same fields are `auth_mode` (`inherit|client|server`) and `credential` in `POST /keys/create` and `/keys/update`.
+- **Attribution.** Requests sent with a server credential are counted under that credential's name in the dashboard's per-account rate limits and in **Subscriptions by member**.
+- **No silent fallback.** If server auth applies but the credential is missing, the request is answered with `503 upstream_auth_unavailable`. It is never sent with another subscription's credential.
+- **Client setup.** Claude Code still wants some token set, so a client on a server-auth key runs `export ANTHROPIC_AUTH_TOKEN=cloak` (any value). The `/keys` page shows this line when it issues such a key.
+- **Secrets stay in `.env`.** They are never shown: `/config` and `/keys` show only the name, the kind and the last 4 characters. Anyone who gets past the access gates spends that subscription, so keep `ALLOWED_IPS` / proxy keys tight before turning server auth on.
+
 ### Per-User Quota
 
 When `USER_QUOTA_ENABLED=true`, every `/v1/*` request is attributed to the source IP, mapped to a label via `IP_LABELS` (unmapped IPs use the raw IP string). The proxy tracks USD cost per user and either soft-warns or hard-blocks once the cap is hit.
