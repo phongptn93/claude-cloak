@@ -375,6 +375,8 @@
   #sub-matrix td.cell .v { position: relative; display: block; }
   #sub-matrix td.cell small { position: relative; display: block; color: var(--muted); font-size: 11px; }
   #sub-matrix td.cell.empty { color: var(--muted-2); }
+  #sub-matrix td.cell .pct { color: var(--text); font-weight: 600; }
+  #sub-matrix .pct-all { display: block; color: var(--muted); font-size: 11px; font-weight: 400; }
   #sub-matrix th.acct { text-transform: none; letter-spacing: 0; font-size: 12px; color: var(--text-soft); }
   .sid { font-family: var(--font-mono); color: var(--accent-2); }
   .sid .tail { color: var(--muted); }
@@ -594,6 +596,31 @@
   .rec h4 { margin: 0; font-size: 13.5px; font-weight: 600; line-height: 1.4; }
   .rec p { margin: 0; font-size: 12.5px; color: var(--text-soft); line-height: 1.55; }
   .rec .foot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+  .rec { border-left: 3px solid var(--border); align-content: start; }
+  .rec.p-high { border-left-color: var(--danger); }
+  .rec.p-medium { border-left-color: var(--warn); }
+  .rec.p-low { border-left-color: var(--info); }
+  .rec.capacity .ic { background: var(--danger-bg); color: var(--danger); }
+  .rec .tags { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .rec .body { grid-column: 1 / -1; display: grid; gap: 10px; margin-top: 4px; }
+  .rec-ev { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 6px; margin: 0; }
+  .rec-ev div { background: var(--bg-2); border-radius: var(--radius-sm); padding: 6px 9px; min-width: 0; }
+  .rec-ev dt { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .rec-ev dd { margin: 2px 0 0; font: 600 12.5px var(--font-mono); color: var(--text); }
+  .rec details summary { cursor: pointer; font-size: 12px; color: var(--text-soft); font-weight: 600; }
+  .rec details ol { margin: 6px 0 0; padding-left: 20px; font-size: 12.5px; color: var(--text-soft); line-height: 1.6; }
+  .rec .foot .meta { font-size: 11.5px; color: var(--muted); }
+  .rec .foot > .meta:first-child { flex-basis: 100%; }
+  .rec .foot .spacer { flex: 1; }
+  .rec .foot .btn { height: 24px; padding: 0 8px; font-size: 11.5px; }
+  .rec.is-closed { opacity: .65; }
+  .prio { font: 600 10.5px var(--font-mono); text-transform: uppercase; letter-spacing: .06em; padding: 1px 7px; border-radius: 999px; }
+  .prio.high { color: var(--danger); background: var(--danger-bg); }
+  .prio.medium { color: var(--warn); background: var(--warn-bg); }
+  .prio.low { color: var(--info); background: var(--info-bg); }
+  .rec-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 14px; }
+  .rec-bar .sum { display: flex; flex-wrap: wrap; gap: 6px; }
+  .rec-bar .spacer { flex: 1; }
   .save { font: 700 12px var(--font-mono); color: var(--ok); background: var(--ok-bg); padding: 2px 8px; border-radius: 999px; }
   .savings-total { display: flex; align-items: baseline; gap: 10px; }
   .savings-total b { font: 700 26px var(--font-mono); color: var(--ok); }
@@ -987,7 +1014,7 @@
     <section>
       <div class="section-head">
         <h2>Subscriptions by member</h2>
-        <span class="hint">Which Claude subscription each member's requests went through, and how much they used on it this period.</span>
+        <span class="hint">Which Claude subscription each member used this period, how much, and their % share of that subscription's total.</span>
       </div>
       <div class="panel">
         <div class="toolbar">
@@ -1251,6 +1278,23 @@
         <span class="hint">Priced from the tokens actually sent — what the same traffic would cost, not a quality judgement</span>
         <span class="spacer"></span>
         <div class="savings-total" id="savings-total" hidden><span style="font-size:12px;color:var(--muted)">Potential savings</span><b id="savings-sum">$0</b></div>
+      </div>
+      <div class="rec-bar">
+        <div class="sum" id="rec-summary"></div>
+        <span class="spacer"></span>
+        <div class="seg" id="rec-cat">
+          <button data-c="all" class="on">All</button>
+          <button data-c="cost">Cost</button>
+          <button data-c="capacity">Capacity</button>
+          <button data-c="usage">Usage</button>
+          <button data-c="reliability">Reliability</button>
+        </div>
+        <div class="seg" id="rec-status">
+          <button data-s="open" class="on">Open</button>
+          <button data-s="done">Done</button>
+          <button data-s="dismissed">Dismissed</button>
+        </div>
+        <button class="btn" id="rec-export" title="Download the recommendations as CSV">⤓ CSV</button>
       </div>
       <div class="recs" id="recs"></div>
       <p class="ttl-line" id="ttl-line" hidden></p>
@@ -2084,15 +2128,18 @@
     tbl.querySelector('thead').innerHTML = '<tr><th>Member</th>'
       + accts.map(a => `<th class="num acct" title="${esc(a.source)} ${esc(a.id)}">${esc(a.label)}</th>`).join('')
       + '<th class="num">Total</th><th class="num">Subs</th><th>Last seen</th></tr>';
+    const grand = rows.reduce((t, r) => t + r.total, 0);
     tbl.querySelector('tbody').innerHTML = rows.map(r => {
       const cells = accts.map(a => {
         const m = r.cells[a.id];
         if (!m) return '<td class="num cell empty">—</td>';
         const v = subMetricValue(m);
         const share = r.total > 0 ? v / r.total * 100 : 0;
-        const sub = subMetric === 'requests' ? (m.cost_usd != null ? fmtCost(m.cost_usd) : '') : `${fmtCount.format(m.requests || 0)} req`;
+        const col = colTotal(a);
+        const ofSub = col > 0 ? v / col * 100 : 0;
+        const sub = `<b class="pct">${fmtPct(ofSub)}</b> · ` + (subMetric === 'requests' ? (m.cost_usd != null ? fmtCost(m.cost_usd) : '') : `${fmtCount.format(m.requests || 0)} req`);
         const tip = `${r.user} on ${a.label}: ${m.cost_usd != null ? fmtCostExact(m.cost_usd) + ', ' : ''}${fmtCount.format(m.requests || 0)} requests, `
-          + `${fmtNum(m.input_tokens || 0)} in / ${fmtNum(m.output_tokens || 0)} out tokens · ${fmtPct(share, 0)} of this member's ${subMetric}`
+          + `${fmtNum(m.input_tokens || 0)} in / ${fmtNum(m.output_tokens || 0)} out tokens · ${fmtPct(ofSub)} of ${a.label}'s ${subMetric} · ${fmtPct(share, 0)} of this member's`
           + (m.last_seen ? ` · last ${m.last_seen.replace('T', ' ')}` : '');
         const heat = max > 0 ? (0.06 + 0.3 * v / max).toFixed(3) : 0;
         const val = subMetric === 'cost' && m.cost_usd == null ? '—' : fmtSubMetric(v);
@@ -2100,14 +2147,13 @@
       }).join('');
       const n = Object.keys(r.cells).length;
       return `<tr><td><strong>${esc(r.user)}</strong></td>${cells}`
-        + `<td class="num cost">${fmtSubMetric(r.total)}</td>`
+        + `<td class="num cost">${fmtSubMetric(r.total)}<small class="pct-all">${grand > 0 ? fmtPct(r.total / grand * 100) + ' of all' : ''}</small></td>`
         + `<td class="num">${n > 1 ? `<span class="badge info">${n}</span>` : n}</td>`
         + `<td>${tsCell(r.last_seen)}</td></tr>`;
     }).join('');
-    const grand = rows.reduce((t, r) => t + r.total, 0);
     tbl.querySelector('tfoot').innerHTML = '<tr><td>Total</td>'
-      + accts.map(a => `<td class="num">${fmtSubMetric(colTotal(a))}</td>`).join('')
-      + `<td class="num">${fmtSubMetric(grand)}</td><td></td><td></td></tr>`;
+      + accts.map(a => `<td class="num">${fmtSubMetric(colTotal(a))}<small class="pct-all">${grand > 0 ? fmtPct(colTotal(a) / grand * 100) + ' of all' : ''}</small></td>`).join('')
+      + `<td class="num">${fmtSubMetric(grand)}<small class="pct-all">100%</small></td><td></td><td></td></tr>`;
   }
 
   /*  Users  --------------------------------------------------------------- */
@@ -2909,7 +2955,99 @@
 
   /*  Insights  ------------------------------------------------------------ */
   let wkMetric = store.get('wk.metric', 'cost');
-  const REC_ICON = { model: '◆', cache: '⟲', context: '▤', session: '⏱', reliability: '⚠', trend: '↗' };
+  const REC_ICON = { model: '◆', cache: '⟲', context: '▤', session: '⏱', reliability: '⚠', trend: '↗', capacity: '◫' };
+  const REC_CAT = { cost: 'Cost', capacity: 'Capacity', usage: 'Usage', reliability: 'Reliability' };
+  const REC_SCOPE = { all: 'Everyone', user: 'User', group: 'Group', subscription: 'Subscription' };
+  const LEVEL = { low: 'Low', medium: 'Medium', high: 'High' };
+  let recCat = store.get('rec.cat', 'all');
+  let recView = store.get('rec.view', 'open');
+  // Done / dismissed / snoozed marks are kept in this browser, keyed by the
+  // recommendation's stable id, so the list works as a to-do.
+  let recMarks = (() => { try { return JSON.parse(store.get('rec.marks', '{}')) || {}; } catch (e) { return {}; } })();
+  function recStatus(r) {
+    const m = recMarks[r.id];
+    if (!m) return 'open';
+    if (m.s === 'snoozed') return Date.now() < m.until ? 'snoozed' : 'open';
+    return m.s;
+  }
+  function markRec(id, s) {
+    if (s === 'open') delete recMarks[id];
+    else recMarks[id] = s === 'snoozed' ? { s, until: Date.now() + 7 * 86400e3 } : { s, at: Date.now() };
+    store.set('rec.marks', JSON.stringify(recMarks));
+    renderRecs();
+  }
+  function recLink(r) {
+    if (r.scope === 'subscription') return { view: 'performance', label: 'Rate limits' };
+    if (r.scope === 'user' || r.scope === 'group') return { view: 'users', label: 'Users', search: r.scope === 'user' ? r.target : '' };
+    if (r.kind === 'trend') return { view: 'activity', label: 'Activity' };
+    return { view: 'usage', label: 'Usage' };
+  }
+  function renderRecs() {
+    const all = (C && C.recommendations) || [];
+    const open = all.filter(r => recStatus(r) === 'open');
+    const n = (list, k, v) => list.filter(r => r[k] === v).length;
+    const sum = [`<span class="badge">${open.length} open</span>`];
+    for (const p of ['high', 'medium', 'low']) if (n(open, 'priority', p)) sum.push(`<span class="prio ${p}">${n(open, 'priority', p)} ${p}</span>`);
+    const closed = all.length - open.length;
+    if (closed) sum.push(`<span class="badge">${closed} done / hidden</span>`);
+    $('rec-summary').innerHTML = all.length ? sum.join('') : '';
+    document.querySelectorAll('#rec-cat button').forEach(b => {
+      b.classList.toggle('on', b.dataset.c === recCat);
+      const k = b.dataset.c === 'all' ? open.length : n(open, 'category', b.dataset.c);
+      b.textContent = (b.dataset.c === 'all' ? 'All' : REC_CAT[b.dataset.c]) + (k ? ` ${k}` : '');
+    });
+    document.querySelectorAll('#rec-status button').forEach(b => b.classList.toggle('on', b.dataset.s === recView));
+
+    const shown = all.filter(r => {
+      const st = recStatus(r);
+      const inView = recView === 'open' ? st === 'open' : recView === 'done' ? st === 'done' : st === 'dismissed' || st === 'snoozed';
+      return inView && (recCat === 'all' || r.category === recCat);
+    });
+    const empty = !all.length
+      ? '<strong>No recommendations right now</strong>Nothing in the usage data stands out. Advice appears once there is enough spend to act on.'
+      : recView === 'open' ? '<strong>Nothing open here</strong>Everything in this category is done or hidden.' : '<strong>Nothing here</strong>Marked recommendations show up in this list.';
+    $('recs').innerHTML = shown.length ? shown.map(r => {
+      const st = recStatus(r);
+      const link = recLink(r);
+      const ev = (r.evidence || []).map(e => `<div><dt title="${esc(e.label)}">${esc(e.label)}</dt><dd>${esc(e.value)}</dd></div>`).join('');
+      const steps = (r.actions || []).map(a => `<li>${esc(a)}</li>`).join('');
+      const btns = st === 'open'
+        ? `<button class="btn" data-rec="${esc(r.id)}" data-mark="done">✓ Done</button>`
+          + `<button class="btn" data-rec="${esc(r.id)}" data-mark="snoozed" title="Hide for 7 days">Snooze 7d</button>`
+          + `<button class="btn" data-rec="${esc(r.id)}" data-mark="dismissed">Dismiss</button>`
+        : `<span class="meta">${st === 'snoozed' ? 'snoozed until ' + esc(new Date(recMarks[r.id].until).toLocaleDateString()) : esc(st)}</span>`
+          + `<button class="btn" data-rec="${esc(r.id)}" data-mark="open">Reopen</button>`;
+      return `<article class="rec ${esc(r.kind)} p-${esc(r.priority)}${st !== 'open' ? ' is-closed' : ''}">
+        <div class="ic" aria-hidden="true">${REC_ICON[r.kind] || '•'}</div>
+        <div class="tags">
+          <span class="prio ${esc(r.priority)}">${esc(LEVEL[r.priority] || r.priority)}</span>
+          <span class="chip">${esc(REC_CAT[r.category] || r.category)}</span>
+          <span class="chip">${esc(REC_SCOPE[r.scope] || r.scope)}${r.scope !== 'all' ? ' · ' + esc(r.target) : ''}</span>
+          ${r.savings_usd != null ? `<span class="save" title="Estimated from the tokens actually sent">≈ ${fmtCost(r.savings_usd)}${r.savings_window ? ' / ' + esc(r.savings_window) : ''}</span>` : ''}
+        </div>
+        <h4>${esc(r.title)}</h4>
+        <div class="body">
+          <p>${esc(r.detail)}</p>
+          ${ev ? `<dl class="rec-ev">${ev}</dl>` : ''}
+          ${steps ? `<details ${r.priority === 'high' && st === 'open' ? 'open' : ''}><summary>Action plan (${r.actions.length} steps)</summary><ol>${steps}</ol></details>` : ''}
+          <div class="foot">
+            <span class="meta">Effort <b>${esc(LEVEL[r.effort] || r.effort)}</b> · Confidence <b>${esc(LEVEL[r.confidence] || r.confidence)}</b></span>
+            <button class="btn" data-rec-go="${esc(link.view)}" data-rec-search="${esc(link.search || '')}">${esc(link.label)} →</button>
+            <span class="spacer"></span>
+            ${btns}
+          </div>
+        </div>
+      </article>`;
+    }).join('') : `<div class="panel"><div class="empty-state">${empty}</div></div>`;
+
+    const best = open.reduce((m, r) => Math.max(m, r.savings_usd || 0), 0);
+    $('savings-total').hidden = !best;
+    $('savings-total').title = 'Estimates overlap, so they are not added up — this is the largest single open one';
+    $('savings-total').firstElementChild.textContent = 'Largest opportunity';
+    $('savings-sum').textContent = fmtCost(best);
+    const urgent = open.filter(r => r.priority === 'high').length;
+    setCount('insights', open.length, urgent ? 'danger' : open.some(r => r.priority === 'medium') ? 'warn' : '');
+  }
   function renderInsights() {
     const c = C;
     if (!c) return;
@@ -2923,24 +3061,7 @@
         + ` · pauses of 5–60 min: ${fmtPct((t.share_5m_to_1h || 0) * 100)} of ${fmtCount.format(turns)} turns · 1h set by ${who}`
         + (t.forced_5m ? ` · <strong>CACHE_FORCE_TTL=5m on</strong> (${fmtCount.format(t.requests_forced_5m)} requests rewritten; re-writes after pauses cost ${fmtCost(t.rewrite_usd)})` : '');
     }
-    const recs = c.recommendations || [];
-    $('recs').innerHTML = recs.length ? recs.map(r => `<article class="rec ${esc(r.kind)}">
-        <div class="ic" aria-hidden="true">${REC_ICON[r.kind] || '•'}</div>
-        <h4>${esc(r.title)}</h4>
-        <p>${esc(r.detail)}</p>
-        <div class="foot">
-          ${r.savings_usd != null ? `<span class="save" title="Estimated from the tokens actually sent">≈ ${fmtCost(r.savings_usd)}${r.savings_window ? ' / ' + esc(r.savings_window) : ''}</span>` : ''}
-          <span class="chip">${esc({ all: 'Everyone', user: 'User', group: 'Group' }[r.scope] || r.scope)}${r.scope !== 'all' ? ' · ' + esc(r.target) : ''}</span>
-        </div>
-      </article>`).join('')
-      : '<div class="panel"><div class="empty-state"><strong>No recommendations right now</strong>Nothing in the usage data stands out. Advice appears once there is enough spend to act on.</div></div>';
-    const best = recs.reduce((m, r) => Math.max(m, r.savings_usd || 0), 0);
-    $('savings-total').hidden = !best;
-    $('savings-total').title = 'Estimates overlap, so they are not added up — this is the largest single one';
-    $('savings-total').firstElementChild.textContent = 'Largest opportunity';
-    $('savings-sum').textContent = fmtCost(best);
-    const warnRecs = recs.filter(r => r.severity === 'warn').length;
-    setCount('insights', recs.length, warnRecs ? 'warn' : '');
+    renderRecs();
 
     // Weekly trend
     const weeks = c.weekly || [];
@@ -3071,6 +3192,24 @@
     paint();
     return paint;
   }
+  wireSeg('rec-cat', 'c', () => recCat, v => { recCat = v; store.set('rec.cat', v); renderRecs(); });
+  wireSeg('rec-status', 's', () => recView, v => { recView = v; store.set('rec.view', v); renderRecs(); });
+  $('recs').addEventListener('click', e => {
+    const m = e.target.closest('[data-mark]');
+    if (m) { markRec(m.dataset.rec, m.dataset.mark); return; }
+    const g = e.target.closest('[data-rec-go]');
+    if (g) {
+      if (g.dataset.recSearch) { $('user-search').value = g.dataset.recSearch; renderUsers(); renderSubscriptions(); }
+      showView(g.dataset.recGo, true);
+    }
+  });
+  $('rec-export').addEventListener('click', () => {
+    const recs = (C && C.recommendations) || [];
+    downloadCsv('recommendations',
+      ['priority', 'category', 'kind', 'scope', 'target', 'title', 'detail', 'savings_usd', 'savings_window', 'effort', 'confidence', 'status', 'evidence', 'actions'],
+      recs.map(r => [r.priority, r.category, r.kind, r.scope, r.target, r.title, r.detail, r.savings_usd ?? '', r.savings_window || '', r.effort, r.confidence, recStatus(r),
+        (r.evidence || []).map(e => `${e.label}: ${e.value}`).join(' | '), (r.actions || []).map((a, i) => `${i + 1}. ${a}`).join(' | ')]));
+  });
   const paintBd = wireSeg('bd-by', 'b', () => bdBy, v => { bdBy = v; store.set('act.by', v); if (A) renderBreakdown(); });
   const paintHmRows = wireSeg('hm-rows', 'g', () => hmRows, v => { hmRows = v; store.set('act.hmrows', v); if (A) renderHeatmap(); });
   wireSeg('act-range', 'r', () => actRange, v => { actRange = v; store.set('act.range', v); if (A) renderActivity(); });

@@ -528,7 +528,7 @@ The coach also keeps its counters **per ISO week and per user** (`by_week`, `by_
 
 - **Weekly trend** — for each of the last 8 weeks: spend, change vs the previous week, requests, sessions, $/session, $/request, cache hit rate, tool-error rate and reads per edit. The current week is marked as in progress.
 - **Comparison** — per group when `USER_GROUPS` is set, otherwise per user. Every column, the model mix included, covers the same last 30 days: spend, sessions, $/session, $/request, cache hit rate, share of spend on Opus/Fable, tool-error rate, reads per edit and a score. The dashboard marks the best and weakest value in each column.
-- **Recommendations**, sorted by estimated savings. Each is computed from the tokens actually sent and the live price table:
+- **Recommendations**, sorted by priority (high / medium / low), then by estimated savings. Each is computed from the tokens actually sent and the live price table. Each one also carries a category (cost, capacity, usage or reliability), the figures behind it, a step-by-step action plan, an effort level and a confidence level:
 
 | Advice | Fires when | Savings estimate |
 |---|---|---|
@@ -539,8 +539,11 @@ The coach also keeps its counters **per ISO week and per user** (`by_week`, `by_
 | Expensive sessions | $/session > 2× the team median (≥ 3 sessions, ≥ $1) | — |
 | Tool errors | > 15% of ≥ 50 tool results failed | — |
 | Spend jump | a complete week is ≥ 30% and ≥ $5 above the one before | — |
+| Rebalance subscriptions | a subscription's live window is ≥ 80% used, or its weekly window is on pace to pass 100% before it resets | — (names the heaviest members and a subscription with every window ≤ 50%, if any) |
 
 Savings figures say what the same traffic would have cost on another model or with a better cache hit rate. They are not a judgement that the cheaper model would have done the work equally well, and several of them can describe the same spend, so they are shown individually, never summed. Advice text is in Vietnamese, like the tips.
+
+On the dashboard, recommendations can be filtered by category and marked **Done**, **Snoozed** (7 days) or **Dismissed**. These marks are stored in the viewer's browser. Each card links to the view it concerns, and **CSV** exports the list with its evidence and steps.
 
 ### Where to see it
 

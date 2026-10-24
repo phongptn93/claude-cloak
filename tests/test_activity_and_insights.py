@@ -209,3 +209,45 @@ def test_caps_hint_matches_the_format_the_parser_reads():
     spec = next(s for s in CONFIG_SPECS if s["key"] == "USER_QUOTA_CAPS")
     assert "phong:50" in spec["desc"]
     assert "=" not in spec["desc"]
+
+
+def _subscription(account, util_5h, util_7d, users):
+    from claude_cloak.quota.accounts import record_account_rate_limits, record_account_usage
+
+    now = datetime.now().timestamp()
+    record_account_rate_limits(
+        account,
+        {
+            "unified-5h-utilization": str(util_5h),
+            "unified-5h-reset": str(int(now + 3600)),
+            "unified-7d-utilization": str(util_7d),
+            "unified-7d-reset": str(int(now + 3 * 86400)),
+        },
+    )
+    for user, cost in users:
+        record_account_usage(account, cost, user)
+
+
+def test_a_hot_subscription_is_balanced_onto_one_with_room():
+    hot, cool = "aaaaaaaa-0000-0000-0000-000000000000", "bbbbbbbb-0000-0000-0000-000000000000"
+    _subscription(hot, 0.97, 0.6, [("phong", 80.0), ("huy", 20.0)])
+    _subscription(cool, 0.1, 0.2, [("lan", 5.0)])
+    recs = [r for r in coach_insights()["recommendations"] if r["kind"] == "capacity"]
+    assert len(recs) == 1
+    rec = recs[0]
+    assert rec["target"] == "aaaaaaaa" and rec["priority"] == "high"
+    assert rec["category"] == "capacity" and "bbbbbbbb" in rec["title"]
+    assert "phong" in rec["detail"]
+    assert {e["label"] for e in rec["evidence"]} >= {"phong", "huy"}
+
+
+def test_every_recommendation_carries_the_structured_fields():
+    usage = {"input_tokens": 1_000_000, "output_tokens": 400_000, "cache_read_input_tokens": 0}
+    _record("phong", "s1", model="claude-opus-5", usage=usage)
+    recs = coach_insights()["recommendations"]
+    assert recs
+    for r in recs:
+        assert r["priority"] in {"high", "medium", "low"}
+        assert r["effort"] in {"low", "medium", "high"}
+        assert r["confidence"] in {"low", "medium", "high"}
+        assert r["id"] and r["category"] and r["actions"] and r["evidence"]

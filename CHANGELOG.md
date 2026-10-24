@@ -133,6 +133,18 @@ Notable changes to Claude Cloak. Format follows
   subscription, and exports to CSV. Backed by `accounts[].members` in
   `/quota` (requests, cost, tokens, first and last seen per member). Buckets
   saved before this release only have request counts.
+- **Subscriptions by member** also shows each member's % share of every
+  subscription, plus each member's and subscription's % share of the total.
+- **Recommendations upgrade:**
+  - Each recommendation now carries an `id`, `priority`, `category`,
+    `evidence` figures, `actions` steps, `effort` and `confidence`.
+  - They are sorted by priority, then by savings.
+  - New **capacity** rule: a subscription near its limit, or on pace to pass
+    its weekly limit, gets advice to move its heaviest members to a
+    subscription with room (or, if there is none, to defer work or add one).
+  - The Insights view has a priority summary, category and status filters,
+    an evidence grid, an action plan, a link to the related view, Done /
+    Snooze 7d / Dismiss (kept in the browser) and a CSV export.
 - **Rate limits panel upgrade:**
   - Each account shows a status badge: available, near limit, limited (with
     the time until it unblocks) or stale.
