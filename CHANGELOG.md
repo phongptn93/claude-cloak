@@ -127,6 +127,19 @@ Notable changes to Claude Cloak. Format follows
   the Rate limits panel showed whichever account answered last.
   `ACCOUNT_LABELS` names accounts; overview alerts fire at 75% / 90% of a
   window.
+- **Rate limits panel upgrade:**
+  - Each account shows a status badge: available, near limit, limited (with
+    the time until it unblocks) or stale.
+  - Accounts are sorted most-constrained first, with a summary row above them.
+  - A window whose reset time has passed shows greyed out as "was N% · reset
+    Xh ago", instead of an old figure next to "resets now". Its overview
+    alert no longer fires.
+  - A stale `rejected` status is shown as lifted once the exhausted window has
+    reset.
+  - Each bar has a marker for how much of the window has elapsed.
+  - "cap in ~X" appears when the burn rate so far would exhaust a window that
+    is already 50% or more used before it resets.
+  - Reset times read "in 2d 5h" (the exact time is in the tooltip).
 
 ### Fixed (pricing)
 
