@@ -185,6 +185,45 @@ async def test_rate_limits_and_spend_are_kept_per_account(client, monkeypatch):
     assert accounts["b71e0f44"]["rate_limits"]["unified"][0]["utilization"] == pytest.approx(0.85)
 
 
+async def test_each_members_spend_is_kept_per_subscription(client, monkeypatch):
+    def answer(req):
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            json={
+                "model": "claude-haiku-5-5",
+                "usage": {"input_tokens": 1_000_000, "output_tokens": 100_000},
+                "content": [],
+            },
+        )
+
+    upstream = httpx.AsyncClient(transport=httpx.MockTransport(answer))
+    monkeypatch.setattr(state.runtime, "http_client", upstream)
+    async with client, upstream:
+        for user, acct in (
+            ("phong", ACCT_A),
+            ("phong", ACCT_A),
+            ("huy", ACCT_A),
+            ("phong", ACCT_B),
+        ):
+            body = {
+                "model": "x",
+                "messages": [],
+                "metadata": {"user_id": f"user_h_account_{acct}_session_s"},
+            }
+            r = await client.post(f"/u/{user}/v1/messages", json=body)
+            assert r.status_code == 200
+        accounts = {a["id"]: a for a in (await client.get("/quota")).json()["accounts"]}
+
+    a = {m["user"]: m for m in accounts[ACCT_A[:8]]["members"]}
+    b = {m["user"]: m for m in accounts[ACCT_B[:8]]["members"]}
+    assert set(a) == {"phong", "huy"} and set(b) == {"phong"}
+    assert a["phong"]["requests"] == 2 and a["huy"]["requests"] == 1
+    assert a["phong"]["input_tokens"] == 2_000_000 and a["phong"]["output_tokens"] == 200_000
+    assert a["phong"]["cost_usd"] == pytest.approx(2 * a["huy"]["cost_usd"])
+    assert sum(m["cost_usd"] for m in a.values()) == pytest.approx(accounts[ACCT_A[:8]]["cost_usd"])
+
+
 # --- pricing ------------------------------------------------------------------
 
 

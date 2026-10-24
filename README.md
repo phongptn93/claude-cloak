@@ -414,6 +414,8 @@ The four parts of the **Activity** view:
 
 **Several Claude accounts.** When clients log in with different Claude subscriptions, the proxy tells them apart by the account UUID Claude Code puts in each request's `metadata.user_id` (falling back to the `anthropic-organization-id` response header). Each account gets its own 5-hour and weekly limit bars, its spend this month and the users routed through it, under `accounts` in `/quota`. Accounts show as the first 8 characters of their id; name them with `ACCOUNT_LABELS=3f2a9c1d:team-max-1,b71e0f44:team-max-2`. Only the UUID is stored, never a token.
 
+The **Users** view has a **Subscriptions by member** table: one row per member, one column per subscription, and in each cell what that member used on that subscription this period (spend, requests or tokens). Members on more than one subscription are flagged, and **CSV** exports one row per member and subscription. The same breakdown is under `accounts[].members` in `/quota`. Traffic without a user label is counted as `(unlabeled)`, so the members add up to the account's total.
+
 **Alerts** fire for:
 - a `retry-after` from Anthropic
 - a rate limit below 30% or 10%

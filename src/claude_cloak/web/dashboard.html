@@ -370,6 +370,12 @@
   td.cost { color: var(--accent); font-weight: 500; }
   td.mono { font-family: var(--font-mono); }
   td.muted { color: var(--muted); }
+  #sub-matrix td.cell { position: relative; }
+  #sub-matrix td.cell .heat { position: absolute; inset: 3px; border-radius: 4px; background: var(--accent); pointer-events: none; }
+  #sub-matrix td.cell .v { position: relative; display: block; }
+  #sub-matrix td.cell small { position: relative; display: block; color: var(--muted); font-size: 11px; }
+  #sub-matrix td.cell.empty { color: var(--muted-2); }
+  #sub-matrix th.acct { text-transform: none; letter-spacing: 0; font-size: 12px; color: var(--text-soft); }
   .sid { font-family: var(--font-mono); color: var(--accent-2); }
   .sid .tail { color: var(--muted); }
   .badge {
@@ -974,6 +980,29 @@
         <div class="empty-state" id="user-empty" hidden>
           <strong>No users tracked yet</strong>
           User buckets appear after the first labelled <code>/v1/messages</code> response.
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <div class="section-head">
+        <h2>Subscriptions by member</h2>
+        <span class="hint">Which Claude subscription each member's requests went through, and how much they used on it this period.</span>
+      </div>
+      <div class="panel">
+        <div class="toolbar">
+          <div class="seg" id="sub-metric">
+            <button data-m="cost" class="on">Spend</button>
+            <button data-m="requests">Requests</button>
+            <button data-m="tokens">Tokens</button>
+          </div>
+          <button class="btn" id="sub-export" title="Download one row per member and subscription as CSV">⤓ CSV</button>
+          <span class="meta" id="sub-meta"></span>
+        </div>
+        <div class="table-scroll"><table id="sub-matrix"><thead></thead><tbody></tbody><tfoot></tfoot></table></div>
+        <div class="empty-state" id="sub-empty" hidden>
+          <strong>No subscription usage yet</strong>
+          Rows appear once Claude Code requests are attributed to an account (from <code>metadata.user_id</code> or the organization header).
         </div>
       </div>
     </section>
@@ -1918,7 +1947,7 @@
         const who = a.users.length ? ` · ${a.users.slice(0, 4).map(esc).join(', ')}${a.users.length > 4 ? ` +${a.users.length - 4}` : ''}` : '';
         const at = a.rate_limits.updated_at ? ` · ${fmtRelativeTime(a.rate_limits.updated_at)}` : '';
         html += `<div class="acct-head"><span class="badge ${st.key === 'stale' ? '' : st.key}">${esc(st.text)}</span>`
-          + `<strong>${esc(a.label)}</strong><span class="muted" title="${esc(a.users.join(', '))}">${fmtCost(a.cost_usd)} this month${who}${at}</span></div>`;
+          + `<strong>${esc(a.label)}</strong><span class="muted" title="${esc((a.members || []).map(m => `${m.user}: ${m.cost_usd != null ? fmtCost(m.cost_usd) + ' · ' : ''}${m.requests} req`).join('\n') || a.users.join(', '))}">${fmtCost(a.cost_usd)} this month${who}${at}</span></div>`;
         html += unifiedBars(a.rate_limits, st);
       }
     } else {
@@ -2005,6 +2034,80 @@
     if (s <= 0) return 'now';
     if (s < 14 * 86400) return `in ${fmtDuration(s)}`;
     return d.toLocaleString();
+  }
+
+  /*  Subscriptions by member  -------------------------------------------- */
+  let subMetric = store.get('sub.metric', 'cost');
+  const memberTokens = m => (m.input_tokens || 0) + (m.output_tokens || 0) + (m.cache_creation_input_tokens || 0) + (m.cache_read_input_tokens || 0);
+  function subMetricValue(m) {
+    if (!m) return 0;
+    return subMetric === 'cost' ? (m.cost_usd || 0) : subMetric === 'requests' ? (m.requests || 0) : memberTokens(m);
+  }
+  function fmtSubMetric(v) {
+    return subMetric === 'cost' ? fmtCost(v) : subMetric === 'requests' ? fmtCount.format(v) : fmtNum(v);
+  }
+  // One row per member, one column per subscription; a cell is what that
+  // member used on that subscription.
+  function subscriptionMatrix() {
+    const accts = (Q.accounts || []).filter(a => (a.members || []).length);
+    const term = $('user-search').value.trim().toLowerCase();
+    const rows = new Map();
+    for (const a of accts) {
+      for (const m of a.members) {
+        if (term && !String(m.user).toLowerCase().includes(term)) continue;
+        if (!rows.has(m.user)) rows.set(m.user, { user: m.user, cells: {}, last_seen: null });
+        const r = rows.get(m.user);
+        r.cells[a.id] = m;
+        if (m.last_seen && (!r.last_seen || m.last_seen > r.last_seen)) r.last_seen = m.last_seen;
+      }
+    }
+    const list = [...rows.values()];
+    for (const r of list) r.total = Object.values(r.cells).reduce((t, m) => t + subMetricValue(m), 0);
+    list.sort((x, y) => y.total - x.total || String(x.user).localeCompare(String(y.user)));
+    const colTotal = a => list.reduce((t, r) => t + subMetricValue(r.cells[a.id]), 0);
+    accts.sort((x, y) => colTotal(y) - colTotal(x));
+    return { accts, rows: list, colTotal };
+  }
+  function renderSubscriptions() {
+    if (!Q) return;
+    document.querySelectorAll('#sub-metric button').forEach(b => b.classList.toggle('on', b.dataset.m === subMetric));
+    const { accts, rows, colTotal } = subscriptionMatrix();
+    const tbl = $('sub-matrix');
+    $('sub-empty').hidden = accts.length > 0;
+    tbl.hidden = !accts.length;
+    if (!accts.length) { $('sub-meta').textContent = ''; return; }
+    const legacy = subMetric === 'cost' && accts.some(a => a.members.some(m => m.cost_usd == null));
+    const shared = rows.filter(r => Object.keys(r.cells).length > 1).length;
+    $('sub-meta').textContent = `${rows.length} member${rows.length === 1 ? '' : 's'} · ${accts.length} subscription${accts.length === 1 ? '' : 's'}`
+      + (shared ? ` · ${shared} on more than one` : '') + (legacy ? ' · spend not tracked for older data' : '');
+    const max = Math.max(0, ...rows.flatMap(r => Object.values(r.cells).map(subMetricValue)));
+    tbl.querySelector('thead').innerHTML = '<tr><th>Member</th>'
+      + accts.map(a => `<th class="num acct" title="${esc(a.source)} ${esc(a.id)}">${esc(a.label)}</th>`).join('')
+      + '<th class="num">Total</th><th class="num">Subs</th><th>Last seen</th></tr>';
+    tbl.querySelector('tbody').innerHTML = rows.map(r => {
+      const cells = accts.map(a => {
+        const m = r.cells[a.id];
+        if (!m) return '<td class="num cell empty">—</td>';
+        const v = subMetricValue(m);
+        const share = r.total > 0 ? v / r.total * 100 : 0;
+        const sub = subMetric === 'requests' ? (m.cost_usd != null ? fmtCost(m.cost_usd) : '') : `${fmtCount.format(m.requests || 0)} req`;
+        const tip = `${r.user} on ${a.label}: ${m.cost_usd != null ? fmtCostExact(m.cost_usd) + ', ' : ''}${fmtCount.format(m.requests || 0)} requests, `
+          + `${fmtNum(m.input_tokens || 0)} in / ${fmtNum(m.output_tokens || 0)} out tokens · ${fmtPct(share, 0)} of this member's ${subMetric}`
+          + (m.last_seen ? ` · last ${m.last_seen.replace('T', ' ')}` : '');
+        const heat = max > 0 ? (0.06 + 0.3 * v / max).toFixed(3) : 0;
+        const val = subMetric === 'cost' && m.cost_usd == null ? '—' : fmtSubMetric(v);
+        return `<td class="num cell" title="${esc(tip)}"><span class="heat" style="opacity:${heat}"></span><span class="v">${val}</span><small>${sub}</small></td>`;
+      }).join('');
+      const n = Object.keys(r.cells).length;
+      return `<tr><td><strong>${esc(r.user)}</strong></td>${cells}`
+        + `<td class="num cost">${fmtSubMetric(r.total)}</td>`
+        + `<td class="num">${n > 1 ? `<span class="badge info">${n}</span>` : n}</td>`
+        + `<td>${tsCell(r.last_seen)}</td></tr>`;
+    }).join('');
+    const grand = rows.reduce((t, r) => t + r.total, 0);
+    tbl.querySelector('tfoot').innerHTML = '<tr><td>Total</td>'
+      + accts.map(a => `<td class="num">${fmtSubMetric(colTotal(a))}</td>`).join('')
+      + `<td class="num">${fmtSubMetric(grand)}</td><td></td><td></td></tr>`;
   }
 
   /*  Users  --------------------------------------------------------------- */
@@ -3011,6 +3114,7 @@
     renderOverview();
     renderSystem();
     renderUsers();
+    renderSubscriptions();
     renderSessions();
     renderUsage();
     renderPerformance();
@@ -3087,7 +3191,21 @@
     });
   });
 
-  $('user-search').addEventListener('input', renderUsers);
+  $('user-search').addEventListener('input', () => { renderUsers(); renderSubscriptions(); });
+  document.querySelectorAll('#sub-metric button').forEach(b => b.addEventListener('click', () => {
+    subMetric = b.dataset.m; store.set('sub.metric', subMetric); renderSubscriptions();
+  }));
+  $('sub-export').addEventListener('click', () => {
+    if (!Q) return;
+    const out = [];
+    for (const a of Q.accounts || []) for (const m of a.members || []) {
+      if (!m.cost_usd && !m.requests) continue;
+      out.push([m.user, a.label, a.id, m.cost_usd ?? '', m.requests, m.input_tokens ?? '', m.output_tokens ?? '',
+        m.cache_read_input_tokens ?? '', m.cache_creation_input_tokens ?? '', m.first_seen || '', m.last_seen || '']);
+    }
+    downloadCsv('subscriptions-by-member',
+      ['user', 'subscription', 'account_id', 'cost_usd', 'requests', 'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens', 'first_seen', 'last_seen'], out);
+  });
   document.querySelectorAll('#user-filter button').forEach(b => b.addEventListener('click', () => setUserFilter(b.dataset.f)));
   wireSort('user-table', 'users', renderUsers);
   wireSort('session-table', 'sessions', () => { sessionPage = 0; renderSessions(); });

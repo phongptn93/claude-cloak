@@ -218,7 +218,17 @@ def _record_usage(
 
     if user_label:
         record_user_usage(user_label, usage, cost, model_key=model_key)
-    record_account_usage(account, cost, user_label)
+    record_account_usage(
+        account,
+        cost,
+        user_label,
+        {
+            "input_tokens": in_t,
+            "output_tokens": out_t,
+            "cache_creation_input_tokens": cw_t,
+            "cache_read_input_tokens": cr_t,
+        },
+    )
     record_cache_ttl_usage(session_id, model_key, usage)
 
     # by_day_user — same per-day aggregation as by_day but split per user.

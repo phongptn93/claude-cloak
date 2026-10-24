@@ -127,6 +127,12 @@ Notable changes to Claude Cloak. Format follows
   the Rate limits panel showed whichever account answered last.
   `ACCOUNT_LABELS` names accounts; overview alerts fire at 75% / 90% of a
   window.
+- **Subscriptions by member** (Users view): a members × subscriptions table
+  of what each member used on each Claude subscription this period. It can
+  show spend, requests or tokens, flags members on more than one
+  subscription, and exports to CSV. Backed by `accounts[].members` in
+  `/quota` (requests, cost, tokens, first and last seen per member). Buckets
+  saved before this release only have request counts.
 - **Rate limits panel upgrade:**
   - Each account shows a status badge: available, near limit, limited (with
     the time until it unblocks) or stale.

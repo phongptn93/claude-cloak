@@ -88,6 +88,7 @@ def _bucket(account: str) -> dict:
             "requests": 0,
             "cost_usd": 0.0,
             "users": {},
+            "members": {},
             "rate_limits": {},
             "rate_limits_updated_at": None,
             "first_seen": datetime.now().isoformat(timespec="seconds"),
@@ -108,15 +109,41 @@ def record_account_rate_limits(account: str | None, latest: dict) -> None:
     check_account_limits(account_label(account), account, unified_windows(latest))
 
 
-def record_account_usage(account: str | None, cost: float, user_label: str | None) -> None:
+UNLABELED = "(unlabeled)"
+
+
+def record_account_usage(
+    account: str | None, cost: float, user_label: str | None, tokens: dict | None = None
+) -> None:
     if not account:
         return
     b = _bucket(account)
+    now_iso = datetime.now().isoformat(timespec="seconds")
     b["requests"] += 1
     b["cost_usd"] += cost
-    b["last_seen"] = datetime.now().isoformat(timespec="seconds")
+    b["last_seen"] = now_iso
     if user_label:
         b["users"][user_label] = b["users"].get(user_label, 0) + 1
+    # Who spent what on this subscription. Unlabelled traffic gets its own row
+    # so the members add up to the account total.
+    m = b.setdefault("members", {}).setdefault(
+        user_label or UNLABELED,
+        {
+            "requests": 0,
+            "cost_usd": 0.0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "first_seen": now_iso,
+            "last_seen": now_iso,
+        },
+    )
+    m["requests"] += 1
+    m["cost_usd"] += cost
+    m["last_seen"] = now_iso
+    for k, v in (tokens or {}).items():
+        m[k] = m.get(k, 0) + v
 
 
 def reset_account_usage() -> None:
@@ -125,6 +152,7 @@ def reset_account_usage() -> None:
         b["requests"] = 0
         b["cost_usd"] = 0.0
         b["users"] = {}
+        b["members"] = {}
 
 
 def unified_windows(rl: dict) -> list[dict]:
@@ -161,6 +189,30 @@ def unified_windows(rl: dict) -> list[dict]:
     return out
 
 
+def _members_view(b: dict) -> list[dict]:
+    members = b.get("members") or {}
+    if not members:
+        # Buckets saved before per-member tracking only counted requests.
+        return [
+            {"user": u, "requests": n, "cost_usd": None, "last_seen": None}
+            for u, n in (b.get("users") or {}).items()
+        ]
+    return [
+        {
+            "user": u,
+            "requests": m.get("requests", 0),
+            "cost_usd": round(m.get("cost_usd", 0.0), 4),
+            "input_tokens": m.get("input_tokens", 0),
+            "output_tokens": m.get("output_tokens", 0),
+            "cache_creation_input_tokens": m.get("cache_creation_input_tokens", 0),
+            "cache_read_input_tokens": m.get("cache_read_input_tokens", 0),
+            "first_seen": m.get("first_seen"),
+            "last_seen": m.get("last_seen"),
+        }
+        for u, m in members.items()
+    ]
+
+
 def accounts_view() -> list[dict]:
     rows = []
     for b in state.quota_stats["accounts"].values():
@@ -174,6 +226,11 @@ def accounts_view() -> list[dict]:
                 "requests": b.get("requests", 0),
                 "cost_usd": round(b.get("cost_usd", 0.0), 4),
                 "users": sorted(users, key=users.get, reverse=True),
+                "members": sorted(
+                    _members_view(b),
+                    key=lambda m: (m["cost_usd"] or 0.0, m["requests"]),
+                    reverse=True,
+                ),
                 "last_seen": b.get("last_seen"),
                 "rate_limits": {
                     "unified_status": rl.get("unified-status"),
