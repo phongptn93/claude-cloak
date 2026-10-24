@@ -543,7 +543,7 @@ The coach also keeps its counters **per ISO week and per user** (`by_week`, `by_
 
 Savings figures say what the same traffic would have cost on another model or with a better cache hit rate. They are not a judgement that the cheaper model would have done the work equally well, and several of them can describe the same spend, so they are shown individually, never summed. Advice text is in Vietnamese, like the tips.
 
-On the dashboard, recommendations can be filtered by category and marked **Done**, **Snoozed** (7 days) or **Dismissed**. These marks are stored in the viewer's browser. Each card links to the view it concerns, and **CSV** exports the list with its evidence and steps.
+On the dashboard, recommendations can be filtered by category and marked **Done**, **Snoozed** (7 days) or **Dismissed**. The marks are stored on the proxy (in `.coach.json`), so every admin sees the same list. Marking needs an `ADMIN_IPS` address. A snooze lapses back to open after 7 days, and a mark follows the advice by id when it reappears on a later day. Each card links to the view it concerns, and **CSV** exports the list with its evidence and steps.
 
 ### Where to see it
 
@@ -872,6 +872,7 @@ tests/                     # pytest suite + golden endpoint snapshots
 | `GET /u/{label}/whoami` | Client self-check: confirms the caller is admitted + the label is parsed + the cap is what the operator set. `label` is the label that will actually be billed (a proxy key outranks the URL prefix); `url_label` echoes what was asked |
 | `GET /whoami` | Same self-check without a label — answers for whoever the caller turned out to be. Handy behind a key: `curl https://vm/k/<key>/whoami` |
 | `POST /admin/quota/reset/{label}` | Reset a user's counters (loopback / `ADMIN_IPS` only) |
+| `POST /admin/coach/recommendations` | Mark a recommendation: `{"id": "…", "status": "done\|dismissed\|snoozed\|open", "days": 7}` (`ADMIN_IPS` only) |
 | `* /u/{label}/{path}` | Same as `* /{path}` but accounts the request to `<label>` regardless of source IP |
 | `* /k/{key}/{path}` | Same as `* /{path}`, authenticated by a proxy key: admitted from any address and accounted to the key's user (`PROXY_KEYS_ENABLED`) |
 | `GET /keys` | Proxy-key console — `ADMIN_IPS` only; read-only until you sign in with `ADMIN_TOKEN` |

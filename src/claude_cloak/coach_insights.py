@@ -745,12 +745,16 @@ def recommendations(units: list[dict], weeks: list[dict]) -> list[dict]:
 
     for r in recs:
         _finalize(r)
+        _apply_mark(r)
     order = {"high": 0, "medium": 1, "low": 2}
     recs.sort(key=lambda r: (order[r["priority"]], -(r["savings_usd"] or 0)))
     return recs[:MAX_RECS]
 
 
 MAX_RECS = 16
+REC_STATUSES = ("done", "dismissed", "snoozed")
+MAX_REC_MARKS = 500
+SNOOZE_DAYS_MAX = 90
 CATEGORY = {
     "model": "cost",
     "cache": "cost",
@@ -778,6 +782,42 @@ def _finalize(r: dict) -> None:
             r["priority"] = "medium"
         else:
             r["priority"] = "low"
+
+
+def _apply_mark(r: dict) -> None:
+    """Status an admin set on this recommendation; a lapsed snooze is open."""
+    m = state.coach_stats.get("rec_marks", {}).get(r["id"])
+    r["status"], r["status_at"], r["snoozed_until"] = "open", None, None
+    if not m:
+        return
+    if m["status"] == "snoozed":
+        until = m.get("until") or ""
+        if until <= datetime.now().isoformat(timespec="seconds"):
+            return
+        r["snoozed_until"] = until
+    r["status"] = m["status"]
+    r["status_at"] = m.get("at")
+
+
+def set_rec_status(rec_id: str, status: str, days: int = 7) -> dict:
+    """Mark a recommendation done, dismissed, snoozed for ``days``, or open
+    again. Marks are kept by id, so the same advice coming back on a later
+    day keeps its status."""
+    marks = state.coach_stats.setdefault("rec_marks", {})
+    now = datetime.now()
+    if status == "open":
+        marks.pop(rec_id, None)
+        return {"id": rec_id, "status": "open"}
+    if status not in REC_STATUSES:
+        raise ValueError(f"unknown status {status!r}")
+    mark = {"status": status, "at": now.isoformat(timespec="seconds")}
+    if status == "snoozed":
+        days = max(1, min(int(days), SNOOZE_DAYS_MAX))
+        mark["until"] = (now + timedelta(days=days)).isoformat(timespec="seconds")
+    marks[rec_id] = mark
+    while len(marks) > MAX_REC_MARKS:
+        del marks[min(marks, key=lambda k: marks[k].get("at") or "")]
+    return {"id": rec_id, **mark}
 
 
 # ---------------------------------------------------------------------------

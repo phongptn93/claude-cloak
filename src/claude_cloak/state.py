@@ -78,6 +78,7 @@ coach_stats: dict[str, Any] = {
     "by_hour": {},  # "0".."23" -> assistant_turns (local time)
     "by_week": {},  # ISO week "2026-W39" -> {turns, tool_results, tool_errors, reads, edits}
     "by_user": {},  # user label -> same counters, for group comparison
+    "rec_marks": {},  # recommendation id -> {status, at, until?}, shared by every admin
     "first_seen": None,
     "last_seen": None,
 }

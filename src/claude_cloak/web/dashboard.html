@@ -2961,20 +2961,26 @@
   const LEVEL = { low: 'Low', medium: 'Medium', high: 'High' };
   let recCat = store.get('rec.cat', 'all');
   let recView = store.get('rec.view', 'open');
-  // Done / dismissed / snoozed marks are kept in this browser, keyed by the
-  // recommendation's stable id, so the list works as a to-do.
-  let recMarks = (() => { try { return JSON.parse(store.get('rec.marks', '{}')) || {}; } catch (e) { return {}; } })();
-  function recStatus(r) {
-    const m = recMarks[r.id];
-    if (!m) return 'open';
-    if (m.s === 'snoozed') return Date.now() < m.until ? 'snoozed' : 'open';
-    return m.s;
-  }
-  function markRec(id, s) {
-    if (s === 'open') delete recMarks[id];
-    else recMarks[id] = s === 'snoozed' ? { s, until: Date.now() + 7 * 86400e3 } : { s, at: Date.now() };
-    store.set('rec.marks', JSON.stringify(recMarks));
-    renderRecs();
+  // Done / dismissed / snoozed marks live on the proxy (/coach carries them),
+  // so every admin sees the same to-do list.
+  const recStatus = r => r.status || 'open';
+  async function markRec(id, status, btn) {
+    if (btn) btn.disabled = true;
+    try {
+      const r = await fetch('/admin/coach/recommendations', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id, status, days: 7 }),
+      });
+      if (r.status === 403) throw new Error('Forbidden — marking recommendations is only allowed from ADMIN_IPS.');
+      if (!r.ok) throw new Error(`Update failed (HTTP ${r.status}).`);
+      const mark = await r.json();
+      const rec = ((C && C.recommendations) || []).find(x => x.id === id);
+      if (rec) Object.assign(rec, { status: mark.status, status_at: mark.at || null, snoozed_until: mark.until || null });
+      toast({ done: 'Marked as done.', dismissed: 'Dismissed.', snoozed: 'Snoozed for 7 days.', open: 'Reopened.' }[mark.status] || 'Updated.');
+      renderRecs();
+    } catch (e) {
+      toast(e.message || 'Update failed.', true);
+      if (btn) btn.disabled = false;
+    }
   }
   function recLink(r) {
     if (r.scope === 'subscription') return { view: 'performance', label: 'Rate limits' };
@@ -3015,7 +3021,7 @@
         ? `<button class="btn" data-rec="${esc(r.id)}" data-mark="done">✓ Done</button>`
           + `<button class="btn" data-rec="${esc(r.id)}" data-mark="snoozed" title="Hide for 7 days">Snooze 7d</button>`
           + `<button class="btn" data-rec="${esc(r.id)}" data-mark="dismissed">Dismiss</button>`
-        : `<span class="meta">${st === 'snoozed' ? 'snoozed until ' + esc(new Date(recMarks[r.id].until).toLocaleDateString()) : esc(st)}</span>`
+        : `<span class="meta">${st === 'snoozed' && r.snoozed_until ? 'snoozed until ' + esc(new Date(r.snoozed_until).toLocaleDateString()) : esc(st)}${r.status_at ? ' · ' + esc(fmtRelativeTime(r.status_at)) : ''}</span>`
           + `<button class="btn" data-rec="${esc(r.id)}" data-mark="open">Reopen</button>`;
       return `<article class="rec ${esc(r.kind)} p-${esc(r.priority)}${st !== 'open' ? ' is-closed' : ''}">
         <div class="ic" aria-hidden="true">${REC_ICON[r.kind] || '•'}</div>
@@ -3196,7 +3202,7 @@
   wireSeg('rec-status', 's', () => recView, v => { recView = v; store.set('rec.view', v); renderRecs(); });
   $('recs').addEventListener('click', e => {
     const m = e.target.closest('[data-mark]');
-    if (m) { markRec(m.dataset.rec, m.dataset.mark); return; }
+    if (m) { markRec(m.dataset.rec, m.dataset.mark, m); return; }
     const g = e.target.closest('[data-rec-go]');
     if (g) {
       if (g.dataset.recSearch) { $('user-search').value = g.dataset.recSearch; renderUsers(); renderSubscriptions(); }

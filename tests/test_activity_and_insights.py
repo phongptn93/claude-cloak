@@ -251,3 +251,40 @@ def test_every_recommendation_carries_the_structured_fields():
         assert r["effort"] in {"low", "medium", "high"}
         assert r["confidence"] in {"low", "medium", "high"}
         assert r["id"] and r["category"] and r["actions"] and r["evidence"]
+
+
+async def test_a_recommendation_mark_is_shared_and_persisted(client):
+    usage = {"input_tokens": 400_000, "output_tokens": 200_000, "cache_read_input_tokens": 0}
+    _record("phong", "s1", model="claude-opus-5", usage=usage)
+    rec = next(r for r in coach_insights()["recommendations"] if r["target"] == "opus-5")
+    assert rec["status"] == "open"
+    async with client:
+        r = await client.post(
+            "/admin/coach/recommendations", json={"id": rec["id"], "status": "done"}
+        )
+        assert r.status_code == 200
+        bad = await client.post(
+            "/admin/coach/recommendations", json={"id": rec["id"], "status": "x"}
+        )
+        assert bad.status_code == 400
+        recs = (await client.get("/coach")).json()["recommendations"]
+    marked = next(r for r in recs if r["id"] == rec["id"])
+    assert marked["status"] == "done" and marked["status_at"]
+    assert state.coach_stats["rec_marks"][rec["id"]]["status"] == "done"
+
+
+def test_a_lapsed_snooze_reopens_the_recommendation():
+    from claude_cloak.coach_insights import set_rec_status
+
+    usage = {"input_tokens": 400_000, "output_tokens": 200_000, "cache_read_input_tokens": 0}
+    _record("phong", "s1", model="claude-opus-5", usage=usage)
+    rid = next(r["id"] for r in coach_insights()["recommendations"] if r["target"] == "opus-5")
+    set_rec_status(rid, "snoozed", 3)
+    assert (
+        next(r for r in coach_insights()["recommendations"] if r["id"] == rid)["status"]
+        == "snoozed"
+    )
+    state.coach_stats["rec_marks"][rid]["until"] = "2000-01-01T00:00:00"
+    assert (
+        next(r for r in coach_insights()["recommendations"] if r["id"] == rid)["status"] == "open"
+    )

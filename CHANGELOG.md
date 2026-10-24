@@ -144,7 +144,11 @@ Notable changes to Claude Cloak. Format follows
     subscription with room (or, if there is none, to defer work or add one).
   - The Insights view has a priority summary, category and status filters,
     an evidence grid, an action plan, a link to the related view, Done /
-    Snooze 7d / Dismiss (kept in the browser) and a CSV export.
+    Snooze 7d / Dismiss and a CSV export.
+  - Done / Snooze / Dismiss marks are shared by every admin. They are stored
+    in `.coach.json` (`rec_marks`), set through `POST
+    /admin/coach/recommendations` (`ADMIN_IPS` only), and returned on each
+    recommendation as `status`, `status_at` and `snoozed_until`.
 - **Rate limits panel upgrade:**
   - Each account shows a status badge: available, near limit, limited (with
     the time until it unblocks) or stale.
