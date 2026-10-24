@@ -370,6 +370,14 @@
   td.cost { color: var(--accent); font-weight: 500; }
   td.mono { font-family: var(--font-mono); }
   td.muted { color: var(--muted); }
+  #sub-matrix td.cell { position: relative; }
+  #sub-matrix td.cell .heat { position: absolute; inset: 3px; border-radius: 4px; background: var(--accent); pointer-events: none; }
+  #sub-matrix td.cell .v { position: relative; display: block; }
+  #sub-matrix td.cell small { position: relative; display: block; color: var(--muted); font-size: 11px; }
+  #sub-matrix td.cell.empty { color: var(--muted-2); }
+  #sub-matrix td.cell .pct { color: var(--text); font-weight: 600; }
+  #sub-matrix .pct-all { display: block; color: var(--muted); font-size: 11px; font-weight: 400; }
+  #sub-matrix th.acct { text-transform: none; letter-spacing: 0; font-size: 12px; color: var(--text-soft); }
   .sid { font-family: var(--font-mono); color: var(--accent-2); }
   .sid .tail { color: var(--muted); }
   .badge {
@@ -438,7 +446,14 @@
   .acct-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; padding: 12px 0 2px; font-size: 13px; }
   .acct-head + .bar-row { border-top: 0; }
   .acct-head:first-child { padding-top: 0; }
-  .bar-track { height: 8px; background: var(--bg-3); border-radius: 4px; overflow: hidden; }
+  .bar-track { position: relative; height: 8px; background: var(--bg-3); border-radius: 4px; overflow: hidden; }
+  .bar-pace { position: absolute; top: -1px; bottom: -1px; width: 2px; margin-left: -1px; background: var(--text-soft); opacity: .7; }
+  .bar-row.stale .bar-fill { background: var(--muted-2); opacity: .5; }
+  .bar-row.stale .bar-label, .bar-row.stale .bar-value { color: var(--muted); }
+  .bar-value .reset.hot { color: var(--danger); }
+  .acct-head .badge { align-self: center; }
+  .acct-head .muted { color: var(--muted); }
+  .rl-summary { display: flex; flex-wrap: wrap; gap: 6px; padding-bottom: 10px; margin-bottom: 4px; border-bottom: 1px solid var(--border-soft); font-size: 12px; }
   .bar-fill { height: 100%; border-radius: 4px; background: var(--ok); transition: width .5s cubic-bezier(.4,0,.2,1); }
   .bar-row.warn   .bar-fill { background: var(--warn); }
   .bar-row.danger .bar-fill { background: var(--danger); }
@@ -581,6 +596,31 @@
   .rec h4 { margin: 0; font-size: 13.5px; font-weight: 600; line-height: 1.4; }
   .rec p { margin: 0; font-size: 12.5px; color: var(--text-soft); line-height: 1.55; }
   .rec .foot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+  .rec { border-left: 3px solid var(--border); align-content: start; }
+  .rec.p-high { border-left-color: var(--danger); }
+  .rec.p-medium { border-left-color: var(--warn); }
+  .rec.p-low { border-left-color: var(--info); }
+  .rec.capacity .ic { background: var(--danger-bg); color: var(--danger); }
+  .rec .tags { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .rec .body { grid-column: 1 / -1; display: grid; gap: 10px; margin-top: 4px; }
+  .rec-ev { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 6px; margin: 0; }
+  .rec-ev div { background: var(--bg-2); border-radius: var(--radius-sm); padding: 6px 9px; min-width: 0; }
+  .rec-ev dt { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .rec-ev dd { margin: 2px 0 0; font: 600 12.5px var(--font-mono); color: var(--text); }
+  .rec details summary { cursor: pointer; font-size: 12px; color: var(--text-soft); font-weight: 600; }
+  .rec details ol { margin: 6px 0 0; padding-left: 20px; font-size: 12.5px; color: var(--text-soft); line-height: 1.6; }
+  .rec .foot .meta { font-size: 11.5px; color: var(--muted); }
+  .rec .foot > .meta:first-child { flex-basis: 100%; }
+  .rec .foot .spacer { flex: 1; }
+  .rec .foot .btn { height: 24px; padding: 0 8px; font-size: 11.5px; }
+  .rec.is-closed { opacity: .65; }
+  .prio { font: 600 10.5px var(--font-mono); text-transform: uppercase; letter-spacing: .06em; padding: 1px 7px; border-radius: 999px; }
+  .prio.high { color: var(--danger); background: var(--danger-bg); }
+  .prio.medium { color: var(--warn); background: var(--warn-bg); }
+  .prio.low { color: var(--info); background: var(--info-bg); }
+  .rec-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 14px; }
+  .rec-bar .sum { display: flex; flex-wrap: wrap; gap: 6px; }
+  .rec-bar .spacer { flex: 1; }
   .save { font: 700 12px var(--font-mono); color: var(--ok); background: var(--ok-bg); padding: 2px 8px; border-radius: 999px; }
   .savings-total { display: flex; align-items: baseline; gap: 10px; }
   .savings-total b { font: 700 26px var(--font-mono); color: var(--ok); }
@@ -972,6 +1012,29 @@
     </section>
 
     <section>
+      <div class="section-head">
+        <h2>Subscriptions by member</h2>
+        <span class="hint">Which Claude subscription each member used this period, how much, and their % share of that subscription's total.</span>
+      </div>
+      <div class="panel">
+        <div class="toolbar">
+          <div class="seg" id="sub-metric">
+            <button data-m="cost" class="on">Spend</button>
+            <button data-m="requests">Requests</button>
+            <button data-m="tokens">Tokens</button>
+          </div>
+          <button class="btn" id="sub-export" title="Download one row per member and subscription as CSV">⤓ CSV</button>
+          <span class="meta" id="sub-meta"></span>
+        </div>
+        <div class="table-scroll"><table id="sub-matrix"><thead></thead><tbody></tbody><tfoot></tfoot></table></div>
+        <div class="empty-state" id="sub-empty" hidden>
+          <strong>No subscription usage yet</strong>
+          Rows appear once Claude Code requests are attributed to an account (from <code>metadata.user_id</code> or the organization header).
+        </div>
+      </div>
+    </section>
+
+    <section>
       <div class="grid-2">
         <div class="panel chart-panel">
           <div class="panel-title"><h3>Daily cost by user</h3><span class="sub" id="daily-user-range">—</span></div>
@@ -1215,6 +1278,23 @@
         <span class="hint">Priced from the tokens actually sent — what the same traffic would cost, not a quality judgement</span>
         <span class="spacer"></span>
         <div class="savings-total" id="savings-total" hidden><span style="font-size:12px;color:var(--muted)">Potential savings</span><b id="savings-sum">$0</b></div>
+      </div>
+      <div class="rec-bar">
+        <div class="sum" id="rec-summary"></div>
+        <span class="spacer"></span>
+        <div class="seg" id="rec-cat">
+          <button data-c="all" class="on">All</button>
+          <button data-c="cost">Cost</button>
+          <button data-c="capacity">Capacity</button>
+          <button data-c="usage">Usage</button>
+          <button data-c="reliability">Reliability</button>
+        </div>
+        <div class="seg" id="rec-status">
+          <button data-s="open" class="on">Open</button>
+          <button data-s="done">Done</button>
+          <button data-s="dismissed">Dismissed</button>
+        </div>
+        <button class="btn" id="rec-export" title="Download the recommendations as CSV">⤓ CSV</button>
       </div>
       <div class="recs" id="recs"></div>
       <p class="ttl-line" id="ttl-line" hidden></p>
@@ -1712,7 +1792,7 @@
     for (const a of Q.accounts || []) {
       for (const w of a.rate_limits.unified || []) {
         const used = Number(w.utilization) * 100;
-        if (!(used >= 75)) continue;
+        if (!(used >= 75) || windowState(w).stale) continue;
         out.push({ lvl: used >= 90 ? 'danger' : 'warn', view: 'performance',
           html: `<strong>${esc(a.label)}:</strong> ${esc(winLabel[w.window] || w.window)} at ${fmtPct(used)} used${w.reset ? ` · resets ${esc(fmtResetTime(w.reset))}` : ''}.` });
       }
@@ -1892,46 +1972,188 @@
         + `<div class="bar-value">${fmtNum(r)} / ${fmtNum(l)}${resetTxt}</div></div>`;
     }
     // Subscription accounts: one block per Claude account behind the proxy,
-    // since each account has its own 5-hour and weekly windows.
-    const accts = (Q.accounts || []).filter(a => (a.rate_limits.unified || []).length);
+    // since each account has its own 5-hour and weekly windows. The most
+    // constrained accounts come first.
+    const accts = (Q.accounts || []).filter(a => (a.rate_limits.unified || []).length)
+      .map(a => ({ a, st: accountState(a.rate_limits) }))
+      .sort((x, y) => y.st.rank - x.st.rank || y.st.peak - x.st.peak);
     if (accts.length) {
-      for (const a of accts) {
+      if (accts.length > 1) {
+        const n = k => accts.filter(x => x.st.key === k).length;
+        const parts = [`<span class="badge">${accts.length} accounts</span>`];
+        if (n('ok')) parts.push(`<span class="badge ok">${n('ok')} available</span>`);
+        if (n('warn')) parts.push(`<span class="badge warn">${n('warn')} near limit</span>`);
+        if (n('danger')) parts.push(`<span class="badge danger">${n('danger')} limited</span>`);
+        if (n('stale')) parts.push(`<span class="badge">${n('stale')} stale</span>`);
+        html += `<div class="rl-summary">${parts.join('')}</div>`;
+      }
+      for (const { a, st } of accts) {
         const who = a.users.length ? ` · ${a.users.slice(0, 4).map(esc).join(', ')}${a.users.length > 4 ? ` +${a.users.length - 4}` : ''}` : '';
         const at = a.rate_limits.updated_at ? ` · ${fmtRelativeTime(a.rate_limits.updated_at)}` : '';
-        html += `<div class="acct-head"><strong>${esc(a.label)}</strong><span class="muted">${fmtCost(a.cost_usd)} this month${who}${at}</span></div>`;
-        html += unifiedBars(a.rate_limits);
+        html += `<div class="acct-head"><span class="badge ${st.key === 'stale' ? '' : st.key}">${esc(st.text)}</span>`
+          + `<strong>${esc(a.label)}</strong><span class="muted" title="${esc((a.members || []).map(m => `${m.user}: ${m.cost_usd != null ? fmtCost(m.cost_usd) + ' · ' : ''}${m.requests} req`).join('\n') || a.users.join(', '))}">${fmtCost(a.cost_usd)} this month${who}${at}</span></div>`;
+        html += unifiedBars(a.rate_limits, st);
       }
     } else {
-      html += unifiedBars(rl);
+      html += unifiedBars(rl, accountState(rl));
     }
     if (rl.retry_after) html += `<div class="alert danger" style="margin-top:12px"><span class="ic">!</span><span>Anthropic asked us to retry after <code>${esc(rl.retry_after)}</code> s</span></div>`;
     container.innerHTML = html || '<div class="empty-inline">Waiting for the first <code>/v1/messages</code> response from Anthropic…</div>';
   }
-  function unifiedBars(rl) {
+  const WINDOW_SEC = { '5h': 5 * 3600, '7d': 7 * 86400, '7d_opus': 7 * 86400, '7d_sonnet': 7 * 86400 };
+  // A window whose reset time has passed has rolled over since the headers
+  // were captured, so its utilization no longer applies.
+  function windowState(w) {
+    const used = Math.max(0, Math.min(100, Number(w.utilization) * 100));
+    const resetMs = w.reset ? new Date(w.reset).getTime() : NaN;
+    const left = (resetMs - Date.now()) / 1000;
+    const stale = Number.isFinite(left) && left <= 0;
+    const span = WINDOW_SEC[w.window];
+    let elapsed = null, capIn = null;
+    if (!stale && span && Number.isFinite(left)) {
+      const el = Math.max(0, span - left);
+      elapsed = Math.min(100, el / span * 100);
+      // At the burn rate so far, when does this window hit 100%? Only worth
+      // flagging once half of it is gone.
+      if (used >= 50 && used < 100 && el > 300) {
+        const t = (100 - used) / (used / el);
+        if (t < left) capIn = t;
+      }
+    }
+    return { used, stale, left, elapsed, capIn };
+  }
+  function accountState(rl) {
+    const ws = (rl.unified || []).map(windowState).filter(w => Number.isFinite(w.used));
+    const live = ws.filter(w => !w.stale);
+    const peak = live.reduce((m, w) => Math.max(m, w.used), 0);
+    // "rejected" is lifted once every exhausted window has reset.
+    const exhausted = ws.filter(w => w.used >= 99.5);
+    const rejected = rl.unified_status === 'rejected' && (!exhausted.length || exhausted.some(w => !w.stale));
+    if (rejected || peak >= 99.5) {
+      const block = live.filter(w => w.used >= 99.5).reduce((m, w) => Math.max(m, w.left), 0);
+      return { key: 'danger', rank: 3, peak, rejected, text: block > 0 ? `limited · ${fmtResetTime(Date.now() + block * 1000)}` : 'limited' };
+    }
+    if (ws.length && !live.length) return { key: 'stale', rank: 0, peak, text: 'stale · windows reset' };
+    if (peak >= 70 || rl.unified_status === 'allowed_warning') return { key: 'warn', rank: 2, peak, text: 'near limit' };
+    return { key: 'ok', rank: 1, peak, text: 'available' };
+  }
+  function unifiedBars(rl, st) {
     const winName = { '5h': '5-hour window', '7d': 'Weekly (all models)', '7d_opus': 'Weekly (Opus)', '7d_sonnet': 'Weekly (Sonnet)' };
     let html = '';
     for (const w of rl.unified || []) {
-      const used = Math.max(0, Math.min(100, Number(w.utilization) * 100));
-      if (!Number.isFinite(used)) continue;
-      const cls = used >= 90 ? 'danger' : used >= 70 ? 'warn' : 'ok';
-      const resetTxt = w.reset ? `<span class="reset">resets ${esc(fmtResetTime(w.reset))}</span>` : '';
+      const ws = windowState(w);
+      if (!Number.isFinite(ws.used)) continue;
+      const used = ws.used;
+      const cls = ws.stale ? 'stale' : used >= 90 ? 'danger' : used >= 70 ? 'warn' : 'ok';
+      const abs = w.reset && !isNaN(new Date(w.reset)) ? new Date(w.reset).toLocaleString() : '';
+      let sub = '';
+      if (ws.stale) sub = `<span class="reset" title="${esc(abs)}">reset ${esc(fmtRelativeTime(w.reset))}</span>`;
+      else if (w.reset) sub = `<span class="reset" title="${esc(abs)}">resets ${esc(fmtResetTime(w.reset))}</span>`;
+      if (ws.capIn != null) sub += `<span class="reset hot" title="At the burn rate so far">cap in ~${esc(fmtDuration(ws.capIn))}</span>`;
+      const pace = ws.elapsed != null
+        ? `<div class="bar-pace" style="left:${ws.elapsed.toFixed(1)}%" title="${fmtPct(ws.elapsed)} of the window elapsed"></div>` : '';
+      const val = ws.stale ? `<span title="Usage before the window reset">was ${fmtPct(used)}</span>` : `${fmtPct(used)} used`;
       html += `<div class="bar-row ${cls}"><div class="bar-label">${esc(winName[w.window] || w.window)}</div>`
-        + `<div class="bar-track"><div class="bar-fill" style="width:${used.toFixed(1)}%"></div></div>`
-        + `<div class="bar-value">${fmtPct(used)} used${resetTxt}</div></div>`;
+        + `<div class="bar-track"><div class="bar-fill" style="width:${used.toFixed(1)}%"></div>${pace}</div>`
+        + `<div class="bar-value">${val}${sub}</div></div>`;
     }
-    if (rl.unified_status && rl.unified_status !== 'allowed') html += `<div class="alert warn" style="margin:8px 0"><span class="ic">!</span><span>Subscription limit status: <code>${esc(rl.unified_status)}</code></span></div>`;
+    if (rl.unified_status && rl.unified_status !== 'allowed') {
+      const lifted = rl.unified_status === 'rejected' && st && !st.rejected;
+      html += lifted
+        ? `<div class="alert info" style="margin:8px 0"><span class="ic">i</span><span>Was <code>rejected</code> when last seen; the exhausted window has reset since, so this account should accept requests again.</span></div>`
+        : `<div class="alert warn" style="margin:8px 0"><span class="ic">!</span><span>Subscription limit status: <code>${esc(rl.unified_status)}</code></span></div>`;
+    }
     return html;
+  }
+  function fmtDuration(s) {
+    if (s < 90) return `${Math.round(s)}s`;
+    if (s < 5400) return `${Math.round(s / 60)}m`;
+    if (s < 86400) return `${Math.floor(s / 3600)}h ${Math.floor(s % 3600 / 60)}m`;
+    return `${Math.floor(s / 86400)}d ${Math.floor(s % 86400 / 3600)}h`;
   }
   function fmtResetTime(v) {
     const d = new Date(v);
     if (isNaN(d)) return v;
     const s = (d.getTime() - Date.now()) / 1000;
     if (s <= 0) return 'now';
-    if (s < 90) return `in ${Math.round(s)}s`;
-    if (s < 5400) return `in ${Math.round(s / 60)}m`;
-    if (s < 172800) return `in ${Math.round(s / 3600)}h`;
-    if (s < 14 * 86400) return `in ${Math.round(s / 86400)}d`;
+    if (s < 14 * 86400) return `in ${fmtDuration(s)}`;
     return d.toLocaleString();
+  }
+
+  /*  Subscriptions by member  -------------------------------------------- */
+  let subMetric = store.get('sub.metric', 'cost');
+  const memberTokens = m => (m.input_tokens || 0) + (m.output_tokens || 0) + (m.cache_creation_input_tokens || 0) + (m.cache_read_input_tokens || 0);
+  function subMetricValue(m) {
+    if (!m) return 0;
+    return subMetric === 'cost' ? (m.cost_usd || 0) : subMetric === 'requests' ? (m.requests || 0) : memberTokens(m);
+  }
+  function fmtSubMetric(v) {
+    return subMetric === 'cost' ? fmtCost(v) : subMetric === 'requests' ? fmtCount.format(v) : fmtNum(v);
+  }
+  // One row per member, one column per subscription; a cell is what that
+  // member used on that subscription.
+  function subscriptionMatrix() {
+    const accts = (Q.accounts || []).filter(a => (a.members || []).length);
+    const term = $('user-search').value.trim().toLowerCase();
+    const rows = new Map();
+    for (const a of accts) {
+      for (const m of a.members) {
+        if (term && !String(m.user).toLowerCase().includes(term)) continue;
+        if (!rows.has(m.user)) rows.set(m.user, { user: m.user, cells: {}, last_seen: null });
+        const r = rows.get(m.user);
+        r.cells[a.id] = m;
+        if (m.last_seen && (!r.last_seen || m.last_seen > r.last_seen)) r.last_seen = m.last_seen;
+      }
+    }
+    const list = [...rows.values()];
+    for (const r of list) r.total = Object.values(r.cells).reduce((t, m) => t + subMetricValue(m), 0);
+    list.sort((x, y) => y.total - x.total || String(x.user).localeCompare(String(y.user)));
+    const colTotal = a => list.reduce((t, r) => t + subMetricValue(r.cells[a.id]), 0);
+    accts.sort((x, y) => colTotal(y) - colTotal(x));
+    return { accts, rows: list, colTotal };
+  }
+  function renderSubscriptions() {
+    if (!Q) return;
+    document.querySelectorAll('#sub-metric button').forEach(b => b.classList.toggle('on', b.dataset.m === subMetric));
+    const { accts, rows, colTotal } = subscriptionMatrix();
+    const tbl = $('sub-matrix');
+    $('sub-empty').hidden = accts.length > 0;
+    tbl.hidden = !accts.length;
+    if (!accts.length) { $('sub-meta').textContent = ''; return; }
+    const legacy = subMetric === 'cost' && accts.some(a => a.members.some(m => m.cost_usd == null));
+    const shared = rows.filter(r => Object.keys(r.cells).length > 1).length;
+    $('sub-meta').textContent = `${rows.length} member${rows.length === 1 ? '' : 's'} · ${accts.length} subscription${accts.length === 1 ? '' : 's'}`
+      + (shared ? ` · ${shared} on more than one` : '') + (legacy ? ' · spend not tracked for older data' : '');
+    const max = Math.max(0, ...rows.flatMap(r => Object.values(r.cells).map(subMetricValue)));
+    tbl.querySelector('thead').innerHTML = '<tr><th>Member</th>'
+      + accts.map(a => `<th class="num acct" title="${esc(a.source)} ${esc(a.id)}">${esc(a.label)}</th>`).join('')
+      + '<th class="num">Total</th><th class="num">Subs</th><th>Last seen</th></tr>';
+    const grand = rows.reduce((t, r) => t + r.total, 0);
+    tbl.querySelector('tbody').innerHTML = rows.map(r => {
+      const cells = accts.map(a => {
+        const m = r.cells[a.id];
+        if (!m) return '<td class="num cell empty">—</td>';
+        const v = subMetricValue(m);
+        const share = r.total > 0 ? v / r.total * 100 : 0;
+        const col = colTotal(a);
+        const ofSub = col > 0 ? v / col * 100 : 0;
+        const sub = `<b class="pct">${fmtPct(ofSub)}</b> · ` + (subMetric === 'requests' ? (m.cost_usd != null ? fmtCost(m.cost_usd) : '') : `${fmtCount.format(m.requests || 0)} req`);
+        const tip = `${r.user} on ${a.label}: ${m.cost_usd != null ? fmtCostExact(m.cost_usd) + ', ' : ''}${fmtCount.format(m.requests || 0)} requests, `
+          + `${fmtNum(m.input_tokens || 0)} in / ${fmtNum(m.output_tokens || 0)} out tokens · ${fmtPct(ofSub)} of ${a.label}'s ${subMetric} · ${fmtPct(share, 0)} of this member's`
+          + (m.last_seen ? ` · last ${m.last_seen.replace('T', ' ')}` : '');
+        const heat = max > 0 ? (0.06 + 0.3 * v / max).toFixed(3) : 0;
+        const val = subMetric === 'cost' && m.cost_usd == null ? '—' : fmtSubMetric(v);
+        return `<td class="num cell" title="${esc(tip)}"><span class="heat" style="opacity:${heat}"></span><span class="v">${val}</span><small>${sub}</small></td>`;
+      }).join('');
+      const n = Object.keys(r.cells).length;
+      return `<tr><td><strong>${esc(r.user)}</strong></td>${cells}`
+        + `<td class="num cost">${fmtSubMetric(r.total)}<small class="pct-all">${grand > 0 ? fmtPct(r.total / grand * 100) + ' of all' : ''}</small></td>`
+        + `<td class="num">${n > 1 ? `<span class="badge info">${n}</span>` : n}</td>`
+        + `<td>${tsCell(r.last_seen)}</td></tr>`;
+    }).join('');
+    tbl.querySelector('tfoot').innerHTML = '<tr><td>Total</td>'
+      + accts.map(a => `<td class="num">${fmtSubMetric(colTotal(a))}<small class="pct-all">${grand > 0 ? fmtPct(colTotal(a) / grand * 100) + ' of all' : ''}</small></td>`).join('')
+      + `<td class="num">${fmtSubMetric(grand)}<small class="pct-all">100%</small></td><td></td><td></td></tr>`;
   }
 
   /*  Users  --------------------------------------------------------------- */
@@ -2733,7 +2955,105 @@
 
   /*  Insights  ------------------------------------------------------------ */
   let wkMetric = store.get('wk.metric', 'cost');
-  const REC_ICON = { model: '◆', cache: '⟲', context: '▤', session: '⏱', reliability: '⚠', trend: '↗' };
+  const REC_ICON = { model: '◆', cache: '⟲', context: '▤', session: '⏱', reliability: '⚠', trend: '↗', capacity: '◫' };
+  const REC_CAT = { cost: 'Cost', capacity: 'Capacity', usage: 'Usage', reliability: 'Reliability' };
+  const REC_SCOPE = { all: 'Everyone', user: 'User', group: 'Group', subscription: 'Subscription' };
+  const LEVEL = { low: 'Low', medium: 'Medium', high: 'High' };
+  let recCat = store.get('rec.cat', 'all');
+  let recView = store.get('rec.view', 'open');
+  // Done / dismissed / snoozed marks live on the proxy (/coach carries them),
+  // so every admin sees the same to-do list.
+  const recStatus = r => r.status || 'open';
+  async function markRec(id, status, btn) {
+    if (btn) btn.disabled = true;
+    try {
+      const r = await fetch('/admin/coach/recommendations', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id, status, days: 7 }),
+      });
+      if (r.status === 403) throw new Error('Forbidden — marking recommendations is only allowed from ADMIN_IPS.');
+      if (!r.ok) throw new Error(`Update failed (HTTP ${r.status}).`);
+      const mark = await r.json();
+      const rec = ((C && C.recommendations) || []).find(x => x.id === id);
+      if (rec) Object.assign(rec, { status: mark.status, status_at: mark.at || null, snoozed_until: mark.until || null });
+      toast({ done: 'Marked as done.', dismissed: 'Dismissed.', snoozed: 'Snoozed for 7 days.', open: 'Reopened.' }[mark.status] || 'Updated.');
+      renderRecs();
+    } catch (e) {
+      toast(e.message || 'Update failed.', true);
+      if (btn) btn.disabled = false;
+    }
+  }
+  function recLink(r) {
+    if (r.scope === 'subscription') return { view: 'performance', label: 'Rate limits' };
+    if (r.scope === 'user' || r.scope === 'group') return { view: 'users', label: 'Users', search: r.scope === 'user' ? r.target : '' };
+    if (r.kind === 'trend') return { view: 'activity', label: 'Activity' };
+    return { view: 'usage', label: 'Usage' };
+  }
+  function renderRecs() {
+    const all = (C && C.recommendations) || [];
+    const open = all.filter(r => recStatus(r) === 'open');
+    const n = (list, k, v) => list.filter(r => r[k] === v).length;
+    const sum = [`<span class="badge">${open.length} open</span>`];
+    for (const p of ['high', 'medium', 'low']) if (n(open, 'priority', p)) sum.push(`<span class="prio ${p}">${n(open, 'priority', p)} ${p}</span>`);
+    const closed = all.length - open.length;
+    if (closed) sum.push(`<span class="badge">${closed} done / hidden</span>`);
+    $('rec-summary').innerHTML = all.length ? sum.join('') : '';
+    document.querySelectorAll('#rec-cat button').forEach(b => {
+      b.classList.toggle('on', b.dataset.c === recCat);
+      const k = b.dataset.c === 'all' ? open.length : n(open, 'category', b.dataset.c);
+      b.textContent = (b.dataset.c === 'all' ? 'All' : REC_CAT[b.dataset.c]) + (k ? ` ${k}` : '');
+    });
+    document.querySelectorAll('#rec-status button').forEach(b => b.classList.toggle('on', b.dataset.s === recView));
+
+    const shown = all.filter(r => {
+      const st = recStatus(r);
+      const inView = recView === 'open' ? st === 'open' : recView === 'done' ? st === 'done' : st === 'dismissed' || st === 'snoozed';
+      return inView && (recCat === 'all' || r.category === recCat);
+    });
+    const empty = !all.length
+      ? '<strong>No recommendations right now</strong>Nothing in the usage data stands out. Advice appears once there is enough spend to act on.'
+      : recView === 'open' ? '<strong>Nothing open here</strong>Everything in this category is done or hidden.' : '<strong>Nothing here</strong>Marked recommendations show up in this list.';
+    $('recs').innerHTML = shown.length ? shown.map(r => {
+      const st = recStatus(r);
+      const link = recLink(r);
+      const ev = (r.evidence || []).map(e => `<div><dt title="${esc(e.label)}">${esc(e.label)}</dt><dd>${esc(e.value)}</dd></div>`).join('');
+      const steps = (r.actions || []).map(a => `<li>${esc(a)}</li>`).join('');
+      const btns = st === 'open'
+        ? `<button class="btn" data-rec="${esc(r.id)}" data-mark="done">✓ Done</button>`
+          + `<button class="btn" data-rec="${esc(r.id)}" data-mark="snoozed" title="Hide for 7 days">Snooze 7d</button>`
+          + `<button class="btn" data-rec="${esc(r.id)}" data-mark="dismissed">Dismiss</button>`
+        : `<span class="meta">${st === 'snoozed' && r.snoozed_until ? 'snoozed until ' + esc(new Date(r.snoozed_until).toLocaleDateString()) : esc(st)}${r.status_at ? ' · ' + esc(fmtRelativeTime(r.status_at)) : ''}</span>`
+          + `<button class="btn" data-rec="${esc(r.id)}" data-mark="open">Reopen</button>`;
+      return `<article class="rec ${esc(r.kind)} p-${esc(r.priority)}${st !== 'open' ? ' is-closed' : ''}">
+        <div class="ic" aria-hidden="true">${REC_ICON[r.kind] || '•'}</div>
+        <div class="tags">
+          <span class="prio ${esc(r.priority)}">${esc(LEVEL[r.priority] || r.priority)}</span>
+          <span class="chip">${esc(REC_CAT[r.category] || r.category)}</span>
+          <span class="chip">${esc(REC_SCOPE[r.scope] || r.scope)}${r.scope !== 'all' ? ' · ' + esc(r.target) : ''}</span>
+          ${r.savings_usd != null ? `<span class="save" title="Estimated from the tokens actually sent">≈ ${fmtCost(r.savings_usd)}${r.savings_window ? ' / ' + esc(r.savings_window) : ''}</span>` : ''}
+        </div>
+        <h4>${esc(r.title)}</h4>
+        <div class="body">
+          <p>${esc(r.detail)}</p>
+          ${ev ? `<dl class="rec-ev">${ev}</dl>` : ''}
+          ${steps ? `<details ${r.priority === 'high' && st === 'open' ? 'open' : ''}><summary>Action plan (${r.actions.length} steps)</summary><ol>${steps}</ol></details>` : ''}
+          <div class="foot">
+            <span class="meta">Effort <b>${esc(LEVEL[r.effort] || r.effort)}</b> · Confidence <b>${esc(LEVEL[r.confidence] || r.confidence)}</b></span>
+            <button class="btn" data-rec-go="${esc(link.view)}" data-rec-search="${esc(link.search || '')}">${esc(link.label)} →</button>
+            <span class="spacer"></span>
+            ${btns}
+          </div>
+        </div>
+      </article>`;
+    }).join('') : `<div class="panel"><div class="empty-state">${empty}</div></div>`;
+
+    const best = open.reduce((m, r) => Math.max(m, r.savings_usd || 0), 0);
+    $('savings-total').hidden = !best;
+    $('savings-total').title = 'Estimates overlap, so they are not added up — this is the largest single open one';
+    $('savings-total').firstElementChild.textContent = 'Largest opportunity';
+    $('savings-sum').textContent = fmtCost(best);
+    const urgent = open.filter(r => r.priority === 'high').length;
+    setCount('insights', open.length, urgent ? 'danger' : open.some(r => r.priority === 'medium') ? 'warn' : '');
+  }
   function renderInsights() {
     const c = C;
     if (!c) return;
@@ -2747,24 +3067,7 @@
         + ` · pauses of 5–60 min: ${fmtPct((t.share_5m_to_1h || 0) * 100)} of ${fmtCount.format(turns)} turns · 1h set by ${who}`
         + (t.forced_5m ? ` · <strong>CACHE_FORCE_TTL=5m on</strong> (${fmtCount.format(t.requests_forced_5m)} requests rewritten; re-writes after pauses cost ${fmtCost(t.rewrite_usd)})` : '');
     }
-    const recs = c.recommendations || [];
-    $('recs').innerHTML = recs.length ? recs.map(r => `<article class="rec ${esc(r.kind)}">
-        <div class="ic" aria-hidden="true">${REC_ICON[r.kind] || '•'}</div>
-        <h4>${esc(r.title)}</h4>
-        <p>${esc(r.detail)}</p>
-        <div class="foot">
-          ${r.savings_usd != null ? `<span class="save" title="Estimated from the tokens actually sent">≈ ${fmtCost(r.savings_usd)}${r.savings_window ? ' / ' + esc(r.savings_window) : ''}</span>` : ''}
-          <span class="chip">${esc({ all: 'Everyone', user: 'User', group: 'Group' }[r.scope] || r.scope)}${r.scope !== 'all' ? ' · ' + esc(r.target) : ''}</span>
-        </div>
-      </article>`).join('')
-      : '<div class="panel"><div class="empty-state"><strong>No recommendations right now</strong>Nothing in the usage data stands out. Advice appears once there is enough spend to act on.</div></div>';
-    const best = recs.reduce((m, r) => Math.max(m, r.savings_usd || 0), 0);
-    $('savings-total').hidden = !best;
-    $('savings-total').title = 'Estimates overlap, so they are not added up — this is the largest single one';
-    $('savings-total').firstElementChild.textContent = 'Largest opportunity';
-    $('savings-sum').textContent = fmtCost(best);
-    const warnRecs = recs.filter(r => r.severity === 'warn').length;
-    setCount('insights', recs.length, warnRecs ? 'warn' : '');
+    renderRecs();
 
     // Weekly trend
     const weeks = c.weekly || [];
@@ -2895,6 +3198,24 @@
     paint();
     return paint;
   }
+  wireSeg('rec-cat', 'c', () => recCat, v => { recCat = v; store.set('rec.cat', v); renderRecs(); });
+  wireSeg('rec-status', 's', () => recView, v => { recView = v; store.set('rec.view', v); renderRecs(); });
+  $('recs').addEventListener('click', e => {
+    const m = e.target.closest('[data-mark]');
+    if (m) { markRec(m.dataset.rec, m.dataset.mark, m); return; }
+    const g = e.target.closest('[data-rec-go]');
+    if (g) {
+      if (g.dataset.recSearch) { $('user-search').value = g.dataset.recSearch; renderUsers(); renderSubscriptions(); }
+      showView(g.dataset.recGo, true);
+    }
+  });
+  $('rec-export').addEventListener('click', () => {
+    const recs = (C && C.recommendations) || [];
+    downloadCsv('recommendations',
+      ['priority', 'category', 'kind', 'scope', 'target', 'title', 'detail', 'savings_usd', 'savings_window', 'effort', 'confidence', 'status', 'evidence', 'actions'],
+      recs.map(r => [r.priority, r.category, r.kind, r.scope, r.target, r.title, r.detail, r.savings_usd ?? '', r.savings_window || '', r.effort, r.confidence, recStatus(r),
+        (r.evidence || []).map(e => `${e.label}: ${e.value}`).join(' | '), (r.actions || []).map((a, i) => `${i + 1}. ${a}`).join(' | ')]));
+  });
   const paintBd = wireSeg('bd-by', 'b', () => bdBy, v => { bdBy = v; store.set('act.by', v); if (A) renderBreakdown(); });
   const paintHmRows = wireSeg('hm-rows', 'g', () => hmRows, v => { hmRows = v; store.set('act.hmrows', v); if (A) renderHeatmap(); });
   wireSeg('act-range', 'r', () => actRange, v => { actRange = v; store.set('act.range', v); if (A) renderActivity(); });
@@ -2938,6 +3259,7 @@
     renderOverview();
     renderSystem();
     renderUsers();
+    renderSubscriptions();
     renderSessions();
     renderUsage();
     renderPerformance();
@@ -3014,7 +3336,21 @@
     });
   });
 
-  $('user-search').addEventListener('input', renderUsers);
+  $('user-search').addEventListener('input', () => { renderUsers(); renderSubscriptions(); });
+  document.querySelectorAll('#sub-metric button').forEach(b => b.addEventListener('click', () => {
+    subMetric = b.dataset.m; store.set('sub.metric', subMetric); renderSubscriptions();
+  }));
+  $('sub-export').addEventListener('click', () => {
+    if (!Q) return;
+    const out = [];
+    for (const a of Q.accounts || []) for (const m of a.members || []) {
+      if (!m.cost_usd && !m.requests) continue;
+      out.push([m.user, a.label, a.id, m.cost_usd ?? '', m.requests, m.input_tokens ?? '', m.output_tokens ?? '',
+        m.cache_read_input_tokens ?? '', m.cache_creation_input_tokens ?? '', m.first_seen || '', m.last_seen || '']);
+    }
+    downloadCsv('subscriptions-by-member',
+      ['user', 'subscription', 'account_id', 'cost_usd', 'requests', 'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens', 'first_seen', 'last_seen'], out);
+  });
   document.querySelectorAll('#user-filter button').forEach(b => b.addEventListener('click', () => setUserFilter(b.dataset.f)));
   wireSort('user-table', 'users', renderUsers);
   wireSort('session-table', 'sessions', () => { sessionPage = 0; renderSessions(); });

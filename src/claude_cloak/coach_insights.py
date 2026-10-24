@@ -17,6 +17,7 @@ from itertools import pairwise
 
 from . import settings, state
 from .pricing import PRICING, cost_of, rates_for
+from .quota.accounts import accounts_view
 from .quota.activity import group_of
 from .quota.cache_ttl import cache_ttl_view
 
@@ -372,6 +373,18 @@ def recommendations(units: list[dict], weeks: list[dict]) -> list[dict]:
                 ),
                 "savings_usd": round(saving, 2),
                 "savings_window": f"{WINDOW_DAYS} ngày",
+                "evidence": [
+                    {"label": f"Chi phí trên {key}", "value": _money(now)},
+                    {"label": f"Cùng token trên {alt}", "value": _money(then)},
+                    {"label": "Request", "value": f"{m['requests']:,}"},
+                ],
+                "actions": [
+                    f"Đổi model mặc định sang {alt} (/model hoặc ANTHROPIC_MODEL trong settings).",
+                    "Báo cho " + (", ".join(top) if top else "các thành viên") + " biết model mới.",
+                    "Theo dõi chi phí tuần sau trong tab Insights.",
+                ],
+                "effort": "low",
+                "confidence": "high",
             }
         )
 
@@ -405,6 +418,18 @@ def recommendations(units: list[dict], weeks: list[dict]) -> list[dict]:
                 ),
                 "savings_usd": round(saving, 2),
                 "savings_window": f"{WINDOW_DAYS} ngày",
+                "evidence": [
+                    {"label": "Tỉ lệ chi phí Opus/Fable", "value": f"{round(share * 100)}%"},
+                    {"label": "Chi phí Opus/Fable", "value": _money(top_cost)},
+                    {"label": "Output / request", "value": f"{round(out_per_req):,} token"},
+                ],
+                "actions": [
+                    f"Dùng {EVERYDAY_MODEL} làm model mặc định cho việc thường ngày.",
+                    "Chỉ chuyển sang Opus/Fable (/model) khi thiết kế kiến trúc hoặc debug khó.",
+                    "Cân nhắc đặt subagent đọc code/chạy test dùng model rẻ hơn.",
+                ],
+                "effort": "medium",
+                "confidence": "medium",
             }
         )
 
@@ -438,6 +463,18 @@ def recommendations(units: list[dict], weeks: list[dict]) -> list[dict]:
                 ),
                 "savings_usd": round(saving, 2),
                 "savings_window": f"{WINDOW_DAYS} ngày",
+                "evidence": [
+                    {"label": "Cache hit", "value": f"{round(hit * 100)}%"},
+                    {"label": "Mức chung", "value": f"{round(target * 100)}%"},
+                    {"label": "Token input", "value": f"{volume / 1e6:,.1f}M"},
+                ],
+                "actions": [
+                    "Giữ nguyên CLAUDE.md, danh sách MCP/tool và model trong suốt một phiên.",
+                    "Tránh để phiên nghỉ quá 5 phút giữa các lượt (hoặc dùng TTL 1 giờ).",
+                    "Không sửa file CLAUDE.md giữa phiên; sửa xong thì mở phiên mới.",
+                ],
+                "effort": "low",
+                "confidence": "medium",
             }
         )
 
@@ -474,6 +511,18 @@ def recommendations(units: list[dict], weeks: list[dict]) -> list[dict]:
                     ),
                     "savings_usd": round(saving, 2),
                     "savings_window": f"{WINDOW_DAYS} ngày",
+                    "evidence": [
+                        {"label": "Context / request", "value": f"{round(c / 1000):,}K"},
+                        {"label": "Mức chung", "value": f"{round(median_ctx / 1000):,}K"},
+                        {"label": "Request", "value": f"{u['requests']:,}"},
+                    ],
+                    "actions": [
+                        "Chạy /compact khi phiên đã dài.",
+                        "Chạy /clear khi chuyển sang việc khác.",
+                        "Đọc đúng đoạn cần (offset/limit, grep) thay vì cả file lớn.",
+                    ],
+                    "effort": "low",
+                    "confidence": "medium",
                 }
             )
 
@@ -502,6 +551,17 @@ def recommendations(units: list[dict], weeks: list[dict]) -> list[dict]:
                 ),
                 "savings_usd": round(premium, 2),
                 "savings_window": f"{WINDOW_DAYS} ngày",
+                "evidence": [
+                    {"label": "Ghi cache", "value": f"{cw / 1e6:,.1f}M token"},
+                    {"label": "Đọc lại", "value": f"{cr / 1e6:,.1f}M token"},
+                    {"label": "Phụ phí ghi", "value": _money(premium)},
+                ],
+                "actions": [
+                    "Gộp các việc liên quan vào một phiên dài hơn thay vì nhiều phiên ngắn.",
+                    "Tránh đổi model, tool hoặc system prompt giữa chừng.",
+                ],
+                "effort": "medium",
+                "confidence": "medium",
             }
         )
 
@@ -531,6 +591,22 @@ def recommendations(units: list[dict], weeks: list[dict]) -> list[dict]:
                     ),
                     "savings_usd": round(-ttl["net_usd"], 2),
                     "savings_window": "kỳ này",
+                    "evidence": [
+                        {"label": "Phụ phí TTL 1h", "value": _money(ttl["premium_usd"])},
+                        {"label": "Tiết kiệm được", "value": _money(ttl["saved_usd"])},
+                        {
+                            "label": "Lượt sau 5–60 phút",
+                            "value": f"{round((ttl['share_5m_to_1h'] or 0) * 100)}%",
+                        },
+                    ],
+                    "actions": [
+                        "Đặt CACHE_EXTEND_TTL=false trong /config."
+                        if by_proxy
+                        else "Đặt CACHE_FORCE_TTL=5m trong /config.",
+                        "Kiểm tra lại dòng Cache TTL 1h dưới mục này sau một tuần.",
+                    ],
+                    "effort": "low",
+                    "confidence": "high",
                 }
             )
         else:
@@ -547,6 +623,13 @@ def recommendations(units: list[dict], weeks: list[dict]) -> list[dict]:
                     ),
                     "savings_usd": None,
                     "savings_window": None,
+                    "evidence": [
+                        {"label": "Tiết kiệm được", "value": _money(ttl["saved_usd"])},
+                        {"label": "Phụ phí TTL 1h", "value": _money(ttl["premium_usd"])},
+                    ],
+                    "actions": ["Không cần làm gì."],
+                    "effort": "low",
+                    "confidence": "high",
                 }
             )
 
@@ -571,6 +654,17 @@ def recommendations(units: list[dict], weeks: list[dict]) -> list[dict]:
                     ),
                     "savings_usd": None,
                     "savings_window": None,
+                    "evidence": [
+                        {"label": "Chi phí / phiên", "value": _money(c)},
+                        {"label": "Mức chung", "value": _money(median_cps)},
+                        {"label": "Số phiên", "value": f"{u['sessions']:,}"},
+                    ],
+                    "actions": [
+                        "Chia việc lớn thành nhiều phiên ngắn, mỗi phiên một mục tiêu.",
+                        "Dùng /compact khi context đã dài, /clear khi chuyển việc.",
+                    ],
+                    "effort": "medium",
+                    "confidence": "low",
                 }
             )
 
@@ -593,6 +687,20 @@ def recommendations(units: list[dict], weeks: list[dict]) -> list[dict]:
                 ),
                 "savings_usd": None,
                 "savings_window": None,
+                "evidence": [
+                    {"label": "Tỉ lệ lỗi tool", "value": f"{round(err * 100)}%"},
+                    {
+                        "label": "Lỗi / tổng",
+                        "value": f"{raw['tool_errors']:,} / {raw['tool_results']:,}",
+                    },
+                ],
+                "actions": [
+                    "Ghi đúng lệnh build/test/lint vào CLAUDE.md.",
+                    "Cấp quyền cho các lệnh hay bị từ chối (settings.json → permissions).",
+                    "Kiểm tra đường dẫn và môi trường (venv, node_modules) của dự án.",
+                ],
+                "effort": "medium",
+                "confidence": "medium",
             }
         )
 
@@ -616,12 +724,244 @@ def recommendations(units: list[dict], weeks: list[dict]) -> list[dict]:
                     ),
                     "savings_usd": None,
                     "savings_window": None,
+                    "evidence": [
+                        {"label": f"Tuần {last['week']}", "value": _money(last["cost_usd"])},
+                        {"label": f"Tuần {prev['week']}", "value": _money(prev["cost_usd"])},
+                        {
+                            "label": "Request",
+                            "value": f"{prev['requests']:,} → {last['requests']:,}",
+                        },
+                    ],
+                    "actions": [
+                        f"Mở tab Activity, xem {who} nào tăng nhiều nhất.",
+                        "Xác nhận mức tăng là do khối lượng việc, không phải do phiên lỗi hoặc lặp.",
+                    ],
+                    "effort": "low",
+                    "confidence": "high",
                 }
             )
 
-    order = {"warn": 0, "info": 1}
-    recs.sort(key=lambda r: (-(r["savings_usd"] or 0), order.get(r["severity"], 2)))
-    return recs[:12]
+    recs.extend(capacity_recommendations())
+
+    for r in recs:
+        _finalize(r)
+        _apply_mark(r)
+    order = {"high": 0, "medium": 1, "low": 2}
+    recs.sort(key=lambda r: (order[r["priority"]], -(r["savings_usd"] or 0)))
+    return recs[:MAX_RECS]
+
+
+MAX_RECS = 16
+REC_STATUSES = ("done", "dismissed", "snoozed")
+MAX_REC_MARKS = 500
+SNOOZE_DAYS_MAX = 90
+CATEGORY = {
+    "model": "cost",
+    "cache": "cost",
+    "context": "cost",
+    "session": "usage",
+    "reliability": "reliability",
+    "trend": "usage",
+    "capacity": "capacity",
+}
+
+
+def _finalize(r: dict) -> None:
+    """Fields every recommendation carries, derived from what the rule set."""
+    r.setdefault("evidence", [])
+    r.setdefault("actions", [])
+    r.setdefault("effort", "medium")
+    r.setdefault("confidence", "medium")
+    r["id"] = f"{r['kind']}:{r['scope']}:{r['target']}"
+    r["category"] = CATEGORY.get(r["kind"], "usage")
+    saving = r.get("savings_usd") or 0
+    if "priority" not in r:
+        if (r["severity"] == "warn" and saving >= 20) or saving >= 100:
+            r["priority"] = "high"
+        elif r["severity"] == "warn" or saving >= 5:
+            r["priority"] = "medium"
+        else:
+            r["priority"] = "low"
+
+
+def _apply_mark(r: dict) -> None:
+    """Status an admin set on this recommendation; a lapsed snooze is open."""
+    m = state.coach_stats.get("rec_marks", {}).get(r["id"])
+    r["status"], r["status_at"], r["snoozed_until"] = "open", None, None
+    if not m:
+        return
+    if m["status"] == "snoozed":
+        until = m.get("until") or ""
+        if until <= datetime.now().isoformat(timespec="seconds"):
+            return
+        r["snoozed_until"] = until
+    r["status"] = m["status"]
+    r["status_at"] = m.get("at")
+
+
+def set_rec_status(rec_id: str, status: str, days: int = 7) -> dict:
+    """Mark a recommendation done, dismissed, snoozed for ``days``, or open
+    again. Marks are kept by id, so the same advice coming back on a later
+    day keeps its status."""
+    marks = state.coach_stats.setdefault("rec_marks", {})
+    now = datetime.now()
+    if status == "open":
+        marks.pop(rec_id, None)
+        return {"id": rec_id, "status": "open"}
+    if status not in REC_STATUSES:
+        raise ValueError(f"unknown status {status!r}")
+    mark = {"status": status, "at": now.isoformat(timespec="seconds")}
+    if status == "snoozed":
+        days = max(1, min(int(days), SNOOZE_DAYS_MAX))
+        mark["until"] = (now + timedelta(days=days)).isoformat(timespec="seconds")
+    marks[rec_id] = mark
+    while len(marks) > MAX_REC_MARKS:
+        del marks[min(marks, key=lambda k: marks[k].get("at") or "")]
+    return {"id": rec_id, **mark}
+
+
+# ---------------------------------------------------------------------------
+# Subscription capacity
+# ---------------------------------------------------------------------------
+
+HOT_UTILIZATION = 0.8  # a window at or above this is close to its limit
+COOL_UTILIZATION = 0.5  # every window at or below this has room to spare
+_WINDOW_SEC = {"5h": 5 * 3600, "7d": 7 * 86400, "7d_opus": 7 * 86400, "7d_sonnet": 7 * 86400}
+_WINDOW_NAME = {"5h": "5 giờ", "7d": "tuần", "7d_opus": "tuần (Opus)", "7d_sonnet": "tuần (Sonnet)"}
+
+
+def _live_windows(acct: dict) -> list[dict]:
+    """Windows that have not reset since their headers were captured, with
+    the share of the window elapsed and a projection to its end."""
+    now = datetime.now()
+    out = []
+    for w in acct["rate_limits"]["unified"]:
+        try:
+            reset = datetime.fromisoformat(str(w["reset"]))
+        except (TypeError, ValueError):
+            continue
+        left = (reset - now).total_seconds()
+        if left <= 0:
+            continue
+        span = _WINDOW_SEC.get(w["window"])
+        elapsed = max(0.0, span - left) / span if span else None
+        projected = (
+            w["utilization"] / elapsed if elapsed and elapsed > 0.1 and w["utilization"] else None
+        )
+        out.append({**w, "left_s": left, "elapsed": elapsed, "projected": projected})
+    return out
+
+
+def _fmt_left(seconds: float) -> str:
+    if seconds < 3600:
+        return f"{round(seconds / 60)} phút"
+    if seconds < 86400:
+        return f"{seconds / 3600:.0f} giờ"
+    return f"{seconds / 86400:.1f} ngày"
+
+
+def capacity_recommendations() -> list[dict]:
+    """Balance members across the Claude subscriptions behind the proxy: an
+    account near (or projected past) its limit next to one with room."""
+    recs: list[dict] = []
+    accts = [a for a in accounts_view() if a["rate_limits"]["unified"]]
+    if not accts:
+        return recs
+    state_of = {}
+    for a in accts:
+        live = _live_windows(a)
+        peak = max(live, key=lambda w: w["utilization"], default=None)
+        weekly = [w for w in live if w["window"].startswith("7d")]
+        over_pace = [w for w in weekly if (w["projected"] or 0) >= 1.0]
+        state_of[a["id"]] = {
+            "live": live,
+            "peak": peak,
+            "hot": bool(peak and peak["utilization"] >= HOT_UTILIZATION) or bool(over_pace),
+            "over_pace": over_pace,
+            "cool": bool(live) and all(w["utilization"] <= COOL_UTILIZATION for w in live),
+        }
+    cool = sorted(
+        (a for a in accts if state_of[a["id"]]["cool"]),
+        key=lambda a: max(w["utilization"] for w in state_of[a["id"]]["live"]),
+    )
+    hot = [a for a in accts if state_of[a["id"]]["hot"]]
+    for a in hot:
+        st = state_of[a["id"]]
+        peak = st["peak"]
+        pace = st["over_pace"][0] if st["over_pace"] else None
+        w = peak if peak["utilization"] >= HOT_UTILIZATION else pace
+        name = _WINDOW_NAME.get(w["window"], w["window"])
+        members = [m for m in a["members"] if m["user"] != "(unlabeled)"]
+        total = sum(m["cost_usd"] or 0 for m in members) or sum(m["requests"] for m in members)
+
+        def share(m: dict, total: float = total) -> float:
+            v = m["cost_usd"] if m["cost_usd"] is not None else m["requests"]
+            return v / total if total else 0.0
+
+        heavy = [m for m in members if share(m) >= 0.15][:3]
+        evidence = [
+            {"label": f"Cửa sổ {name}", "value": f"{round(w['utilization'] * 100)}% đã dùng"},
+            {"label": "Reset sau", "value": _fmt_left(w["left_s"])},
+        ]
+        if w.get("projected") and w["projected"] >= 1.0:
+            evidence.append(
+                {"label": "Dự báo cuối kỳ", "value": f"{round(min(w['projected'], 9.99) * 100)}%"}
+            )
+        evidence += [
+            {"label": m["user"], "value": f"{round(share(m) * 100)}% mức dùng"} for m in heavy
+        ]
+        critical = w["utilization"] >= 0.95 or a["rate_limits"]["unified_status"] == "rejected"
+        target = cool[0] if cool and cool[0]["id"] != a["id"] else None
+        movers = ", ".join(m["user"] for m in heavy) or "một vài thành viên"
+        if target:
+            tw = max(state_of[target["id"]]["live"], key=lambda x: x["utilization"])
+            evidence.append(
+                {
+                    "label": f"{target['label']} (còn trống)",
+                    "value": f"{round(tw['utilization'] * 100)}% đã dùng",
+                }
+            )
+            title = f"{a['label']}: cửa sổ {name} {round(w['utilization'] * 100)}% — chuyển bớt sang {target['label']}"
+            detail = (
+                f"{a['label']} sắp chạm giới hạn {name} (reset sau {_fmt_left(w['left_s'])}), trong khi "
+                f"{target['label']} mới dùng {round(tw['utilization'] * 100)}%. Chuyển {movers} sang "
+                f"{target['label']} để không ai bị chặn giữa phiên."
+            )
+            actions = [
+                f"Yêu cầu {movers} đăng nhập lại Claude Code bằng {target['label']} (/login).",
+                f"Theo dõi panel Rate limits: {a['label']} nên giảm dưới {round(HOT_UTILIZATION * 100)}%.",
+                "Cập nhật ACCOUNT_LABELS nếu subscription chưa có tên dễ nhận biết.",
+            ]
+        else:
+            title = f"{a['label']}: cửa sổ {name} {round(w['utilization'] * 100)}%, không còn subscription trống"
+            detail = (
+                f"{a['label']} sắp chạm giới hạn {name} và không subscription nào khác còn dưới "
+                f"{round(COOL_UTILIZATION * 100)}%. Giãn việc nặng sang sau khi reset "
+                f"({_fmt_left(w['left_s'])}) hoặc cân nhắc thêm subscription."
+            )
+            actions = [
+                f"Ưu tiên việc quan trọng; dời việc nặng sang sau khi reset ({_fmt_left(w['left_s'])}).",
+                f"Chuyển {movers} sang model rẻ hơn (Sonnet) cho việc thường ngày.",
+                "Nếu tình trạng lặp lại hàng tuần, cân nhắc thêm một subscription.",
+            ]
+        recs.append(
+            {
+                "kind": "capacity",
+                "severity": "warn",
+                "priority": "high" if critical else "medium",
+                "scope": "subscription",
+                "target": a["label"],
+                "title": title,
+                "detail": detail,
+                "savings_usd": None,
+                "savings_window": None,
+                "evidence": evidence,
+                "actions": actions,
+                "effort": "low" if target else "medium",
+                "confidence": "high" if w["utilization"] >= HOT_UTILIZATION else "medium",
+            }
+        )
+    return recs
 
 
 def coach_insights() -> dict:

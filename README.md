@@ -414,6 +414,8 @@ The four parts of the **Activity** view:
 
 **Several Claude accounts.** When clients log in with different Claude subscriptions, the proxy tells them apart by the account UUID Claude Code puts in each request's `metadata.user_id` (falling back to the `anthropic-organization-id` response header). Each account gets its own 5-hour and weekly limit bars, its spend this month and the users routed through it, under `accounts` in `/quota`. Accounts show as the first 8 characters of their id; name them with `ACCOUNT_LABELS=3f2a9c1d:team-max-1,b71e0f44:team-max-2`. Only the UUID is stored, never a token.
 
+The **Users** view has a **Subscriptions by member** table: one row per member, one column per subscription, and in each cell what that member used on that subscription this period (spend, requests or tokens). Members on more than one subscription are flagged, and **CSV** exports one row per member and subscription. The same breakdown is under `accounts[].members` in `/quota`. Traffic without a user label is counted as `(unlabeled)`, so the members add up to the account's total.
+
 **Alerts** fire for:
 - a `retry-after` from Anthropic
 - a rate limit below 30% or 10%
@@ -526,7 +528,7 @@ The coach also keeps its counters **per ISO week and per user** (`by_week`, `by_
 
 - **Weekly trend** — for each of the last 8 weeks: spend, change vs the previous week, requests, sessions, $/session, $/request, cache hit rate, tool-error rate and reads per edit. The current week is marked as in progress.
 - **Comparison** — per group when `USER_GROUPS` is set, otherwise per user. Every column, the model mix included, covers the same last 30 days: spend, sessions, $/session, $/request, cache hit rate, share of spend on Opus/Fable, tool-error rate, reads per edit and a score. The dashboard marks the best and weakest value in each column.
-- **Recommendations**, sorted by estimated savings. Each is computed from the tokens actually sent and the live price table:
+- **Recommendations**, sorted by priority (high / medium / low), then by estimated savings. Each is computed from the tokens actually sent and the live price table. Each one also carries a category (cost, capacity, usage or reliability), the figures behind it, a step-by-step action plan, an effort level and a confidence level:
 
 | Advice | Fires when | Savings estimate |
 |---|---|---|
@@ -537,8 +539,11 @@ The coach also keeps its counters **per ISO week and per user** (`by_week`, `by_
 | Expensive sessions | $/session > 2× the team median (≥ 3 sessions, ≥ $1) | — |
 | Tool errors | > 15% of ≥ 50 tool results failed | — |
 | Spend jump | a complete week is ≥ 30% and ≥ $5 above the one before | — |
+| Rebalance subscriptions | a subscription's live window is ≥ 80% used, or its weekly window is on pace to pass 100% before it resets | — (names the heaviest members and a subscription with every window ≤ 50%, if any) |
 
 Savings figures say what the same traffic would have cost on another model or with a better cache hit rate. They are not a judgement that the cheaper model would have done the work equally well, and several of them can describe the same spend, so they are shown individually, never summed. Advice text is in Vietnamese, like the tips.
+
+On the dashboard, recommendations can be filtered by category and marked **Done**, **Snoozed** (7 days) or **Dismissed**. The marks are stored on the proxy (in `.coach.json`), so every admin sees the same list. Marking needs an `ADMIN_IPS` address. A snooze lapses back to open after 7 days, and a mark follows the advice by id when it reappears on a later day. Each card links to the view it concerns, and **CSV** exports the list with its evidence and steps.
 
 ### Where to see it
 
@@ -867,6 +872,7 @@ tests/                     # pytest suite + golden endpoint snapshots
 | `GET /u/{label}/whoami` | Client self-check: confirms the caller is admitted + the label is parsed + the cap is what the operator set. `label` is the label that will actually be billed (a proxy key outranks the URL prefix); `url_label` echoes what was asked |
 | `GET /whoami` | Same self-check without a label — answers for whoever the caller turned out to be. Handy behind a key: `curl https://vm/k/<key>/whoami` |
 | `POST /admin/quota/reset/{label}` | Reset a user's counters (loopback / `ADMIN_IPS` only) |
+| `POST /admin/coach/recommendations` | Mark a recommendation: `{"id": "…", "status": "done\|dismissed\|snoozed\|open", "days": 7}` (`ADMIN_IPS` only) |
 | `* /u/{label}/{path}` | Same as `* /{path}` but accounts the request to `<label>` regardless of source IP |
 | `* /k/{key}/{path}` | Same as `* /{path}`, authenticated by a proxy key: admitted from any address and accounted to the key's user (`PROXY_KEYS_ENABLED`) |
 | `GET /keys` | Proxy-key console — `ADMIN_IPS` only; read-only until you sign in with `ADMIN_TOKEN` |

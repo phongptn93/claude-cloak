@@ -127,6 +127,41 @@ Notable changes to Claude Cloak. Format follows
   the Rate limits panel showed whichever account answered last.
   `ACCOUNT_LABELS` names accounts; overview alerts fire at 75% / 90% of a
   window.
+- **Subscriptions by member** (Users view): a members × subscriptions table
+  of what each member used on each Claude subscription this period. It can
+  show spend, requests or tokens, flags members on more than one
+  subscription, and exports to CSV. Backed by `accounts[].members` in
+  `/quota` (requests, cost, tokens, first and last seen per member). Buckets
+  saved before this release only have request counts.
+- **Subscriptions by member** also shows each member's % share of every
+  subscription, plus each member's and subscription's % share of the total.
+- **Recommendations upgrade:**
+  - Each recommendation now carries an `id`, `priority`, `category`,
+    `evidence` figures, `actions` steps, `effort` and `confidence`.
+  - They are sorted by priority, then by savings.
+  - New **capacity** rule: a subscription near its limit, or on pace to pass
+    its weekly limit, gets advice to move its heaviest members to a
+    subscription with room (or, if there is none, to defer work or add one).
+  - The Insights view has a priority summary, category and status filters,
+    an evidence grid, an action plan, a link to the related view, Done /
+    Snooze 7d / Dismiss and a CSV export.
+  - Done / Snooze / Dismiss marks are shared by every admin. They are stored
+    in `.coach.json` (`rec_marks`), set through `POST
+    /admin/coach/recommendations` (`ADMIN_IPS` only), and returned on each
+    recommendation as `status`, `status_at` and `snoozed_until`.
+- **Rate limits panel upgrade:**
+  - Each account shows a status badge: available, near limit, limited (with
+    the time until it unblocks) or stale.
+  - Accounts are sorted most-constrained first, with a summary row above them.
+  - A window whose reset time has passed shows greyed out as "was N% · reset
+    Xh ago", instead of an old figure next to "resets now". Its overview
+    alert no longer fires.
+  - A stale `rejected` status is shown as lifted once the exhausted window has
+    reset.
+  - Each bar has a marker for how much of the window has elapsed.
+  - "cap in ~X" appears when the burn rate so far would exhaust a window that
+    is already 50% or more used before it resets.
+  - Reset times read "in 2d 5h" (the exact time is in the tooltip).
 
 ### Fixed (pricing)
 

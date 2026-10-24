@@ -8,7 +8,7 @@ import time
 from datetime import datetime
 
 from . import settings, state
-from .coach_insights import coach_insights
+from .coach_insights import REC_STATUSES, coach_insights
 from .constants import COACH_EDIT_TOOLS, COACH_READ_TOOLS
 
 MAX_COACH_WEEKS = 12
@@ -151,6 +151,13 @@ def _load_coach_stats() -> bool:
                 for k, b in v.items()
                 if isinstance(b, dict)
             }
+    marks = data.get("rec_marks")
+    if isinstance(marks, dict):
+        state.coach_stats["rec_marks"] = {
+            str(k): m
+            for k, m in marks.items()
+            if isinstance(m, dict) and m.get("status") in REC_STATUSES
+        }
     for key in ("tool_results_seen", "tool_errors", "assistant_turns"):
         v = data.get(key)
         if isinstance(v, int):
